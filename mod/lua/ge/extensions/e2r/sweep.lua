@@ -842,6 +842,12 @@ function M.plan(data, opts)
               local far = a.stop - sigma * L
               S.zones[#S.zones + 1] = {a = min(a.stop, far), b = max(a.stop, far), kind = 'solid', ap = ap}
             end
+            -- no lane or centre line over a crossing (they stop at a zebra or a Furt: memory of the RMS, NOT verified): a
+            -- crossing that leaves the stop line in place, further up the approach, had the centre line across it, and a
+            -- leaving one-way road's crossing has no stop line before it
+            for _, cr in ipairs(a.crossings) do
+              S.zones[#S.zones + 1] = {a = cr.s - cr.width / 2, b = cr.s + cr.width / 2, kind = 'clear', ap = ap}
+            end
           end
         end
       end

@@ -191,8 +191,20 @@ class Approaches(unittest.TestCase):
         a = [a for a in r['approaches'] if a['stroke'] == 'B' and a['dir'] == -1][0]
         self.assertEqual(a['control'], 'give_way')
         self.assertEqual([c['kind'] for c in a['crossings']], ['zebra'])
-        # the line stands upstream of the zebra (travel +s on B: the stop s is smaller than the zebra's)
+        # the give-way line stands at the major road's edge (A is 3.5 m wide each side of the node, B's node at s 80), the
+        # zebra outside the surface behind it (travel +s on B: the zebra's s is smaller than the line's)
         z = a['crossings'][0]
+        self.assertAlmostEqual(80. - a['stop'], 3.5 + fj.CLEAR + fj.STOP_BEFORE, delta=.3)
+        self.assertLess(z['s'] + z['width'] / 2, a['stop'])
+        # a signalled junction's stop line stands before the surface, and before a crossing next to it
+        ex = fj.inputs({'controls': [(7, {'highway': 'traffic_signals'}, 0., 0.)],
+                        'crossings': [(9, ({'footway': 'crossing', 'crossing': 'traffic_signals'},),
+                                       np.array([[-6., -cut - 4.], [6., -cut - 4.]]))]})
+        recs[0]['node'] = '7'
+        r = fj.junction(['7'], recs, V, ex)
+        a = [a for a in r['approaches'] if a['stroke'] == 'B' and a['dir'] == -1][0]
+        z = a['crossings'][0]
+        self.assertEqual((a['control'], z['kind']), ('signals', 'signals'))
         self.assertLess(a['stop'], z['s'] - z['width'] / 2)
 
     def test_turn_lanes_of_the_approach(self):

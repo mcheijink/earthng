@@ -514,6 +514,7 @@ def junction(cluster, records, views, extras=None):
                     s_, _ = _project(v, P, min(m['s'], m['s'] + m['dir'] * m['long']), max(m['s'], m['s'] + m['dir'] * m['long']))
                     ext = max(ext, float(np.max((s_ - m['s']) * m['dir'])) + CUT_MARGIN)
         m['cut'] = round(min(m['maxcut'], max(need, ext, 1.0)), 2)
+        m['clear'] = min(m['cut'], max(need, 1.0))   # where the mouth leaves the other roads' paved area (their edge + CLEAR)
         m['sc'] = m['s'] + m['dir'] * m['cut']
         m['L'], m['C'], m['R'] = v.section(m['sc'])
     # the surface: strips to the cuts, internal strips, fillets; clipped to the hull of the cut rows
@@ -757,14 +758,15 @@ def _direction_ok(tags, forward_travel):
 
 
 def approaches(record, mouths, majors, views, extras, ring_kind):
-    """the inbound approaches of a junction record, and whether it is signalled"""
+    """the inbound approaches of a junction record (and the crossings of the one-way roads leaving it, as approaches
+    without control), and whether it is signalled"""
     controls = (extras or {}).get('controls', ())
     crossings = (extras or {}).get('crossings', ())
     nodes = set(record['nodes'])
     cluster_signals = any(str(nid) in nodes and tags.get('highway') == 'traffic_signals' for nid, tags, _, _ in controls)
     major_rank = max(rank(views[s_].highway) for s_ in majors)
     priority = any(str(views[s_].parts[0][3].get('priority_road', '')) in ('designated', 'yes_unposted') for s_ in majors)
-    out = []
+    out, leaving = [], set()
     near = []
     cx, cy = record['xyz'][0], record['xyz'][1]
     for nid, tags, x, y in controls:
@@ -783,10 +785,11 @@ def approaches(record, mouths, majors, views, extras, ring_kind):
         v = m['v']
         # inbound: traffic travels towards the node along this mouth
         inbound_forward = m['dir'] < 0           # travelling in +s arrives at the node from s < node s
-        if v.oneway and not inbound_forward:
-            continue                              # a one-way road leaving the junction
+        # a one-way road leaving the junction: no line and no control, only the crossings on it (a signalled junction's
+        # Furt across the outbound carriageway of a dual carriageway was not drawn)
+        outbound = v.oneway and not inbound_forward
         control, own_signal = None, False
-        for nid, tags, x, y in near:
+        for nid, tags, x, y in ([] if outbound else near):
             s_, u = _project(v, np.asarray([[x, y]]), min(m['s'], m['s'] + m['dir'] * m['long']), max(m['s'], m['s'] + m['dir'] * m['long']))
             dist_along = (s_[0] - m['s']) * m['dir']
             if abs(u[0]) > max(v.at(s_[0], 'eL'), v.at(s_[0], 'eR')) + 1.5 or dist_along > m['cut'] + CONTROL_REACH or dist_along < -1.:
@@ -801,7 +804,9 @@ def approaches(record, mouths, majors, views, extras, ring_kind):
                 control = 'stop'
             elif hw == 'give_way' and control is None:
                 control = 'give_way'
-        if own_signal or cluster_signals:
+        if outbound:
+            control = 'none'
+        elif own_signal or cluster_signals:
             control = 'signals'
         m['_own_signal'] = own_signal
         if control is None:
@@ -849,8 +854,18 @@ def approaches(record, mouths, majors, views, extras, ring_kind):
                 continue
             kept.append(c)
         xs = kept
-        # the stop / give-way line: before the junction, or before the crossing next to it
-        stop_along = m['cut'] + STOP_BEFORE
+        if outbound:
+            if not xs:
+                continue
+            out.append({'stroke': m['stroke'], 'dir': m['dir'], 'stop': round(m['s'] + m['dir'] * m['cut'], 2), 'control': 'none',
+                        'turns': '', 'lanes': 1, 'crossings': xs})
+            leaving.add(len(out) - 1)
+            continue
+        # the stop / give-way line: before the junction, or before the crossing next to it. A give-way or stop line stands
+        # STOP_BEFORE before the edge of the road it joins (the Wartelinie in line with that road's carriageway edge: memory
+        # of the RMS, NOT verified), not before the end of the kerb fillets (cut): it stood a kerb radius back, 11 m from a
+        # roundabout's ring (synthetic R 18 m ring, secondary arms). A signalled junction's stop line keeps its place.
+        stop_along = (m['clear'] if control in ('give_way', 'stop') else m['cut']) + STOP_BEFORE
         for c in xs:
             near_edge = (c['s'] - m['s']) * m['dir'] - c['width'] / 2
             if near_edge - stop_along < 6.:
@@ -865,8 +880,9 @@ def approaches(record, mouths, majors, views, extras, ring_kind):
                     'control': control, 'turns': turns or '', 'lanes': int(max(1, lanes)), 'crossings': xs})
     signals = any(a['control'] == 'signals' for a in out)
     if signals:
-        for a in out:
-            a['control'] = 'signals'
+        for k, a in enumerate(out):
+            if k not in leaving:
+                a['control'] = 'signals'
     return out, signals
 
 
@@ -889,6 +905,11 @@ def crossing_kind(tags):
         return 'cycle', red
     if c in ('traffic_signals',) or tags.get('crossing:signals') == 'yes':
         return 'signals', red
+    # a marked pedestrian crossing without signals is a zebra (StVO Z 293 Fussgaengerueberweg is the only marking for one;
+    # the Furt's two dashed lines are for signalled crossings: memory, NOT verified against the text) unless its markings
+    # are mapped as something else
+    if c in ('marked', 'uncontrolled') and marks in ('', 'yes'):
+        return 'zebra', red
     if c in ('marked', 'uncontrolled') or marks not in ('', 'no'):
         return 'marked', red
     return None, False
