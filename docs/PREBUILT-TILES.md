@@ -254,6 +254,7 @@ All of these are generated as before. A far tile is read from the bake only whil
   - the digest of the region manifest, so a re-exported pack drops an old bake;
   - the digests of the eight Lua files that shape these layers (`bake.CODE`);
   - the digests of every climate block the bake read;
+  - every game file the bake took as present: the stock shapes and decal maps the generator checks for. The generator's output depends on which of them a game has, so the baker answers yes to each, as a full install does, and lists them. A game that lacks any of them does not use the bake;
   - the swept-roads switch and the height-pipeline switch.
 - The two switches are checked again for every layer.
 - A digest is FNV-1a over the bytes without CR, so LF and CRLF checkouts agree.

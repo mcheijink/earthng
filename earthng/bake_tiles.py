@@ -32,15 +32,22 @@ ROOT = Path(__file__).resolve().parent.parent
 MOD = ROOT / 'mod'
 CLIMATE = '/earthng/planet/climate/'
 LAYERS = ('far', 'horizon')
+# The game install's own files (stock shapes, decal maps, levels): the generator asks whether they are
+# there (a far tile's plants, a road's edge decals) and its output depends on the answer. The bake
+# answers yes, as a full install does, and lists every one it was asked; the game uses the bake only
+# when all of them are there (native.lua BAKED.region).
+GAME = ('/assets/', '/levels/', '/art/')
 
 
 class VFS:
     """The game's virtual file system from ZIPs and folders mounted at '/', the first mount that has
     a file wins. A folder can be mounted under a prefix (the climate blocks)."""
 
-    def __init__(self):
+    def __init__(self, missing=()):
         self.mounts = []
         self.touched = set()
+        self.game = set()
+        self.missing = set(missing)    # game files to answer as absent (tests)
 
     def mount(self, source, prefix='/', only=None):
         source = Path(source)
@@ -74,7 +81,12 @@ class VFS:
         if not isinstance(path, str):
             return False
         self._note(path)
-        return self._find(path) is not None
+        if self._find(path) is not None:
+            return True
+        if path.startswith(GAME):
+            self.game.add(path)
+            return path not in self.missing
+        return False
 
     def read(self, path):
         if not isinstance(path, str):
@@ -110,10 +122,8 @@ local realOpen = io.open
 FS = {fileExists = function(_, p) return VFS_EXISTS(p) end,
       findFiles = function(_, root, name) return VFS_FIND(root, name) end}
 io.open = function(path, mode)
-  if type(path) == 'string' and path:sub(1, 1) == '/' and VFS_EXISTS(path) then
-    local data = VFS_READ(path)
-    return {read = function() return data end, close = function() end}
-  end
+  local data = type(path) == 'string' and path:sub(1, 1) == '/' and VFS_READ(path) or nil
+  if data then return {read = function() return data end, close = function() end} end
   return realOpen(path, mode)
 end
 jsonReadFile = function(path) return VFS_JSON(path) end
@@ -240,10 +250,10 @@ def runtime(vfs):
     return L
 
 
-def mounts(packs, climate=None, extra=()):
+def mounts(packs, climate=None, extra=(), missing=()):
     """The VFS of a bake: this repository's Lua first (the code that runs is the code digested),
-    then the climate blocks, extra mounts and the packs."""
-    vfs = VFS()
+    then the climate blocks, extra mounts and the packs. missing: game files answered as absent."""
+    vfs = VFS(missing)
     vfs.mount(MOD, '/', only='/lua/')
     if climate:
         vfs.mount(climate, CLIMATE)
@@ -284,7 +294,7 @@ def _bake_cells(task):
         path = Path(out_dir) / f'{ci}_{cj}.bin'
         count, size, failed = g.BAKECELL(ci, cj, far, horizon, str(path))
         done.append((ci, cj, count, size, list(failed.values()) if failed else []))
-    return done, sorted(_WORKER['vfs'].touched)
+    return done, sorted(_WORKER['vfs'].touched), sorted(_WORKER['vfs'].game)
 
 
 def bake_region(packs, country, region, out_dir, climate=None, extra=(), layers=LAYERS, cells=None, jobs=1,
@@ -306,25 +316,28 @@ def bake_region(packs, country, region, out_dir, climate=None, extra=(), layers=
     for ci, cj in present:
         by_block.setdefault((ci // 8, cj // 8), []).append((ci, cj))
     tasks = [(c[k:k + 8], far, horizon, str(out_dir)) for _, c in sorted(by_block.items()) for k in range(0, len(c), 8)]
-    started, results, touched = time.time(), [], set(_WORKER['vfs'].touched)
+    started, results, touched, game = time.time(), [], set(_WORKER['vfs'].touched), set(_WORKER['vfs'].game)
     if jobs > 1 and len(tasks) > 1:
         import multiprocessing
         with multiprocessing.get_context('spawn').Pool(jobs, _worker_init, (packs, climate, extra, country, region, settings)) as pool:
-            for done, seen in pool.imap_unordered(_bake_cells, tasks):
+            for done, seen, asked in pool.imap_unordered(_bake_cells, tasks):
                 results.extend(done)
                 touched.update(seen)
+                game.update(asked)
                 report(f'  {len(results)} / {len(present)} cells')
     else:
         for task in tasks:
-            done, seen = _bake_cells(task)
+            done, seen, asked = _bake_cells(task)
             results.extend(done)
             touched.update(seen)
+            game.update(asked)
             report(f'  {len(results)} / {len(present)} cells')
     failures = [f for r in results for f in r[4]]
     for f in failures[:20]:
         report('  failed: ' + f)
     vfs = _WORKER['vfs']
     touched.update(vfs.touched)
+    game.update(vfs.game)
     s = info.settings
     baked = {
         'format': g.BAKE.FORMAT, 'version': g.BAKE.VERSION,
@@ -334,6 +347,7 @@ def bake_region(packs, country, region, out_dir, climate=None, extra=(), layers=
         'settings': {'swept': bool(s.swept), 'heights': bool(s.heights), **({'sweptMode': s.sweptMode} if s.sweptMode else {})},
         'code': {path: g.DIGEST(path) for path in g.BAKE.CODE.values()},
         'climate': {path: g.DIGEST(path) for path in sorted(touched) if path.startswith(CLIMATE)},
+        'game': sorted(game),
         'cells': sum(1 for r in results if r[2]), 'bytes': sum(r[3] for r in results),
         'failed': len(failures), 'seconds': round(time.time() - started, 1),
     }

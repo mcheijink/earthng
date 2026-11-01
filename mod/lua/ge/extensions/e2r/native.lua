@@ -1063,7 +1063,8 @@ end
 -- baked/<region id>/baked.json and one <ci>_<cj>.bin per source cell (earthng/bake_tiles.py), so it
 -- can ship as its own small ZIP and the pack is not rewritten. A layer is read from it instead of
 -- generated when baked.json was made from this region manifest, with this Lua, these switches and
--- the same climate blocks, and its cell file holds the layer. Anything else (no bake, a stale digest,
+-- the same climate blocks, every game file it took as there (stock shapes, decal maps) is there, and
+-- its cell file holds the layer. Anything else (no bake, a stale digest,
 -- a missing cell, a bad byte) leaves that layer to the generator, as before. The far ring's decor
 -- (buildings and trees when the car is slow) and the vista are never baked. state.stream.baked
 -- counts what happened.
@@ -1097,6 +1098,12 @@ function BAKED.region()
   for _, path in ipairs(bake.CODE) do
     local data = exists(path) and readBytes(path) or nil
     if bake.digest(data, a.pause) ~= b.code[path] then return off('the bake was made with another ' .. path) end
+  end
+  -- the game's own files the bake took as there (stock shapes, decal maps): a game without one of
+  -- them would generate these layers otherwise
+  if type(b.game) ~= 'table' then return off('the bake has no list of game files') end
+  for _, path in ipairs(b.game) do
+    if type(path) ~= 'string' or not exists(path) then return off('the game lacks ' .. tostring(path)) end
   end
   for path, digest in pairs(b.climate) do
     if type(path) ~= 'string' or path:sub(1, #BAKED.CLIMATE) ~= BAKED.CLIMATE or path:find('..', 1, true) then return off('invalid climate path') end

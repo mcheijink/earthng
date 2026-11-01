@@ -167,8 +167,8 @@ class Baked(unittest.TestCase):
         for name, data in self.pristine.items():
             (self.baked_dir / name).write_bytes(data)
 
-    def runtime(self, on=True):
-        vfs = self.bt.mounts([self.pack, self.addon])
+    def runtime(self, on=True, missing=()):
+        vfs = self.bt.mounts([self.pack, self.addon], missing=missing)
         L = self.bt.runtime(vfs)
         g = L.globals()
         g.TEST_COUNTRY, g.TEST_REGION = COUNTRY, REGION
@@ -187,6 +187,8 @@ class Baked(unittest.TestCase):
         self.assertEqual(sorted(b['layers']), ['far', 'horizon'])
         self.assertTrue(all(':' in d for d in b['code'].values()) and 'missing' not in b['code'].values())
         self.assertEqual(len(b['code']), 8)
+        # the stock shapes and decal maps the generator asked for, taken as there
+        self.assertTrue(b['game'] and all(p.startswith(('/assets/', '/levels/', '/art/')) for p in b['game']))
         L, g = self.runtime()
         # 4 far tiles, 4 horizon quadrants and one 1 km horizon block in a 1 km cell
         data = (self.baked_dir / '1_1.bin').read_bytes()
@@ -232,6 +234,11 @@ class Baked(unittest.TestCase):
         (self.baked_dir / 'baked.json').write_text(json.dumps(b))
         L, g = self.runtime()
         self.assertIn('another ' + path, self.off_reason(L, g))
+
+    def test_a_game_without_a_file_the_bake_took_as_there_is_not_used(self):
+        path = self.baked['game'][0]
+        L, g = self.runtime(missing=[path])
+        self.assertIn('the game lacks ' + path, self.off_reason(L, g))
 
     def test_another_export_of_the_region_is_not_used(self):
         b = json.loads((self.baked_dir / 'baked.json').read_text())
@@ -352,34 +359,36 @@ class Baked(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_LUPA, 'needs lupa (pip install lupa)')
 class FarInputs(unittest.TestCase):
-    """The premise of baking the far ring: without decor it reads neither the quality preset nor the
-    game install (FS checks for shapes and decal maps), on a dense synthetic town (generator_budget)."""
+    """The premise of baking the far ring and the horizon, on a dense synthetic town (generator_budget):
+    without decor they read no quality preset and no landing point. They do read the game install
+    (which stock shapes and decal maps are there), which is why a bake lists those files. Each case
+    runs in a fresh LuaJIT state: the generator keeps what it found on disk for the session."""
 
-    def test_far_and_horizon_ignore_tune_and_game_files(self):
+    def digest(self, layer, extra, files):
         import generator_budget as gb
         L, _ = gb.lua_runtime()
         g = L.globals()
         g.REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+        g.FILES = files
         L.execute("package.path = REPO_ROOT .. '/mod/lua/?.lua;' .. package.path")
+        L.execute("FS = {fileExists = function() return FILES end}")
         L.execute("GEN = require('ge/extensions/e2r/generator'); BAKE = require('ge/extensions/e2r/bake')")
         cell, _ = gb.synthetic_cell(10, random.Random(1))
-        cells = gb.to_lua(L, [cell])
-        build = L.eval(r'''function(cells, opts, files)
-          if files == 'none' then FS = nil else FS = {fileExists = function() return files == 'all' end} end
+        build = L.eval(r'''function(cells, opts)
           local _, _, far = GEN.build(cells, opts.i, opts.j, opts)
-          FS = nil
           return BAKE.digest(BAKE.encode(far))
         end''')
         base = {'tileSize': 500, 'regionId': 's', 'materials': 'm', 'packs': 'p', 'farStep': 100, 'horizonStep': 100,
                 'latitude': 0, 'seaLevel': 0, 'country': 'zz', 'heightPipeline': True, 'farDecor': False}
+        return build(gb.to_lua(L, [cell]), gb.to_lua(L, {**base, **layer, **extra}))
+
+    def test_far_and_horizon_ignore_tune_and_landing_but_not_the_game_files(self):
         tuned = {'maxTrees': 10, 'maxFarTrees': 5, 'detail': 10, 'forestSpacing': 30, 'groundSpacing': 40,
-                 'propSpacing': 99, 'parkedCars': 0, 'maxGrass': 1, 'maxRocks': 1, 'center': [100, 100]}
+                 'propSpacing': 99, 'parkedCars': 0, 'maxGrass': 1, 'maxRocks': 1, 'center': [5000, -3000]}
         for layer in ({'far': True, 'i': 0, 'j': 0}, {'far': True, 'horizon': True, 'i': 0, 'j': 0, 'tileSize': 1000}):
-            seen = set()
-            for extra in ({}, tuned):
-                for files in ('none', 'all', 'nothing'):
-                    seen.add(build(cells, gb.to_lua(L, {**base, **layer, **extra}), files))
-            self.assertEqual(len(seen), 1, layer)
+            full = self.digest(layer, {}, True)
+            self.assertEqual(self.digest(layer, tuned, True), full, layer)
+            self.assertNotEqual(self.digest(layer, {}, False), full, layer)
 
 
 def bench(repeat=3):
