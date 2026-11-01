@@ -399,13 +399,15 @@ function VEG.warm(...)
   for _, shape in ipairs({...}) do add(shape) end
   return out
 end
--- The stock material files a manifest's shapes need, sorted.
-function VEG.stockFor(items, shapes)
+-- The stock material files a manifest's shapes need, sorted. pause (optional): a pause point every 512
+-- shapes (a near scene's thousands of plants took 4-6 ms here in one piece, generator_budget.py).
+function VEG.stockFor(items, shapes, pause)
   local files, out = {}, {}
   local all = {}
   for _, item in ipairs(items) do all[#all + 1] = item.shape end
   for _, shape in ipairs(shapes or NONE) do all[#all + 1] = shape end
-  for _, shape in ipairs(all) do
+  for index, shape in ipairs(all) do
+    if pause and index % 512 == 0 then pause() end
     if type(shape) == 'string' and shape:sub(1, 8) == '/levels/' then
       local folder = shape:match('^(.*/)[^/]*$')
       local file, parent = VEG.stock[folder], VEG.stockParent[folder and folder:match('^(.*/)[^/]*/$') or '']
@@ -1512,7 +1514,9 @@ function ROADS.guardRail(ctx, path)
       if #run >= 2 and length >= rc.min then runs[#runs + 1] = run end
       run = {}
     end
+    -- ctx.pause (optional): a pause point every 8 segments (every sample is tested against every strip)
     for k = 1, #path - 1 do
+      if ctx.pause and k % 8 == 0 then ctx.pause() end
       local a, b = path[k], path[k + 1]
       local length = math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2)
       local n = math.max(1, math.ceil(length / rc.step))
@@ -1650,7 +1654,8 @@ end
 ROADS.onDeck = {reach = 3, parallel = .85, step = 2, cross = .3, across = .5}
 -- the runs of points ({x, y, ...}) off every bridge deck and carriageway in strips; nil when
 -- none is near. ground(x, y): the drawn ground, for a deck's clearance (none: decks only).
-function ROADS.offDecks(strips, points, ground)
+-- pause (optional): a pause point every 16 segments of the barrier
+function ROADS.offDecks(strips, points, ground, pause)
   local od, decks = ROADS.onDeck, nil
   local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
   for _, p in ipairs(points) do
@@ -1696,6 +1701,7 @@ function ROADS.offDecks(strips, points, ground)
   end
   local runs, run = {}, nil
   for k = 1, #points - 1 do
+    if pause and k % 16 == 0 then pause() end
     local a, b = points[k], points[k + 1]
     local n = math.max(1, math.ceil(math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2) / od.step))
     for i = 1, n do
@@ -1720,7 +1726,9 @@ end
 -- pieces under `min` m go. The kept pieces keep the rail's own vertices, so its corners round
 -- as before.
 ROADS.byRoad = {far = 4, step = 2, min = 4, hole = 10, slack = 3}
-function ROADS.besideRoads(strips, points, sidewalk)
+-- pause (optional): a pause point every 8 segments of the barrier (every sample measures the gap to
+-- every carriageway segment near the whole barrier)
+function ROADS.besideRoads(strips, points, sidewalk, pause)
   local br = ROADS.byRoad
   local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
   for _, p in ipairs(points) do
@@ -1760,6 +1768,7 @@ function ROADS.besideRoads(strips, points, sidewalk)
   end
   local samples = {}
   for k = 1, #points - 1 do
+    if pause and k % 8 == 0 then pause() end
     local a, b = points[k], points[k + 1]
     local n = math.max(1, math.ceil(math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2) / br.step))
     for i = k == 1 and 0 or 1, n do
@@ -3895,10 +3904,13 @@ local function collect(cells, pause)
     end
   end
   lists.lines = lines
+  -- a pause point after each sort: a sort cannot yield, and a dense cell's thousands of roads or
+  -- buildings sort in one piece
   for _, list in pairs(lists) do
     local ids = {}
     for _, feature in ipairs(list) do ids[feature] = tostring(feature.id or '') end
     table.sort(list, function(a, b) return ids[a] < ids[b] end)
+    pause()
   end
   return lists, terrain
 end
@@ -4055,6 +4067,9 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
       end
     end
   end
+  -- the bins of a city's thousands of buildings, then its footprints, then the keep-out bands: 8 ms in
+  -- one piece before the first pause point (generator_budget.py)
+  pause()
   -- the ground a point stands on (park, square, paved, residential...) from the mapped areas,
   -- and the 50 m bins with a building in them (a town, not a field or a forest)
   local grounds, built, squares = {}, {}, {}
@@ -4097,6 +4112,7 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
       bin.tall = bin.tall or (building.height or 0) >= 12 or FLATS[(building.tags or NONE).building] or false
     end
   end
+  pause()
   -- the most particular ground wins: a park drawn inside a residential area is a park
   local RANK = {square = 1, park = 2, forest = 3, meadow = 4, paved = 5, residential = 6}
   local function groundAt(x, y)
@@ -4207,6 +4223,7 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
       for k = 1, #points - 1 do band(paths, points[k], points[k + 1], r) end
     end
   end
+  pause()
   for _, strip in ipairs(strips) do
     if strip.surface then
       for k = 1, #strip.points - 1 do
@@ -7967,7 +7984,8 @@ local function build(cells, i, j, options)
                 end
               end
               cutOps = cutOps + 1
-              if cutOps % 256 == 0 then pause() end
+              -- 256 cuts of a town's sidewalks ran 8 ms in one piece (generator_budget.py)
+              if cutOps % 64 == 0 then pause() end
             end
             if cut then pieces = out end
             if #pieces == 0 then return pieces end
@@ -8114,7 +8132,10 @@ local function build(cells, i, j, options)
           end
         end
       end
-      if k % 32 == 0 then pause() end
+      -- a town street's sidewalk and verge pieces are each cut by the asphalt round them, and a far
+      -- tile's section skirts sample the DEM: 32 segments ran 16 ms in one piece, 8 up to 6.4 ms
+      -- (generator_budget.py)
+      if k % 4 == 0 then pause() end
     end
     pause()
   end
@@ -8129,6 +8150,9 @@ local function build(cells, i, j, options)
   -- One sample count for every strip: a city's short strips never reached a per-strip k % 16.
   -- A bridge's deck too: the ground pulled to its approach's end height stood up to 13 cm through
   -- a deck that falls away from its abutment (a motorway viaduct: a jolt on entering it).
+  -- press() calls since the last pause point, one every 256 of them: the strips' 7 a sample at 128 samples
+  -- ran up to 3.5 ms in one piece, the verge polygons' (pressPoly, 10-40 a polygon) at 128 polygons 13.6 ms
+  -- and at 512 presses 6.6 ms (generator_budget.py)
   local pressed = 0
   for _, strip in ipairs(strips) do
     if strip.surface or ROADS.bridge(strip.tags) then
@@ -8149,8 +8173,8 @@ local function build(cells, i, j, options)
             for _, offset in ipairs({-right, -hw, -hw * .5, 0, hw * .5, hw, left}) do
               press(x + nx * offset, y + ny * offset, z)
             end
-            pressed = pressed + 1
-            if pressed % 128 == 0 then pause() end
+            pressed = pressed + 7
+            if pressed >= 256 then pressed = 0; pause() end
           end
         end
       end
@@ -8200,8 +8224,8 @@ local function build(cells, i, j, options)
           press(r[1], r[2], r[3] - ROADS.section.margin, true)
         end
       end
-      pressed = pressed + 1
-      if pressed % 128 == 0 then pause() end
+      pressed = pressed + (na + 1) * (nb + 1)
+      if pressed >= 256 then pressed = 0; pause() end
     end
     for _, strip in ipairs(strips) do
       for _, item in ipairs(strip.verges or NONE) do pressPoly(item[1]) end
@@ -8347,7 +8371,9 @@ local function build(cells, i, j, options)
     if not distant then return true end
     return not options.horizon and not (box[1] >= inner[1] and box[2] >= inner[2] and box[3] <= inner[3] and box[4] <= inner[4])
   end
-  for _, plate in ipairs(plates) do
+  -- the first verges shade a cold normal cache: 16 plates ran 9 ms in one piece on a far tile (generator_budget.py)
+  for index, plate in ipairs(plates) do
+    if index % 4 == 0 then pause() end
     for _, quad in ipairs(plate.verges or NONE) do
       if vergeWanted(ringBounds({quad})) then
         local outerA = {quad[3][1], quad[3][2], ground(quad[3][1], quad[3][2])}
@@ -8391,6 +8417,9 @@ local function build(cells, i, j, options)
     emit(roadDecor, kind, {edgePoint(a, o, 0, low, v0, width), edgePoint(a, o, out, high, v0, width),
       edgePoint(b, p, out, high, v1, width), edgePoint(b, p, 0, low, v1, width)}, item[2], true)
   end
+  -- verge, slope and edge pieces emitted since the last pause point: each is cut by the asphalt round it
+  -- and shaded from the ground, and the 64 collector triangles between pause points were up to 32 ms of
+  -- them on a far tile, 6 ms on a near one (generator_budget.py)
   local edgeOps = 0
   for _, strip in ipairs(strips) do
     local kind = edgeKind(strip)
@@ -8407,11 +8436,9 @@ local function build(cells, i, j, options)
         if tune.vergeCut > 0 then emit(groundMesh, vergeKind, verge, item[2], true)
         elseif visualRoads then roads.polygon(vergeKind, verge, true)
         elseif distant then scene.polygon(vergeKind, verge, true) end
-        if kind and item.edge then
-          emitEdge(kind, strip, item)
-          edgeOps = edgeOps + 1
-          if edgeOps % 64 == 0 then pause() end
-        end
+        if kind and item.edge then emitEdge(kind, strip, item) end
+        edgeOps = edgeOps + 1
+        if edgeOps % 16 == 0 then pause() end
       end
     end
   end
@@ -8419,6 +8446,8 @@ local function build(cells, i, j, options)
   for _, item in ipairs(SW and SW.skirts or NONE) do
     local quad, S, s = item[1], item[2], item[3]
     if vergeWanted(ringBounds({quad})) then
+      edgeOps = edgeOps + 1
+      if edgeOps % 16 == 0 then pause() end
       if quad.toe then
         quad[2][3], quad[3][3] = ground(quad[2][1], quad[2][2]), ground(quad[3][1], quad[3][2])
         quad[2][9], quad[3][9] = 1, 1
@@ -8432,6 +8461,8 @@ local function build(cells, i, j, options)
   if SW and tune.shoulder > 0 and not tune.section then
     ROADS.sweep.verges(SW, tune.shoulder, tune.vergeSink, function(quad, S, s)
       if vergeWanted(ringBounds({quad})) then
+        edgeOps = edgeOps + 1
+        if edgeOps % 16 == 0 then pause() end
         quad[2][3], quad[3][3] = ground(quad[2][1], quad[2][2]), ground(quad[3][1], quad[3][2])
         local skip = S and function(entry) return entry.road == S and entry.index and math.abs(entry.index - s) < 25 end or nil
         if tune.vergeCut > 0 then emit(distant and scene or roads, vergeKind, quad, skip, true)
@@ -8574,7 +8605,7 @@ local function build(cells, i, j, options)
     return {version = 1, generator = 'earthng-lua-v1', source = options.regionId, layer = layer,
       tile = {i, j}, rect = rect, materials = options.materials or '/earthng/planet/materials.json',
       items = collector.items, mats = mats, triangles = total, packs = options.packs,
-      warmShapes = warm, stockMaterials = VEG.stockFor(collector.items, warm), yard = collector.yard}
+      warmShapes = warm, stockMaterials = VEG.stockFor(collector.items, warm, pause), yard = collector.yard}
   end
   -- No road: the car stands on the ground at the landing (native.lua's off-road landing). The
   -- gentlest ground within ~80 m of it, the car across the slope: on Everest's summit ridge it
@@ -9018,14 +9049,15 @@ local function build(cells, i, j, options)
       end}, line)
     end
     local barrier = (line.kind == 'fence' or line.kind == 'guard_rail') and #points >= 2
-    for _, run in ipairs(barrier and (ROADS.offDecks(strips, points, ground) or {points}) or NONE) do
+    -- a long rail's three passes over the strips ran 12 ms in one piece (generator_budget.py): each takes pause
+    for _, run in ipairs(barrier and (ROADS.offDecks(strips, points, ground, pause) or {points}) or NONE) do
       if #run >= 2 and line.kind == 'fence' then
         fence(run == points and line or {tags = line.tags, points = run})
       elseif #run >= 2 then
-        for _, piece in ipairs(ROADS.besideRoads(strips, run, tune.sidewalk)) do
+        for _, piece in ipairs(ROADS.besideRoads(strips, run, tune.sidewalk, pause)) do
           local path = {}
           for k, p in ipairs(piece) do path[k] = {p[1], p[2], 0} end
-          ROADS.guardRail({rect = rect, ground = ground, strips = strips, face = function(poly, ox, oy, oz, material)
+          ROADS.guardRail({rect = rect, ground = ground, strips = strips, pause = pause, face = function(poly, ox, oy, oz, material)
             ROADS.orient(scene.polygon, material, poly, ox, oy, oz)
           end}, path)
         end
@@ -10196,6 +10228,8 @@ local function build(cells, i, j, options)
     bio.layers(math.floor(maxGrass * .6), math.min(600, maxRocks * 3), spread)
   end
   mark('trees')
+  -- the manifest reads every item (the stock materials): after the last scatter's pause point
+  pause()
   local sceneManifest = manifest(scene, 'scene')
   sceneManifest.parking = parking
   if distant then

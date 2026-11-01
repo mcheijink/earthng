@@ -80,10 +80,12 @@ M.TUNE = {
   -- footprints, spawn) only take chunks reaching `groundMargin` m (the lattice reaches one terrain step,
   -- <= 25 m, past the tile; skirts reach ROADS.section.reach, 30 m, past the paved edge). The owned items
   -- are the same as with every chunk (route-tile digests, p5/perf). `pauseRows`: a pause point every this
-  -- many rows in the long loops (press, verges, footprints, marks), so no stretch runs past the frame budget.
+  -- many rows in the long loops (press, verges, footprints, marks), so no stretch runs past the frame budget:
+  -- the verges' rows cost the most (the generator cuts a skirt from each), 48 of them ran 26 ms in one piece,
+  -- 8 up to 8 ms (earthng/generator_budget.py --swept).
   rowMargin = 70,
   groundMargin = 70,
-  pauseRows = 48,
+  pauseRows = 4,
 }
 -- Classes swept per switch value (world.lua sweptRoads): 'fast' = motorways and trunks with their
 -- links (the phase-1 scope, the test interchange); 'fitted' = every class the exporter fits.
