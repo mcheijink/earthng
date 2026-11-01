@@ -139,6 +139,7 @@ local frameTimer = hptimer()
 local LIMIT = {pairsDriving = 3, pairsLanding = 24, plantBatch = 128,
   forestStep = 0.12, forestKind = 1.5, forestMax = 2500, propMax = 600,
   collisionWant = 200, collisionLead = 6, collisionMargin = 200, vehicleCollision = {100, 300},
+  sceneCollisionWait = 6,
   roadAhead = 15, roadUrgent = 8, roadFloorMs = 2.5}
 -- Read-only view for the development probe (earthng/probe.py); nothing in the mod calls it.
 function M.dbg() return {S = S, result = result, native = native, detail = detailStream, test = test} end
@@ -648,7 +649,14 @@ local function spawnItem(it, group, pause, tile, layer)
     obj:setPosition(vec3(it.pos[1], it.pos[2], it.pos[3]))
     if NATIVE and tile then
       S.coll = S.coll or collision.new()
-      S.coll:track(tile, obj:getID(), not (tile.far or tile.horizon) and collision.quiet(meshes, layer))
+      local quiet = not (tile.far or tile.horizon) and collision.quiet(meshes, layer)
+      S.coll:track(tile, obj:getID(), quiet)
+      -- only a scene piece with something solid asks for a rebuild: roofs, windows, doors and
+      -- ground covers (collision.QUIET) are left out of it anyway
+      if layer == 'scene' and not quiet and not tile.dropped then
+        S.collisionDirty = true
+        if not tile.sceneDirty then tile.sceneDirty, tile.sceneDirtyAt = true, S.now end
+      end
     end
     local ms = t:stop()
     if ms > (result.createMeshMs or 0) then result.createMeshMs, result.createMeshItem = ms, it.name end
@@ -1627,7 +1635,11 @@ local function stepQueue()
         table.sort(sorted)
         S.deliveryP99 = sorted[math.ceil(#sorted * .99)]
       end
-      if S.job.scene and not tile.dropped and not S.job.item.decor then S.collisionDirty = true; tile.sceneDirty = true end
+      -- (natively a mesh piece marks itself in spawnItem, and only when it is solid)
+      if S.job.scene and not tile.dropped and not S.job.item.decor and not (NATIVE and S.job.item.kind == 'proc') then
+        S.collisionDirty = true
+        if not tile.sceneDirty then tile.sceneDirty, tile.sceneDirtyAt = true, S.now end
+      end
     end
   until over()
 end
@@ -1684,32 +1696,50 @@ local function updateCollision()
   if S.state ~= 'driving' then radius = math.max(radius, 500 * math.sqrt(2) + S.stream.tile * 0.71) end
   local size = S.stream and S.stream.tile or 500
   local points = NATIVE and collisionPoints(p, v) or {}
-  local near = S.removedCollision or false
+  -- near: why this rebuild runs (result.collisionWhy)
+  local near = S.removedCollision and 'removed' or false
   for _, tile in pairs(S.tiles) do
     local empty = tile.manifest.empty or itemCount(tile.manifest) == 0
     if NATIVE then
-      if (tile.state == 'loaded' and not tile.collided and not empty) or (tile.sceneDirty and fast) then
-        if #points == 0 or collision.within(tile, points, size, 3) then near = true; break end
+      -- A streaming scene asked for a rebuild every COLLISION_EVERY s while it came in, and each
+      -- one rebuilt every tile within reach (worst frame 142 ms, 1-3 s bursts in a dense town). Its
+      -- walls now wait until the scene is complete or for LIMIT.sceneCollisionWait s, whichever
+      -- comes first; a road rebuild in between takes them too. Roads and ground do not wait.
+      -- (6 s is not measured: at 50 km/h a wall is passable for at most ~110 m, 6 + 2 s.)
+      local road = tile.state == 'loaded' and not tile.collided and not empty
+      local scene = fast and tile.sceneDirty
+        and (tile.sceneComplete or S.now - (tile.sceneDirtyAt or 0) >= LIMIT.sceneCollisionWait)
+      if (road or scene) and (#points == 0 or collision.within(tile, points, size, 3)) then
+        near = road and 'road' or 'scene'; break
       end
     else
       if tile.state == 'loaded' and not tile.collided and not empty then
         local cx, cy = tileCentre(tile.i, tile.j)
-        if not p or math.sqrt((cx - p.x) ^ 2 + (cy - p.y) ^ 2) <= radius then near = true; break end
+        if not p or math.sqrt((cx - p.x) ^ 2 + (cy - p.y) ^ 2) <= radius then near = 'road'; break end
       end
       -- buildings/ground next to the car get theirs soon; far scenery waits for a road rebuild
       if fast and tile.sceneDirty and p then
         local cx, cy = tileCentre(tile.i, tile.j)
-        if math.sqrt((cx - p.x) ^ 2 + (cy - p.y) ^ 2) <= 400 then near = true; break end
+        if math.sqrt((cx - p.x) ^ 2 + (cy - p.y) ^ 2) <= 400 then near = 'scene'; break end
       end
     end
   end
   if not near then return end
+  result.collisionWhy = result.collisionWhy or {}
+  result.collisionWhy[near] = (result.collisionWhy[near] or 0) + 1
   local timer = hptimer()
   if NATIVE then
+    -- the far ground under near roads and ground stays out (collision.solid)
+    local covered = 0
+    for key, far in pairs(S.far) do
+      local tile = S.tiles[key]
+      far.covered = (tile and tile.roadComplete and not tile.failed and tile.solidIds ~= nil) or nil
+      if far.covered then covered = covered + 1 end
+    end
     S.coll = S.coll or collision.new()
     S.coll:rebuild(points, size, function(id) return scenetree.findObjectById(id) end,
       function() be:reloadCollision() end)
-    result.collisionHidden = S.coll.lastHidden
+    result.collisionHidden, result.collisionSolid, result.collisionCovered = S.coll.lastHidden, S.coll.lastSolid, covered
   else
     be:reloadCollision()
   end
@@ -1723,7 +1753,7 @@ local function updateCollision()
       tile.collided = not NATIVE or collision.solid(tile, points, size)
       left = left or not tile.collided
     end
-    tile.sceneDirty = false
+    tile.sceneDirty, tile.sceneDirtyAt = false, nil
   end
   -- natively the tiles left out keep the check running as the car moves
   S.collisionDirty, S.collisionAt = NATIVE and left, S.now

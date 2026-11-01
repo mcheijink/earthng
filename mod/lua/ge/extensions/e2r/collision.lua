@@ -8,6 +8,10 @@
 --   - markings and edge decals (mm to cm over the road and verge), roofs, and the scene's ground covers: areas and paths
 --     are drapes 2.5-4 cm over the ground mesh, which collides. The road layer's ground
 --     takes those same cover materials where a cover fills a cell, so they stay solid there.
+--   - a far tile under a near tile whose roads and ground are in (owner.covered, set by world.lua
+--     before each rebuild): same key, same reach, so the near ground is solid wherever the far
+--     one would be, and the far ground (coarser, > 5 cm over the near one in a quarter of the
+--     cells) only doubled the triangles and could bump the wheels.
 -- Hiding and showing ~1000 meshes costs ~1.5 ms; rendering does not see it (one Lua call).
 local M = {}
 
@@ -56,7 +60,7 @@ end
 
 -- does the owner's collision stay in a rebuild (no points: every live tile's does)
 function M.solid(owner, points, size)
-  if owner.dropped or owner.horizon then return false end
+  if owner.dropped or owner.horizon or owner.covered then return false end
   return #points == 0 or M.within(owner, points, size, 4)
 end
 
