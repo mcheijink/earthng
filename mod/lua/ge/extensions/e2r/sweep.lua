@@ -1720,6 +1720,7 @@ local function uIndex(m, u, v)
 end
 
 -- a triangle seen from the side its (a, b, c) normal points to; uv(p) -> u, v
+local CORNERS = {}   -- tri()'s three corners in drawing order, one table for every call (uv() never calls tri)
 local function tri(m, o, a, b, c, uv, facing)
   local ux, uy, uz = b[1] - a[1], b[2] - a[2], b[3] - a[3]
   local vx, vy, vz = c[1] - a[1], c[2] - a[2], c[3] - a[3]
@@ -1732,8 +1733,10 @@ local function tri(m, o, a, b, c, uv, facing)
   end
   local n = nIndex(m, nx, ny, nz)
   -- BeamNG ProceduralMesh: clockwise seen from the visible side (generator collector: a, c, b)
-  -- (one loop over the three corners: unrolled, LuaJIT ran this 4-5 times slower offline)
-  for _, p in ipairs({a, c, b}) do
+  -- (one loop over the three corners: unrolled, LuaJIT ran this 4-5 times slower offline; a new
+  -- table of them per triangle was garbage, generator_budget.py --garbage --swept)
+  CORNERS[1], CORNERS[2], CORNERS[3] = a, c, b
+  for _, p in ipairs(CORNERS) do
     local u, v = uv(p)
     m.faces[#m.faces + 1] = {v = vIndex(m, o, p), n = n, u = uIndex(m, u, v)}
   end

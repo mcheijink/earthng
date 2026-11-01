@@ -5,6 +5,8 @@ local EPS = 1e-8
 local ROAD_LIFT = 0.10
 local floor = math.floor
 local NONE = {}
+-- loop constants for the hot loops outside build() (a table literal there is a new table per pass)
+local SIDES, STEPS4 = {1, -1}, {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
 -- Weld keys: millimetres from the tile centre (|x|, |y| < 1048 m) and 1/1024 of a UV repeat
 -- (|u|, |v| < 32768 repeats: region UVs are absolute, ~27000 at 80 km with a 3 m repeat).
 local WELD, WELD2 = 2 ^ 20, 2 ^ 21
@@ -948,15 +950,23 @@ local function collector(rect, key, layer, pause, mixed)
       return #verts - 1
     end
     local key = (xq + WELD) * WELD2 + yq + WELD
-    local zs = mesh.vmap[key]
-    if not zs then zs = {}; mesh.vmap[key] = zs end
-    local zq = floor(z * 1000 + .5)
-    local index = zs[zq]
+    -- vmap[key]: the index of the one vertex at (x, y), or a table of them by z when there are more
+    -- (a wall's foot and top). A table for every (x, y) was 3 MB of a near tile's garbage.
+    local vmap, zq = mesh.vmap, floor(z * 1000 + .5)
+    local zs = vmap[key]
+    local index
+    if type(zs) == 'number' then
+      if floor(mesh.verts[zs + 1].z * 1000 + .5) == zq then return zs end
+      zs = {[floor(mesh.verts[zs + 1].z * 1000 + .5)] = zs}
+      vmap[key] = zs
+    elseif zs then
+      index = zs[zq]
+    end
     if not index then
       local verts = mesh.verts
       index = #verts
       verts[index + 1] = {x = x, y = y, z = z}
-      zs[zq] = index
+      if zs then zs[zq] = index else vmap[key] = index end
     end
     return index
   end
@@ -1001,6 +1011,15 @@ local function collector(rect, key, layer, pause, mixed)
     local faces = mesh.faces
     faces[#faces + 1] = face
   end
+  -- Ground passes a per-corner normal in p[6..8] (nx can be 0, so the type is the test).
+  -- Walls, curbs and roads leave it unset and keep the face normal n. (Once per collector:
+  -- a closure per triangle was 6 MB of a near tile's garbage, generator_budget.py --garbage.)
+  local function cornerNormal(mesh, p, n, plain)
+    if not plain and type(p[6]) == 'number' and type(p[7]) == 'number' and type(p[8]) == 'number' then
+      return normalIndex(mesh, p[6], p[7], p[8])
+    end
+    return n
+  end
   local scales = {}
   -- hooks.steep(kind, a, b, c): another material for a piece steeper than acos(hooks.nz), drawn
   -- flat shaded and box-mapped hooks.scale m a repeat, or false to leave it out (ROADS.wing)
@@ -1037,23 +1056,15 @@ local function collector(rect, key, layer, pause, mixed)
       scales[kind] = scale
     end
     local n = normalIndex(mesh, nx, ny, nz)
-    -- Ground passes a per-corner normal in p[6..8] (nx can be 0, so the type is the test).
-    -- Walls, curbs and roads leave it unset and keep this face normal.
-    local function cornerNormal(p)
-      if not plain and type(p[6]) == 'number' and type(p[7]) == 'number' and type(p[8]) == 'number' then
-        return normalIndex(mesh, p[6], p[7], p[8])
-      end
-      return n
-    end
     -- BeamNG ProceduralMesh expects clockwise face indices and zero-based indices.
     local axis
     if plain or kind == 'bare_rock' or kind == 'scree' then
       local ax, ay, az = math.abs(nx), math.abs(ny), math.abs(nz)
       if ax > az and ax >= ay then axis = 'x' elseif ay > az then axis = 'y' end
     end
-    corner(mesh, a, cornerNormal(a), scale, axis)
-    corner(mesh, c, cornerNormal(c), scale, axis)
-    corner(mesh, b, cornerNormal(b), scale, axis)
+    corner(mesh, a, cornerNormal(mesh, a, n, plain), scale, axis)
+    corner(mesh, c, cornerNormal(mesh, c, n, plain), scale, axis)
+    corner(mesh, b, cornerNormal(mesh, b, n, plain), scale, axis)
     mesh.tris, total, operations = mesh.tris + 1, total + 1, operations + 1
     if operations % 64 == 0 then pause() end
   end
@@ -1270,7 +1281,7 @@ function ROADS.box(face, material, x, y, tx, ty, across, along, zb, zt, repeatU)
     return {x + nx * across * sa + tx * along * sb, y + ny * across * sa + ty * along * sb, z, u, v}
   end
   local h, wa, wb = (zt - zb) / repeatU, 2 * across / repeatU, 2 * along / repeatU
-  for _, s in ipairs({1, -1}) do
+  for _, s in ipairs(SIDES) do
     face({c(-1, s, zt, 0, 0), c(1, s, zt, wa, 0), c(1, s, zb, wa, h), c(-1, s, zb, 0, h)}, tx * s, ty * s, 0, material)
     face({c(s, -1, zt, 0, 0), c(s, 1, zt, wb, 0), c(s, 1, zb, wb, h), c(s, -1, zb, 0, h)}, nx * s, ny * s, 0, material)
   end
@@ -1453,7 +1464,7 @@ function ROADS.seaQuads(ctx)
   end
   while #stack > 0 do
     local q = table.remove(stack)
-    for _, d in ipairs({{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) do
+    for _, d in ipairs(STEPS4) do
       local gx, gy = q[1] + d[1], q[2] + d[2]
       local k = key(gx, gy)
       if gx >= lo and gx < hi and gy >= lo and gy < hi and open[k] and not sea[k] then
@@ -1600,6 +1611,16 @@ function ROADS.guardRail(ctx, path)
     return {p[1] + nx * off, p[2] + ny * off, p[3] + low + q[2], u, q[2] / rail.beam * .25,
       nx * n[1] * side, ny * n[1] * side, n[2]}
   end
+  -- a skin vertex (k, i, side) stands in four quads (two folds, two segments) with the same u, along[k] / 4:
+  -- made once instead of four times (the rail's vertex tables were ~3 MB of a near tile's garbage,
+  -- generator_budget.py --garbage). The faces only read their corners.
+  local skin = {}
+  local function skinVertex(k, i, side)
+    local key = (k * (#profile + 1) + i) * 2 + (side > 0 and 1 or 0)
+    local v = skin[key]
+    if not v then v = vertex(k, i, side, along[k] / 4); skin[key] = v end
+    return v
+  end
   local post = 0
   for k = 1, #pts - 1 do
     local a, b = pts[k], pts[k + 1]
@@ -1609,12 +1630,11 @@ function ROADS.guardRail(ctx, path)
     local mx, my = (a[1] + b[1]) / 2, (a[2] + b[2]) / 2
     local mine = mx >= rect[1] and mx < rect[3] and my >= rect[2] and my < rect[4]
     if mine then
-      local u0, u1 = along[k] / 4, along[k + 1] / 4
-      for _, side in ipairs({1, -1}) do
+      for _, side in ipairs(SIDES) do
         for i = 1, #profile - 1 do
           local fn = pn[i][1] + pn[i + 1][1]
           local fz = pn[i][2] + pn[i + 1][2]
-          face({vertex(k, i, side, u0), vertex(k + 1, i, side, u1), vertex(k + 1, i + 1, side, u1), vertex(k, i + 1, side, u0)},
+          face({skinVertex(k, i, side), skinVertex(k + 1, i, side), skinVertex(k + 1, i + 1, side), skinVertex(k, i + 1, side)},
             -ty * fn * side, tx * fn * side, fz, rail.material)
         end
       end
@@ -6942,12 +6962,16 @@ local function build(cells, i, j, options)
   -- disagrees. The extra ring is only for those samples; drawn quads stay in the tile.
   local n0x, n0y = floor(rect[1] / step + .5) - 1, floor(rect[2] / step + .5) - 1
   local count = math.max(1, floor(size / step + .5))
+  -- lower[k]: 0 for every node until press() lowers it. A lower table holding only the pressed nodes
+  -- made each `lower[k] or 0` in ground() a nil-or-number branch: once ground() ran in compiled traces
+  -- (no closure in groundNormal), LuaJIT made thousands of side traces for them and a near tile's
+  -- build took ~50 % longer (generator_budget.py, trace events counted with jit.attach).
   local nodes, lower = {}, {}
   local function nodeKey(gx, gy) return (gx - n0x) * 4096 + (gy - n0y) end
   for gy = n0y - 1, n0y + count + 3 do
     for gx = n0x - 1, n0x + count + 3 do
       local z = pulled(gx * step, gy * step)
-      if z == nil then nodes[nodeKey(gx, gy)] = nil else nodes[nodeKey(gx, gy)] = z - tune.groundDrop end
+      if z == nil then nodes[nodeKey(gx, gy)] = nil else nodes[nodeKey(gx, gy)], lower[nodeKey(gx, gy)] = z - tune.groundDrop, 0 end
     end
     pause()
   end
@@ -6976,10 +7000,14 @@ local function build(cells, i, j, options)
     local ha, hb, hc = math.max(0, za - target), math.max(0, zb - target), math.max(0, zc - target)
     local f = excess / (wa * ha + wb * hb + wc * hc)
     if tune.pressEven > 0 and not proportional then ha, hb, hc, f = 1, 1, 1, excess end
-    for _, pair in ipairs({{ka, ha}, {kb, hb}, {kc, hc}}) do
-      local drop = pair[2] * f
-      if drop > (lower[pair[1]] or 0) then lower[pair[1]] = drop end
-    end
+    -- the three corners written out: a table of three pairs per call was 6 MB of a near tile's garbage
+    -- (earthng/generator_budget.py --garbage)
+    local drop = ha * f
+    if drop > (lower[ka] or 0) then lower[ka] = drop end
+    drop = hb * f
+    if drop > (lower[kb] or 0) then lower[kb] = drop end
+    drop = hc * f
+    if drop > (lower[kc] or 0) then lower[kc] = drop end
   end
   -- The ground as drawn: each lattice cell is two triangles split along its (x0, y0)-(x1, y1)
   -- diagonal (the collector fans a quad from its first corner).
@@ -7016,31 +7044,47 @@ local function build(cells, i, j, options)
     if not demCovered(x, y) then return nil end
     return ground(x, y)
   end
-  local normalCache -- enabled only after road pressing has finished
+  local normalCache -- enabled only after road pressing has finished: {rows = {}, vals = {}, n = 0}
   local function groundNormal(x, y)
-    -- keyed by the point to a micrometre, as the old '%.6f' string key was, without the string
+    -- keyed by the point to a micrometre, as the old '%.6f' string key was, without the string. A
+    -- normal is kept as three numbers in vals, and the slopes are worked out in place: a table per
+    -- cached normal and a closure per call were 16 MB of a near tile's garbage (generator_budget.py).
     local row, key = nil, nil
     if normalCache then
       local kx = floor(x * 1e6 + .5)
-      row = normalCache[kx]
-      if not row then row = {}; normalCache[kx] = row end
+      row = normalCache.rows[kx]
+      if not row then row = {}; normalCache.rows[kx] = row end
       key = floor(y * 1e6 + .5)
     end
     local cached = row and row[key]
-    if cached then return cached[1], cached[2], cached[3] end
-    local function slope(dx, dy)
-      local zp, zm, z0 = heightAt(x + dx, y + dy), heightAt(x - dx, y - dy), heightAt(x, y)
-      if zp and zm then return (zp - zm) / (2 * step) end
-      if zp and z0 then return (zp - z0) / step end
-      if zm and z0 then return (z0 - zm) / step end
-      return 0
+    if cached then
+      local vals = normalCache.vals
+      return vals[cached], vals[cached + 1], vals[cached + 2]
     end
-    local nx, ny, nz = -slope(step, 0), -slope(0, step), 1
+    local nx, ny, nz = 0, 0, 1
+    for axis = 1, 2 do
+      local dx, dy = axis == 1 and step or 0, axis == 2 and step or 0
+      local zp, zm, z0 = heightAt(x + dx, y + dy), heightAt(x - dx, y - dy), heightAt(x, y)
+      local slope = 0
+      if zp and zm then slope = (zp - zm) / (2 * step)
+      elseif zp and z0 then slope = (zp - z0) / step
+      elseif zm and z0 then slope = (z0 - zm) / step end
+      if axis == 1 then nx = -slope else ny = -slope end
+    end
     local len = math.sqrt(nx * nx + ny * ny + nz * nz)
     nx, ny, nz = nx / len, ny / len, nz / len
-    if row then row[key] = {nx, ny, nz} end
+    if row then
+      local vals, n = normalCache.vals, normalCache.n
+      vals[n + 1], vals[n + 2], vals[n + 3] = nx, ny, nz
+      row[key], normalCache.n = n + 1, n + 3
+    end
     return nx, ny, nz
   end
+  -- The closure groundNormal used to make per call kept LuaJIT from compiling through it (FNEW is not
+  -- compiled). Compiled, its many branches into ground() and demAt() made side traces that failed to
+  -- assemble over and over, and a far tile took ~40 % longer; with the JIT off for it, as before, near
+  -- and far tiles build as fast as they did (generator_budget.py, trace events counted with jit.attach).
+  if jit and jit.off then jit.off(groundNormal) end
   -- Spatially indexed mapped cover, shared by terrain and vegetation at all LODs.
   -- Explicit OSM wins over WorldCover. Tie-breaking never depends on load order.
   local coverBins = {}
@@ -8261,12 +8305,18 @@ local function build(cells, i, j, options)
       local function len(p, q) return math.sqrt((p[1] - q[1]) ^ 2 + (p[2] - q[2]) ^ 2) end
       local na = math.max(1, math.ceil(math.max(len(a, b), len(d, c)) / ROADS.section.press))
       local nb = math.max(1, math.ceil(math.max(len(a, d), len(b, c)) / ROADS.section.press))
+      -- lerp's arithmetic on the three coordinates press() reads, without its tables: a table per
+      -- sample was 4 MB of a far tile's garbage (generator_budget.py --garbage)
       for u = 0, na do
-        local p, q = lerp(a, b, u / na), lerp(d, c, u / na)
+        local t = u / na
+        local p1, p2, p3 = (a[1] or 0) + ((b[1] or 0) - (a[1] or 0)) * t, (a[2] or 0) + ((b[2] or 0) - (a[2] or 0)) * t,
+          (a[3] or 0) + ((b[3] or 0) - (a[3] or 0)) * t
+        local q1, q2, q3 = (d[1] or 0) + ((c[1] or 0) - (d[1] or 0)) * t, (d[2] or 0) + ((c[2] or 0) - (d[2] or 0)) * t,
+          (d[3] or 0) + ((c[3] or 0) - (d[3] or 0)) * t
         for v = 0, nb do
-          local r = lerp(p, q, v / nb)
+          local s = v / nb
           -- ground under ground: a few cm, so the slope's last band meets the lattice without a step
-          press(r[1], r[2], r[3] - ROADS.section.margin, true)
+          press(p1 + (q1 - p1) * s, p2 + (q2 - p2) * s, p3 + (q3 - p3) * s - ROADS.section.margin, true)
         end
       end
       pressed = pressed + (na + 1) * (nb + 1)
@@ -8308,7 +8358,7 @@ local function build(cells, i, j, options)
       for _, quad in ipairs(lifted.quads) do pressPoly(quad) end
     end
   end
-  normalCache = {} -- no more press() calls; covers repeatedly shade shared lattice corners
+  normalCache = {rows = {}, vals = {}, n = 0} -- no more press() calls; covers repeatedly shade shared lattice corners
   -- Ground cover lies on the ground as drawn: cut by lattice cell and diagonal, so each piece is
   -- in one ground triangle and exactly parallel to it. The pressed ground keeps it under the
   -- asphalt, so carriageways need not be cut out (that shattered big squares into 24k pieces).
@@ -8627,12 +8677,15 @@ local function build(cells, i, j, options)
   -- The ground lattice: each cell two triangles along its (x0, y0)-(x1, y1) diagonal, drawn in
   -- the material of the cover that fills it whole (claims), else as grass.
   for gy = 0, distant and -1 or count - 1 do
+    -- a cell's west corners are the east corners of the one before it (the triangles only read them)
+    local east0, east1
     for gx = 0, count - 1 do
       local cx, cy = n0x + 1 + gx, n0y + 1 + gy
       local x0, y0 = cx * step, cy * step
       local x1, y1 = x0 + step, y0 + step
-      local a, b = vertex(x0, y0, ground(x0, y0)), vertex(x1, y0, ground(x1, y0))
-      local c, d = vertex(x1, y1, ground(x1, y1)), vertex(x0, y1, ground(x0, y1))
+      local a, b = east0 or vertex(x0, y0, ground(x0, y0)), vertex(x1, y0, ground(x1, y0))
+      local c, d = vertex(x1, y1, ground(x1, y1)), east1 or vertex(x0, y1, ground(x0, y1))
+      east0, east1 = b, c
       local gkey = ((cx + 32768) * 65536 + cy + 32768) * 2
       local tx, ty = (x0+x1+x1)/3, (y0+y0+y1)/3
       roads.polygon(surfaceKind(tx, ty, claims[gkey] or backgroundKind(tx, ty)), {a, b, c}, true)
@@ -9026,8 +9079,9 @@ local function build(cells, i, j, options)
     local normals = {}
     for k = 1, #pts do
       local tx, ty = 0, 0
-      for _, pair in ipairs({{k - 1, k}, {k, k + 1}}) do
-        local a, b = pts[pair[1]], pts[pair[2]]
+      -- the segments (k - 1, k) and (k, k + 1)
+      for seg = k - 1, k do
+        local a, b = pts[seg], pts[seg + 1]
         if a and b then
           local dx, dy = b[1] - a[1], b[2] - a[2]
           local l = math.sqrt(dx * dx + dy * dy)
@@ -9065,12 +9119,21 @@ local function build(cells, i, j, options)
       end
       return false
     end
+    -- a corner of the sides and the top stands in up to six of their quads: made once (the polygons
+    -- only read it; the end caps below change theirs and take their own)
+    local made = {}
+    local function shared(k, side, up)
+      local key = k * 4 + (side > 0 and 2 or 0) + (up and 1 or 0)
+      local c = made[key]
+      if not c then c = corner(k, side, up); made[key] = c end
+      return c
+    end
     for k = 1, #pts - 1 do
       local box = ringBounds({{pts[k], pts[k + 1]}})
       if boundsTouch(rect, box, half * 2 + .5) and not overRoad(k) then
-        scene.polygon(kind, {corner(k + 1, 1), corner(k, 1), corner(k, 1, true), corner(k + 1, 1, true)}, false)
-        scene.polygon(kind, {corner(k, -1), corner(k + 1, -1), corner(k + 1, -1, true), corner(k, -1, true)}, false)
-        scene.polygon(kind, {corner(k, 1, true), corner(k, -1, true), corner(k + 1, -1, true), corner(k + 1, 1, true)}, true)
+        scene.polygon(kind, {shared(k + 1, 1), shared(k, 1), shared(k, 1, true), shared(k + 1, 1, true)}, false)
+        scene.polygon(kind, {shared(k, -1), shared(k + 1, -1), shared(k + 1, -1, true), shared(k, -1, true)}, false)
+        scene.polygon(kind, {shared(k, 1, true), shared(k, -1, true), shared(k + 1, -1, true), shared(k + 1, 1, true)}, true)
       end
     end
     for _, e in ipairs({{1, 2}, {#pts, #pts - 1}}) do
@@ -9206,6 +9269,9 @@ local function build(cells, i, j, options)
     end
   end
   mark('decor')
+  -- the scatter from here on samples each point once: the normal cache had 1 hit in ~52,000 calls on a
+  -- near tile and held 4 MB of garbage for it (generator_budget.py --garbage)
+  normalCache = nil
   -- The far ground is coarse triangles (options.farStep, 100 m) inside the tile and a fan to the fine
   -- lattice at its border: it ignores a road's cutting. Each far road surface vertex is lifted to
   -- ROADS.far.clear over the far ground's own triangle under it (never lowered), so it is not hidden.
