@@ -8,6 +8,7 @@ local generator = require('ge/extensions/e2r/generator')
 local roads3 = require('ge/extensions/e2r/roads3')
 local coordinates = require('ge/extensions/e2r/coordinates')
 local cellformat = require('ge/extensions/e2r/cellformat')
+local bake = require('ge/extensions/e2r/bake')
 local liveOk, liveMod = pcall(require, 'ge/extensions/e2r/live')
 local live = liveOk and type(liveMod) == 'table' and type(liveMod.sync) == 'function' and liveMod or nil
 -- TILE_LIMIT holds the whole wanted set (1 km near plus the 3 km far ring, ~130 tiles): a
@@ -1016,7 +1017,165 @@ local function loadRoads3(r, rect)
   return nil
 end
 
+-- A far or horizon layer that is done, built by the generator or read from the bake (BAKED): into
+-- the cache, the stream's bookkeeping and the renderer's ready flags, the same for both.
+local function keepDistant(key, wanted, far, size)
+  local r, st = active.region, state.stream
+  far.source, far.materials = r.descriptor.id, '/earthng/planet/materials.json'
+  if wanted.horizon then
+    far.tileSize = size
+    local entry = active.horizon[key] or {}
+    entry.horizon, entry.decor = far, false
+    entry.horizonTaken, entry.horizonDelivered = nil, nil
+    entry.serial = (entry.serial or 0) + 1
+    entry.used = touch()
+    entry.triangles, entry.vertices = geometrySize(far)
+    active.horizon[key] = entry
+    active.manifests[key .. ':horizon'] = far
+    st.horizon[key] = {serial = entry.serial, i = wanted.i, j = wanted.j, size = size,
+      x = (wanted.i + 0.5) * size, y = (wanted.j + 0.5) * size}
+    st.horizonBuilt = (st.horizonBuilt or 0) + 1
+    local layerKey = key .. ':horizon'
+    if active.everBuilt[layerKey] then st.horizonRebuilds = (st.horizonRebuilds or 0) + 1 end
+    active.everBuilt[layerKey] = true
+    trimHorizon()
+    return
+  end
+  local entry = active.tiles[key] or {}
+  entry.far, entry.decor = far, wanted.decor and true or false
+  entry.farTaken, entry.farDelivered = nil, nil
+  entry.serial = (entry.serial or 0) + 1
+  active.manifests[key .. ':far'] = far
+  st.far[key] = entry.serial
+  entry.used = touch()
+  entry.triangles, entry.vertices = entrySize(entry)
+  active.tiles[key] = entry
+  st.ready[key], st.scenes[key] = entry.road and true or nil, entry.scene and true or nil
+  st.built = st.built + 1
+  local layerKey = key .. ':far'
+  if active.everBuilt[layerKey] then st.rebuilds = st.rebuilds + 1 end
+  active.everBuilt[layerKey] = true
+  trimTiles()
+end
+
+-- Prebuilt far and horizon layers (bake.lua; docs/PREBUILT-TILES.md step 1). `on` is the switch,
+-- off by default (world.lua bakedTiles). A bake lives beside the region, in the country's namespace:
+-- baked/<region id>/baked.json and one <ci>_<cj>.bin per source cell (earthng/bake_tiles.py), so it
+-- can ship as its own small ZIP and the pack is not rewritten. A layer is read from it instead of
+-- generated when baked.json was made from this region manifest, with this Lua, these switches and
+-- the same climate blocks, and its cell file holds the layer. Anything else (no bake, a stale digest,
+-- a missing cell, a bad byte) leaves that layer to the generator, as before. The far ring's decor
+-- (buildings and trees when the car is slow) and the vista are never baked. state.stream.baked
+-- counts what happened.
+local BAKED = {on = false, CELLS = 8, CLIMATE = '/earthng/planet/climate/'}
+-- The region's bake when it may be used, else nil. Checked once a landing, in the build coroutine
+-- (the digests read ~1 MB of Lua and a few climate blocks, with pauses).
+function BAKED.region()
+  local a = active
+  if a.baked ~= nil then return a.baked or nil end
+  local d, info = a.region.data, {used = 0, missing = 0, failed = 0}
+  local function off(reason)
+    info.off = reason
+    state.stream.baked = info
+    a.baked = false
+    if log then log('I', 'e2r', 'baked tiles not used: ' .. reason) end
+    return nil
+  end
+  local ns = a.region.country.namespace
+  if type(ns) ~= 'string' then return off('the region has no country namespace (a live region)') end
+  local dir = ns .. 'baked/' .. a.region.descriptor.id .. '/'
+  if not exists(dir .. 'baked.json') then return off('no bake for this region') end
+  local okB, b = pcall(read, dir .. 'baked.json')
+  if not okB or type(b) ~= 'table' then return off('baked.json cannot be read') end
+  if b.format ~= bake.FORMAT or b.version ~= bake.VERSION then return off('baked format ' .. tostring(b.format)) end
+  -- a rebuilt pack writes its region manifest again: a bake of the old export is not used
+  if bake.digest(readBytes(a.region.descriptor.manifest), a.pause) ~= b.region then return off('the bake was made from another export of this region') end
+  if b.cellSize ~= d.cellSize or b.tileSize ~= d.tileSize or b.horizonStep ~= HORIZON_STEP then return off('baked grid differs') end
+  local differs = BAKED.differs(b)
+  if differs then return off(differs) end
+  if type(b.code) ~= 'table' or type(b.climate) ~= 'table' then return off('the bake has no digests') end
+  for _, path in ipairs(bake.CODE) do
+    local data = exists(path) and readBytes(path) or nil
+    if bake.digest(data, a.pause) ~= b.code[path] then return off('the bake was made with another ' .. path) end
+  end
+  for path, digest in pairs(b.climate) do
+    if type(path) ~= 'string' or path:sub(1, #BAKED.CLIMATE) ~= BAKED.CLIMATE or path:find('..', 1, true) then return off('invalid climate path') end
+    local data = exists(path) and readBytes(path) or nil
+    if bake.digest(data, a.pause) ~= digest then return off('the bake was made with another climate block ' .. path) end
+  end
+  b.dir = dir
+  a.baked, a.bakedCells = b, {}
+  state.stream.baked = info
+  return b
+end
+-- The switches the bake was made with against the current ones (world.lua sweptRoads, heightPipeline):
+-- a reason when they differ. Checked for every layer, since a switch may change after the landing.
+function BAKED.differs(b)
+  local s, sw = type(b.settings) == 'table' and b.settings or {}, generator.SWEPT or {}
+  if (s.swept == true) ~= (sw.on == true) or (sw.on and s.sweptMode ~= sw.mode) then return 'the swept-roads switch differs from the bake' end
+  if (s.heights == true) ~= (heightPipeline(active.region.data) == true) then return 'the height pipeline differs from the bake' end
+end
+-- A cell file, read once and kept (a string costs the collector nothing); an absent one is kept as
+-- absent. {data, index}, or nil.
+function BAKED.cell(b, ci, cj)
+  local a, key = active, keyOf(ci, cj)
+  local hit = a.bakedCells[key]
+  if not hit then
+    local path = b.dir .. key .. '.bin'
+    hit = {}
+    if exists(path) then
+      hit.data = readBytes(path)
+      a.pause()
+      hit.index = bake.index(hit.data)
+    end
+    a.bakedCells[key] = hit
+  end
+  hit.used = touch()
+  -- absent cells are cheap to keep and costly to probe again; only files count against CELLS
+  local files = {}
+  for k, v in pairs(a.bakedCells) do if v.data then files[k] = v end end
+  evict(files, BAKED.CELLS, nil, function(k) a.bakedCells[k] = nil end)
+  return hit.data and hit or nil
+end
+-- The baked layer for a wanted far tile (without decor) or horizon block, or nil.
+function BAKED.layer(key, wanted)
+  if not BAKED.on or not active or wanted.vista or not (wanted.far or wanted.horizon) or wanted.decor then return nil end
+  if wanted.horizon and (key:sub(1, 1) ~= 'h' or wanted.step ~= HORIZON_STEP) then return nil end
+  local okB, b = pcall(BAKED.region)
+  if not okB then
+    -- the check itself failed (an unreadable file): no bake this landing, the tile is generated
+    active.baked, state.stream.baked = false, {used = 0, missing = 0, failed = 0, off = tostring(b)}
+    if log then log('W', 'e2r', 'baked tiles not used: ' .. tostring(b)) end
+    return nil
+  end
+  if not b then return nil end
+  local info = state.stream.baked
+  local differs = BAKED.differs(b)
+  if differs then info.switched = differs; return nil end
+  local d = active.region.data
+  local size = wanted.size or d.tileSize
+  local name = wanted.horizon and key or 'far:' .. key
+  local ok, result = pcall(function()
+    local cell = BAKED.cell(b, math.floor((wanted.i * size + 1e-6) / d.cellSize), math.floor((wanted.j * size + 1e-6) / d.cellSize))
+    local range = cell and cell.index[name]
+    if not range then return nil end
+    local stored = bake.decode(cell.data, range[1], range[2], active.pause)
+    if type(stored) ~= 'table' or type(stored.manifest) ~= 'table' or type(stored.manifest.items) ~= 'table'
+      or stored.size ~= size or stored.step ~= (wanted.horizon and wanted.step or nil) then error('it does not match the wanted layer') end
+    return stored.manifest
+  end)
+  if ok and result then info.used = info.used + 1; return result end
+  if ok then info.missing = info.missing + 1
+  else
+    info.failed = info.failed + 1
+    if log then log('W', 'e2r', 'baked ' .. name .. ' not read, the generator builds it: ' .. tostring(result)) end
+  end
+  return nil
+end
+
 local function buildTile(key, wanted)
+  local baked = BAKED.layer(key, wanted)
+  if baked then return keepDistant(key, wanted, baked, wanted.size or active.region.data.tileSize) end
   local r = active.region
   local size = wanted.size or r.data.tileSize
   local x0, y0 = wanted.i * size, wanted.j * size
@@ -1095,35 +1254,9 @@ local function buildTile(key, wanted)
   if wanted.far and (type(far) ~= 'table' or type(far.items) ~= 'table') then error('generator returned an invalid far manifest') end
   if not early then stamp(road, nav) end
   scene.source, scene.materials = r.descriptor.id, '/earthng/planet/materials.json'
-  if wanted.horizon then
-    far.source, far.materials = r.descriptor.id, '/earthng/planet/materials.json'
-    far.tileSize = size
-    local entry = active.horizon[key] or {}
-    entry.horizon, entry.decor = far, false
-    entry.horizonTaken, entry.horizonDelivered = nil, nil
-    entry.serial = (entry.serial or 0) + 1
-    entry.used = touch()
-    entry.triangles, entry.vertices = geometrySize(far)
-    active.horizon[key] = entry
-    active.manifests[key .. ':horizon'] = far
-    st.horizon[key] = {serial = entry.serial, i = wanted.i, j = wanted.j, size = size,
-      x = (wanted.i + 0.5) * size, y = (wanted.j + 0.5) * size}
-    st.horizonBuilt = (st.horizonBuilt or 0) + 1
-    local layerKey = key .. ':horizon'
-    if active.everBuilt[layerKey] then st.horizonRebuilds = (st.horizonRebuilds or 0) + 1 end
-    active.everBuilt[layerKey] = true
-    trimHorizon()
-    return
-  end
+  if wanted.horizon or wanted.far then return keepDistant(key, wanted, far, size) end
   local entry = active.tiles[key] or {}
-  if wanted.far then
-    far.source, far.materials = r.descriptor.id, '/earthng/planet/materials.json'
-    entry.far, entry.decor = far, wanted.decor and true or false
-    entry.farTaken, entry.farDelivered = nil, nil
-    entry.serial = (entry.serial or 0) + 1
-    active.manifests[key .. ':far'] = far
-    st.far[key] = entry.serial
-  elseif early then
+  if early then
     -- the road went out already (roadReady): only the scene is new
     entry.scene, entry.sceneTaken, entry.sceneDelivered = scene, nil, nil
     active.manifests[key .. ':scene'] = scene
@@ -1701,6 +1834,64 @@ end
 
 M.unload = unload
 M.setTune = setTune
+M.BAKED = BAKED
+
+-- The exporter's bake (earthng/bake_tiles.py, under LuaJIT outside the game): a region opened
+-- without a landing, the layers each source cell holds, and one layer built as the game builds it.
+-- opts.useBake reads the region's bake as the game does and opts.pause replaces the build's pause
+-- (earthng/bake_tiles_test.py); a bake itself leaves both unset.
+function M.bakeOpen(country, descriptor, opts)
+  opts = type(opts) == 'table' and opts or {}
+  local r = validateRegion(country, descriptor)
+  state = {provider = 'native', native = true, errors = {}, coverage = {}, regions = {}, job = {state = 'baking'},
+    stream = {region = descriptor.id, ready = {}, scenes = {}, far = {}, horizon = {}, wanted = {}, readyCount = 0,
+      building = 0, queued = 0, built = 0, rebuilds = 0, horizonBuilt = 0, horizonRebuilds = 0}}
+  active = {region = r, cells = {}, blocks = {}, tiles = {}, horizon = {}, failed = {}, clock = 0, everBuilt = {},
+    desired = {}, evicted = {}, epoch = 1, parked = {}, parkedFar = {}, lows = {}, startupPinned = false,
+    manifests = setmetatable({}, {__mode = 'v'}), pose = {x = 0, y = 0, vx = 0, vy = 0},
+    pause = opts.pause or function() end}
+  if not opts.useBake then active.baked = false end
+  local sw = generator.SWEPT or {}
+  return r.data, {swept = sw.on == true, sweptMode = sw.on and sw.mode or nil, heights = heightPipeline(r.data) == true},
+    r.country.namespace .. 'baked/' .. descriptor.id .. '/'
+end
+-- {key = wanted} of the far tiles and horizon blocks stored in source cell ci, cj (a layer is
+-- stored in the cell of its south-west corner), as priorities() wants them
+function M.bakeLayers(ci, cj)
+  local r, out = active.region, {}
+  local d = r.data
+  local s, t = d.cellSize, d.tileSize
+  if not hasCell(r, ci, cj) then return out end
+  for i = ci * s / t, (ci + 1) * s / t - 1 do
+    for j = cj * s / t, (cj + 1) * s / t - 1 do
+      if tileCovered(r, i, j) then out[keyOf(i, j)] = {i = i, j = j, far = true, decor = false, size = t} end
+      out[string.format('h500:%d_%d', i, j)] = {i = i, j = j, horizon = true, far = true, decor = false, size = t, step = HORIZON_STEP}
+    end
+  end
+  for bi = math.ceil(ci * s / HORIZON_BLOCK), math.ceil((ci + 1) * s / HORIZON_BLOCK) - 1 do
+    for bj = math.ceil(cj * s / HORIZON_BLOCK), math.ceil((cj + 1) * s / HORIZON_BLOCK) - 1 do
+      out[string.format('h1000:%d_%d', bi, bj)] = {i = bi, j = bj, horizon = true, far = true, decor = false,
+        size = HORIZON_BLOCK, step = HORIZON_STEP}
+    end
+  end
+  return out
+end
+-- One layer built (pause never yields here), taken out of the cache and returned.
+function M.bakeLayer(key, wanted)
+  buildTile(key, wanted)
+  local layer
+  if wanted.horizon then
+    local e = active.horizon[key]
+    layer = e and e.horizon
+    active.horizon[key], state.stream.horizon[key] = nil, nil
+  else
+    local e = active.tiles[key]
+    layer = e and e.far
+    active.tiles[key], state.stream.far[key] = nil, nil
+  end
+  active.manifests = setmetatable({}, {__mode = 'v'})
+  return layer
+end
 M.localPoint = function(lat, lon) if active then return localPoint(active.region, lat, lon) end end
 M.nav = function(key) local entry = active and active.tiles[key]; return entry and entry.nav end
 M.status = function() ensure(); state.heartbeat = os.time(); return state end

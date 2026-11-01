@@ -157,6 +157,22 @@ function M.sweptRoads(on, mode)
   return {on = sw.on, mode = sw.mode}
 end
 
+-- Prebuilt far and horizon tiles (native.lua BAKED, earthng/bake_tiles.py; docs/PREBUILT-TILES.md step
+-- 1). Off by default; a region without a bake, or with a stale one, keeps the generator either way.
+-- Set it before the landing (a landing checks the bake once). Console:
+--   extensions.e2r_world.bakedTiles(true)    read the far ring (without decor) and the horizon from the bake
+--   extensions.e2r_world.bakedTiles(false)   the generator again
+--   extensions.e2r_world.bakedTiles()        the switch and this landing's counts (used, missing, failed, off,
+--                                            switched: a switch changed after the landing)
+function M.bakedTiles(on)
+  local baked = native and native.BAKED
+  if not baked then return {on = false, off = 'not the native provider'} end
+  if on ~= nil then baked.on = on and true or false end
+  local st = native.status().stream
+  local info = st and st.baked or {}
+  return {on = baked.on, used = info.used, missing = info.missing, failed = info.failed, off = info.off, switched = info.switched}
+end
+
 -- Packs whose road and ground heights come from the exporter's new pipeline (a national DTM or the DEM
 -- rules; the region manifest's heights or heightSources) keep the exported road profiles and get the
 -- cross-section ground (generator.lua ROADS.section). Set it before the landing. Console:

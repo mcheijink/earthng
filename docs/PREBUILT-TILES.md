@@ -233,3 +233,57 @@ Do it in this order:
 3. If step 0 confirms section 5's bytes, bake **the horizon and the far ring** (step 1). It removes about a third of the generator's work while driving through town and close to half in open country (synthetic). It needs no generator refactor and adds a modest amount to the pack.
 4. Bake the **near road layer** (step 2) only after the road generator has stopped changing every week, and only if the profiler after tasks 1–3 still shows `native` above its budget at speed.
 5. Do not bake the scene unless one placement is accepted for all quality presets.
+
+## 11. Phase 1 as built
+
+Step 1 of section 8 (horizon and far ring) is implemented behind `extensions.e2r_world.bakedTiles(true)`, which is off by default. Step 0, the real-pack measurement, has not been done. The numbers below come from synthetic packs.
+
+**Baked:** the far ring's tiles without decor (`far:<i>_<j>`), and the 5 km horizon's 1 km blocks and 500 m quadrants at the 100 m step (`h1000:`, `h500:`).
+
+**Not baked:**
+- the near tiles (road layer and scene);
+- the far ring's decor, which is built whenever the car is slower than `farFast` (25 m/s);
+- the vista.
+
+All of these are generated as before. A far tile is read from the bake only while the car is above 25 m/s. Below that the ring wants decor, and the generator builds it as today.
+
+**Where it lives:** the design in section 4 puts a `baked` section in the region manifest. The build does not. It writes a sidecar in the country's namespace, `baked/<region>/baked.json` plus one `<ci>_<cj>.bin` per source cell. This way a bake ships as its own small ZIP, the pack is not rewritten, and no path is mounted twice. A layer is stored in the cell of its south-west corner.
+
+**When it is used:**
+- The bake is checked once per landing. `baked.json` must match all of these:
+  - the digest of the region manifest, so a re-exported pack drops an old bake;
+  - the digests of the eight Lua files that shape these layers (`bake.CODE`);
+  - the digests of every climate block the bake read;
+  - the swept-roads switch and the height-pipeline switch.
+- The two switches are checked again for every layer.
+- A digest is FNV-1a over the bytes without CR, so LF and CRLF checkouts agree.
+- Any mismatch, a missing cell file or a bad byte leaves that layer to the generator. `bakedTiles()` reports `used`, `missing`, `failed` and `off`.
+
+**Codec (`bake.lua`):** a tagged tree of the manifest. Meshes are delta-coded varints:
+- positions in mm and normals in 1e-4, the collector's own weld quanta;
+- UVs in 1/4096 of a repeat;
+- faces exact.
+
+The decoded tables are the ones the generator would have handed to `world.lua`, so `world.lua`'s queue, `createMesh` and collision are unchanged. The design's lattice codec and the decode inside `spawnItem` are left for later.
+
+**Measured** with `python earthng/bake_tiles_test.py --bench`: through `buildTile`, on a 4-vCPU cloud machine, so read the ratios, not the milliseconds.
+
+| Pack | Layer | Generated (cells decoded and built) | Read from the bake |
+| --- | --- | --- | --- |
+| light (one road, fields) | far 500 m | 30 ms, 2.8 MB garbage | 1.1 ms, 0.5 MB |
+| light | horizon 1 km | 45 ms | 0.9 ms |
+| light | horizon 500 m | 14 ms | 0.4 ms |
+| dense town (`generator_budget.py`'s cell) | far 500 m, 16 500 triangles | 194 ms, 26 MB | 16 ms, 9 MB |
+| dense town | horizon 1 km | 160 ms | 1.0 ms |
+| dense town | horizon 500 m | 48 ms | 0.4 ms |
+
+The once-per-landing check costs 11–15 ms there, spread over pauses.
+
+**Size**, deflated, per 1 km cell. The first two columns deflate each layer alone. The last is the cell file as the ZIP stores it, deflated as one entry, which is why it is smaller than their sum:
+
+| Pack | Far tiles | Horizon (one 1 km block and four quadrants) | Whole cell file |
+| --- | --- | --- | --- |
+| light | 27 kB | 23 kB | 34 kB |
+| dense town | 131 kB | 26 kB | 152 kB |
+
+For the assumed 85/12/3 mix of section 5, this is about 50 kB/km², or about 2.5 GB for a 47 700 km² state. Real roads and DEM noise could double it. `--layers horizon` keeps only the horizon, at most about 25 kB/km².
