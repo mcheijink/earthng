@@ -1493,7 +1493,22 @@ local function updateTiles()
         local info = st.horizon and st.horizon[key]
         local cx = info and info.x or spawned.x or p.x
         local cy = info and info.y or spawned.y or p.y
-        if not info or math.sqrt((cx - p.x) ^ 2 + (cy - p.y) ^ 2) > horizonR + 800 then
+        local gone = not info or math.sqrt((cx - p.x) ^ 2 + (cy - p.y) ^ 2) > horizonR + 800
+        -- A block the wanted set has left (split into 500 m quads and far tiles as the car nears,
+        -- merged back as it leaves) goes once everything wanted on its ground is in: dropped at
+        -- once it left a hole, kept until the native cache evicted it it was a second ground level.
+        local cover = not gone and NATIVE and native.horizonCover(key)
+        if cover and #cover > 0 then
+          gone = true
+          for n = 1, #cover do
+            local k = cover[n][1]
+            local h, near, far = S.horizon[k], S.tiles[k], S.far[k]
+            if cover[n][2] then gone = h ~= nil and h.left == 0
+            else gone = (near ~= nil and near.roadComplete == true) or (far ~= nil and far.left == 0) end
+            if not gone then break end
+          end
+        end
+        if gone then
           buryGroup(spawned.groupName or ('E2RH_' .. key:gsub('[^%w_]', '_')))
           spawned.dropped = true
           S.horizon[key] = nil
@@ -1503,7 +1518,8 @@ local function updateTiles()
       if #S.queue < 40 then
         local bestH, bestHD
         for key, info in pairs(st.horizon or {}) do
-          if not S.horizon[key] and type(info) == 'table' and info.x and info.y then
+          -- a block the wanted set has left is not spawned (its cover above would drop it again)
+          if not S.horizon[key] and type(info) == 'table' and info.x and info.y and not native.horizonCover(key) then
             local d = math.sqrt((info.x - p.x) ^ 2 + (info.y - p.y) ^ 2)
             if d <= horizonR + 250 and (not bestHD or d < bestHD) then bestH, bestHD = key, d end
           end
