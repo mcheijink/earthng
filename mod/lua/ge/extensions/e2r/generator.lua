@@ -7198,22 +7198,24 @@ local function build(cells, i, j, options)
   mark('lattice')
   -- Roads as continuous strips: a knot's normal is the mean of its two segments' directions, so
   -- consecutive quads share their edge vertices (no bevels, no gaps on bends), on every tile.
-  -- asphaltCut: the drawn asphalt's own cutters (at, outside), a table so that no local is added (the 200 limit)
-  local strips, asphaltCut, asphaltBins = {}, {}, {}
+  -- asphaltCut: the drawn asphalt's own cutters (at, outside), a table so that no local is added (the 200 limit);
+  -- asphaltCut.walks: the same bins for the drawn kerbs and sidewalks (asphaltCut.walk, asphaltCut.cut)
+  local strips, asphaltCut, asphaltBins = {}, {walks = {}}, {}
   -- twice the signed area (counter-clockwise > 0)
   local function area2(poly)
     local s = 0
     for k = 1, #poly do local p, q = poly[k], poly[k % #poly + 1]; s = s + p[1] * q[2] - q[1] * p[2] end
     return s
   end
-  local function addAsphalt(poly, road, index)
+  local function addAsphalt(poly, road, index, bins)
+    bins = bins or asphaltBins
     local box = ringBounds({poly})
     local entry = {poly = poly, bounds = box, road = road, index = index, ccw = area2(poly) > 0}
     for by = math.floor(box[2] / ABIN), math.floor(box[4] / ABIN) do
       for bx = math.floor(box[1] / ABIN), math.floor(box[3] / ABIN) do
         local binKey = (bx + 32768) * 65536 + by + 32768
-        local bin = asphaltBins[binKey] or {}
-        asphaltBins[binKey], bin[#bin + 1] = bin, entry
+        local bin = bins[binKey] or {}
+        bins[binKey], bin[#bin + 1] = bin, entry
       end
     end
   end
@@ -7956,14 +7958,15 @@ local function build(cells, i, j, options)
     return false
   end
   local cutOps = 0
-  local function subtract(poly, skip)
+  local function subtract(poly, skip, bins)
+    bins = bins or asphaltBins
     local pieces = {poly}
     local box = ringBounds({poly})
     local pccw = area2(poly) > 0
     local seen = {}
     for by = math.floor(box[2] / ABIN), math.floor(box[4] / ABIN) do
       for bx = math.floor(box[1] / ABIN), math.floor(box[3] / ABIN) do
-        for _, entry in ipairs(asphaltBins[(bx + 32768) * 65536 + by + 32768] or NONE) do
+        for _, entry in ipairs(bins[(bx + 32768) * 65536 + by + 32768] or NONE) do
           if not seen[entry] and boundsTouch(box, entry.bounds) and not (skip and skip(entry)) then
             seen[entry] = true
             local c, ccw = entry.poly, entry.ccw
@@ -7994,6 +7997,32 @@ local function build(cells, i, j, options)
       end
     end
     return pieces
+  end
+  -- Kerbs, sidewalks and junction sidewalk rings lie flush with the asphalt, so where two of them
+  -- (or a verge) overlap they z-fight. Each drawn piece becomes a cutter for the ones drawn after
+  -- it; a non-convex piece (a ring quad on a sharp star) is drawn but cuts nothing.
+  function asphaltCut.walk(pieces, road, index)
+    for _, piece in ipairs(pieces) do
+      local n, turn, convex = #piece, 0, true
+      for k = 1, n do
+        local p, q, r = piece[k], piece[k % n + 1], piece[(k + 1) % n + 1]
+        local cross = (q[1] - p[1]) * (r[2] - q[2]) - (q[2] - p[2]) * (r[1] - q[1])
+        if math.abs(cross) > 1e-9 then
+          if turn ~= 0 and (cross > 0) ~= (turn > 0) then convex = false; break end
+          turn = cross
+        end
+      end
+      if convex then addAsphalt(piece, road, index, asphaltCut.walks) end
+    end
+  end
+  -- pieces minus the drawn kerbs and sidewalks (skip as in subtract)
+  function asphaltCut.cut(pieces, skip)
+    if next(asphaltCut.walks) == nil then return pieces end
+    local out = {}
+    for _, piece in ipairs(pieces) do
+      for _, rest in ipairs(subtract(piece, skip, asphaltCut.walks)) do out[#out + 1] = rest end
+    end
+    return out
   end
   -- a point on the drawn asphalt (addAsphalt's convex pieces)
   function asphaltCut.at(x, y)
@@ -8044,11 +8073,15 @@ local function build(cells, i, j, options)
     for _, span in ipairs(out) do if (span[2] - span[1]) * length > .02 then keep[#keep + 1] = span end end
     return keep
   end
-  local function emit(collectorOf, material, poly, skip, up)
+  -- walks: also cut by the kerbs and sidewalks drawn so far (true, or a skip as for the asphalt).
+  -- Returns the pieces drawn.
+  local function emit(collectorOf, material, poly, skip, up, walks)
     -- Distant tiles skip the carriageway. The verge is the transition band: the same
     -- ground wedge the near tile cuts at this edge, so the shared border keeps its vertices.
-    if not visualRoads and not (distant and material == 'ground') then return end
-    for _, piece in ipairs(subtract(poly, skip)) do
+    if not visualRoads and not (distant and material == 'ground') then return NONE end
+    local pieces = subtract(poly, skip)
+    if walks then pieces = asphaltCut.cut(pieces, walks ~= true and walks or nil) end
+    for _, piece in ipairs(pieces) do
       if material == 'ground' then
         -- Outer edge points are marked at [9]. Resample them after the clip: a linear
         -- blend of the two tiles' endpoint heights does not land on the shared ground().
@@ -8071,6 +8104,7 @@ local function build(cells, i, j, options)
         collectorOf.polygon(material, piece, up)
       end
     end
+    return pieces
   end
   mark('plates')
   -- Sidewalks flush with the road (a curb band, then paving) on the sides the tags allow, cut by
@@ -8096,9 +8130,12 @@ local function build(cells, i, j, options)
                 local u1 = u0 + (strip.dist[k + 1] - strip.dist[k]) / DECAL.curbRepeat
                 band[1][4], band[1][5], band[2][4], band[2][5] = u0, DECAL.curbRow[1], u0, DECAL.curbRow[2]
                 band[3][4], band[3][5], band[4][4], band[4][5] = u1, DECAL.curbRow[2], u1, DECAL.curbRow[1]
-                emit(roads, 'curb', band, near, 'flat')
+                asphaltCut.walk(emit(roads, 'curb', band, near, 'flat', near), strip, k)
               end
-              emit(roads, 'sidewalk', paved, near, 'flat')
+              -- the paving waits for every kerb (below): a kerb stays whole where a crossing street's
+              -- sidewalk runs up to it
+              strip.paved = strip.paved or {}
+              strip.paved[#strip.paved + 1] = {paved, near, k = k}
             end
           end
           if strip.surface and tune.section then
@@ -8139,10 +8176,18 @@ local function build(cells, i, j, options)
     end
     pause()
   end
+  -- the paving, cut by every kerb and by the paving drawn before it (the first street keeps its corner)
+  for _, strip in ipairs(strips) do
+    for n, item in ipairs(strip.paved or NONE) do
+      asphaltCut.walk(emit(roads, 'sidewalk', item[1], item[2], 'flat', item[2]), strip, item.k)
+      if n % 32 == 0 then pause() end
+    end
+  end
   mark('sidewalks')
+  -- a junction's sidewalk ring fills what the streets' own kerbs and sidewalks leave at the corners
   for _, plate in ipairs(plates) do
     for _, quad in ipairs(plate.walks or NONE) do
-      if boundsTouch(rect, ringBounds({quad}), 0) then emit(roads, 'sidewalk', quad, nil, 'flat') end
+      if boundsTouch(rect, ringBounds({quad}), 0) then asphaltCut.walk(emit(roads, 'sidewalk', quad, nil, 'flat', true)) end
     end
   end
   -- Press the lattice under every surface strip (road and sidewalk, sampled every 2 m from each
@@ -8379,7 +8424,7 @@ local function build(cells, i, j, options)
         local outerA = {quad[3][1], quad[3][2], ground(quad[3][1], quad[3][2])}
         local outerB = {quad[4][1], quad[4][2], ground(quad[4][1], quad[4][2])}
         outerA[9], outerB[9] = 1, 1
-        emit(distant and scene or roads, vergeKind, {quad[1], quad[2], outerA, outerB}, nil, true)
+        emit(distant and scene or roads, vergeKind, {quad[1], quad[2], outerA, outerB}, nil, true, true)
       end
     end
   end
@@ -8433,7 +8478,7 @@ local function build(cells, i, j, options)
           verge[2][9], verge[3][9] = 1, 1
         end
         local groundMesh = distant and scene or roads
-        if tune.vergeCut > 0 then emit(groundMesh, vergeKind, verge, item[2], true)
+        if tune.vergeCut > 0 then emit(groundMesh, vergeKind, verge, item[2], true, item[2])
         elseif visualRoads then roads.polygon(vergeKind, verge, true)
         elseif distant then scene.polygon(vergeKind, verge, true) end
         if kind and item.edge then emitEdge(kind, strip, item) end
@@ -8453,7 +8498,7 @@ local function build(cells, i, j, options)
         quad[2][9], quad[3][9] = 1, 1
       end
       local skip = S and function(entry) return entry.road == S and entry.index and math.abs(entry.index - s) < 25 end or nil
-      if tune.vergeCut > 0 then emit(distant and scene or roads, vergeKind, quad, skip, true)
+      if tune.vergeCut > 0 then emit(distant and scene or roads, vergeKind, quad, skip, true, true)
       elseif visualRoads then roads.polygon(vergeKind, quad, true)
       elseif distant then scene.polygon(vergeKind, quad, true) end
     end
@@ -8465,7 +8510,7 @@ local function build(cells, i, j, options)
         if edgeOps % 16 == 0 then pause() end
         quad[2][3], quad[3][3] = ground(quad[2][1], quad[2][2]), ground(quad[3][1], quad[3][2])
         local skip = S and function(entry) return entry.road == S and entry.index and math.abs(entry.index - s) < 25 end or nil
-        if tune.vergeCut > 0 then emit(distant and scene or roads, vergeKind, quad, skip, true)
+        if tune.vergeCut > 0 then emit(distant and scene or roads, vergeKind, quad, skip, true, true)
         elseif visualRoads then roads.polygon(vergeKind, quad, true)
         elseif distant then scene.polygon(vergeKind, quad, true) end
       end
