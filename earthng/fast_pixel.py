@@ -175,7 +175,7 @@ def fields(base):
                    'road_worn': 'road', 'road_gravel': 'trodden', 'road_dirt': 'trodden',
                    'road_broken': 'trodden', 'road_track': 'trodden',
                    'roof_sheet': 'roof_metal', 'roof_mtile_red': 'roof_tile', 'roof_mtile_brown': 'roof_tile',
-                   'roof_mtile_green': 'roof_tile', 'door_garage': 'wall_block', 'door_rust': 'wall_block',
+                   'roof_mtile_green': 'roof_tile', 'roof_slate_dark': 'roof_metal', 'door_garage': 'wall_block', 'door_rust': 'wall_block',
                    'clad_metal': 'wall_block', 'clad_tin': 'wall_block', 'plinth': 'paved',
                    'gable': 'wall_plaster', 'hw_white': 'wall_stucco', 'hw_yellow': 'wall_plaster',
                    'hw_blue': 'wall_pls_blue', 'hw_green': 'wall_pls_green', 'hw_pink': 'wall_pls_peach',
