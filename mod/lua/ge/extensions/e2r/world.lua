@@ -484,7 +484,11 @@ local function spawnForestItem(it, tile)
   local kind = forestFor(tile) and plantDataFor(key)
   if not kind then return false end
   local adds = forestQueue(key).adds
-  M.fifo.push(adds, {it, tile, tile.forestGen or 0})
+  -- the commit needs the transform only: an entry used to hold the manifest item (its pos and rot
+  -- tables and name), ~770 bytes a crown kept until the commit once the layer was released,
+  -- ~130 now. Same numbers, same yaw (yawOf), so the same crowns.
+  local pos = it.pos
+  M.fifo.push(adds, {pos[1], pos[2], pos[3], yawOf(it.rot), it.scale or 1, tile, tile.forestGen or 0, it.shape == LAMP_SHAPE})
   return true
 end
 
@@ -567,17 +571,17 @@ local function forestCommit()
   local m, euler, at = MatrixF(true), vec3(0, 0, 0), vec3(0, 0, 0)
   for index = 1, count do
     local entry = M.fifo.pop(adds)
-    local it, tile = entry[1], entry[2]
-    if kind and not tile.dropped and not tile.vegetationDropped and (tile.forestGen or 0) == entry[3] then
-      euler.z = yawOf(it.rot)
+    local tile = entry[6]
+    if kind and not tile.dropped and not tile.vegetationDropped and (tile.forestGen or 0) == entry[7] then
+      euler.z = entry[4]
       m:setFromEuler(euler)
-      at.x, at.y, at.z = it.pos[1], it.pos[2], it.pos[3]
+      at.x, at.y, at.z = entry[1], entry[2], entry[3]
       m:setPosition(at)
-      local ok, item = pcall(data.createNewItem, data, kind, m, it.scale or 1)
+      local ok, item = pcall(data.createNewItem, data, kind, m, entry[5])
       if ok and item then
         tile.forestId = sharedForestId
         added = added + 1
-        if it.shape == LAMP_SHAPE then
+        if entry[8] then
           S.lamps = S.lamps or {}
           S.lamps[string.format('%d_%d', math.floor(at.x), math.floor(at.y))] = {at.x, at.y, at.z}
         end
