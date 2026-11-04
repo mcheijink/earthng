@@ -585,6 +585,72 @@ end
 -- data: roads3.merge of the cells round the tile. opts: rect (the tile), classes (a set of highways),
 -- tileKey, lift, material(tags) -> material kind, markKind ('mark', 'mark_yellow' or nil),
 -- deckDepth(tags), pause, far (no items: far surfaces only).
+-- the lane count of S at s (its run there, or the default from its tags and extents)
+local function lanesOf(S, s)
+  local r = S:lanesAt(s)
+  return r.f + r.b + r.both
+end
+
+-- B (mouth m at node nd) drawn along H's edge line from the node to where they part (TUNE.goreGap): the fork rule of
+-- M.plan. far: the lane count beyond the node (H's other side, or the road the two end on), nil if none
+local function forkAlong(T, nd, H, B, m, far)
+  local b0 = B:at(m.s)
+  local best, bm
+  for _, hm in ipairs(nd.mouths) do
+    if hm.stroke == H.id then
+      local h0 = H:at(hm.s)
+      if b0 and h0 then
+        local c = cos(b0.h) * cos(h0.h) * m.dir * hm.dir + sin(b0.h) * sin(h0.h) * m.dir * hm.dir
+        if not best or c > best then best, bm = c, hm end
+      end
+    end
+  end
+  if best and best > cos(T.forkAngle) then
+    -- where they part: B's inner edge clear of H's edge (marching away from the node)
+    local part, sideH
+    for d = 2, T.forkReach, 2 do
+      local sb = m.s + m.dir * d
+      local st = B:at(sb)
+      if not st then break end
+      local hs, hu, hst = H:project(st.x, st.y, bm.s + bm.dir * d)
+      if not hs then break end
+      local sgn = hu >= 0 and 1 or -1
+      local inner = sgn > 0 and st.eR or st.eL      -- B's side towards H (H lies to B's -sgn... see innerSide)
+      local turn = abs(cos(st.h - hst.h))
+      -- B lies on H's side sgn; H lies to B's side -sgn (B's left is +, same sense as H's when aligned)
+      local dirSame = cos(st.h - hst.h) >= 0
+      local innerSide = dirSame and -sgn or sgn
+      inner = innerSide > 0 and st.eL or st.eR
+      local edgeH = sgn > 0 and hst.eL or hst.eR
+      if abs(hu) - inner * max(.5, turn) - edgeH >= T.goreGap then part, sideH = d, sgn; B.forkInner = innerSide; break end
+    end
+    if part then
+      local sB, dB, sH, dH = m.s, m.dir, bm.s, bm.dir
+      B.fork = {node = nd.node, H = H}
+      B.host, B.innerSide, B.hostSide = H, B.forkInner, sideH
+      B.cutA, B.cutB = min(sB, sB + dB * part), max(sB, sB + dB * part)
+      B.blend0, B.blendDir = sB + dB * part, dB
+      B.hint = function(sv) return sH + dH * dB * (sv - sB) end
+      B.hostEdge = function(hs) local hst = H:at(hs); return hst and (sideH > 0 and hst.eL or hst.eR) end
+      -- the host's edge line along the branch: a lane line (narrow) where a lane leaves or joins the host there (its lanes on
+      -- the node's far side are its own here plus the branch's: a lane split), else the host's through edge line; solid both
+      H.edgeGaps[#H.edgeGaps + 1] = {a = min(sH, sH + dH * part), b = max(sH, sH + dH * part), side = sideH,
+        lane = far ~= nil and far > lanesOf(H, sH + dH) and far == lanesOf(H, sH + dH) + lanesOf(B, sB + dB)}
+      -- a lane split (the pack's 'split' role, fast_roads.lane_splits): the branch takes its lanes from the host at the
+      -- node, where the exporter steps the host's section over 5 cm; the host's lane block steps there too instead of
+      -- moving over the window (its lines crossed the branch's lane for 20 m either side of the node)
+      local role = nd.roles and nd.roles[B.id]
+      if role and role.role == 'split' and role.host == H.id then
+        B.split = true
+        H.edgeGaps[#H.edgeGaps].lane = true
+        for _, w in ipairs(H.windows) do
+          if abs(w.r0.s1 - sH) < .1 then w.a, w.b = w.r0.s1, w.r0.s1 end
+        end
+      end
+    end
+  end
+end
+
 function M.plan(data, opts)
   local T = M.TUNE
   local pause = opts.pause or function() end
@@ -790,6 +856,9 @@ function M.plan(data, opts)
   -- forks, diverges and merges of swept roads that are not lane-attached: a branch leaving a through
   -- road within TUNE.forkAngle is drawn cut along that road's edge line and in its plane until the two
   -- part, instead of a fan plate (two surfaces overlapping at their own cross-falls were steps)
+  -- forks, diverges and merges of swept roads that are not lane-attached: a branch leaving a through
+  -- road within TUNE.forkAngle is drawn cut along that road's edge line and in its plane until the two
+  -- part, instead of a fan plate (two surfaces overlapping at their own cross-falls were steps)
   for _, nd in ipairs(data.nodes) do
     tick()
     if (nd.kind == 'diverge' or nd.kind == 'merge' or nd.kind == 'fork' or nd.kind == 'junction') and not plan.junctionAt[nd.node] then
@@ -803,46 +872,36 @@ function M.plan(data, opts)
       for _, m in ipairs(H and nd.mouths or NONE) do
         local B = plan.strokes[m.stroke]
         if B and B ~= H and B.swept and count[m.stroke] == 1 and not B.attach and not B.fork then
-          local b0 = B:at(m.s)
-          local best, bm
+          local far
           for _, hm in ipairs(nd.mouths) do
-            if hm.stroke == H.id then
-              local h0 = H:at(hm.s)
-              if b0 and h0 then
-                local c = cos(b0.h) * cos(h0.h) * m.dir * hm.dir + sin(b0.h) * sin(h0.h) * m.dir * hm.dir
-                if not best or c > best then best, bm = c, hm end
+            if hm.stroke == H.id and hm.dir ~= m.dir then far = lanesOf(H, hm.s + hm.dir) end
+          end
+          forkAlong(T, nd, H, B, m, far)
+        end
+      end
+      -- two one-way strokes that end (or start) at the node side by side, neither along a through road (links ending on a
+      -- third road: its fan plate left the wedge between them unpaved and without a gore): the lower-ranked one is drawn
+      -- along the other as a fork branch, the plate keeps the rest
+      local free = {}
+      for _, m in ipairs(nd.mouths) do
+        local S = plan.strokes[m.stroke]
+        if S and S.swept and S.oneway and count[m.stroke] == 1 and not S.attach and not S.fork and S ~= H then free[#free + 1] = m end
+      end
+      for i = 1, #free - 1 do
+        for j = i + 1, #free do
+          local a, b = free[i], free[j]
+          local A, B = plan.strokes[a.stroke], plan.strokes[b.stroke]
+          if a.dir == b.dir and not A.fork and not B.fork then
+            if rankOf(B) > rankOf(A) or (rankOf(B) == rankOf(A) and tostring(B.id) < tostring(A.id)) then a, b, A, B = b, a, B, A end
+            -- the road they end on: the one other mouth on the node's far side
+            local far, others = nil, 0
+            for _, o in ipairs(nd.mouths) do
+              if o.stroke ~= A.id and o.stroke ~= B.id then
+                others = others + 1
+                if o.dir ~= a.dir and plan.strokes[o.stroke] then far = lanesOf(plan.strokes[o.stroke], o.s + o.dir) end
               end
             end
-          end
-          if best and best > cos(T.forkAngle) then
-            -- where they part: B's inner edge clear of H's edge (marching away from the node)
-            local part, sideH
-            for d = 2, T.forkReach, 2 do
-              local sb = m.s + m.dir * d
-              local st = B:at(sb)
-              if not st then break end
-              local hs, hu, hst = H:project(st.x, st.y, bm.s + bm.dir * d)
-              if not hs then break end
-              local sgn = hu >= 0 and 1 or -1
-              local inner = sgn > 0 and st.eR or st.eL      -- B's side towards H (H lies to B's -sgn... see innerSide)
-              local turn = abs(cos(st.h - hst.h))
-              -- B lies on H's side sgn; H lies to B's side -sgn (B's left is +, same sense as H's when aligned)
-              local dirSame = cos(st.h - hst.h) >= 0
-              local innerSide = dirSame and -sgn or sgn
-              inner = innerSide > 0 and st.eL or st.eR
-              local edgeH = sgn > 0 and hst.eL or hst.eR
-              if abs(hu) - inner * max(.5, turn) - edgeH >= T.goreGap then part, sideH = d, sgn; B.forkInner = innerSide; break end
-            end
-            if part then
-              local sB, dB, sH, dH = m.s, m.dir, bm.s, bm.dir
-              B.fork = {node = nd.node, H = H}
-              B.host, B.innerSide, B.hostSide = H, B.forkInner, sideH
-              B.cutA, B.cutB = min(sB, sB + dB * part), max(sB, sB + dB * part)
-              B.blend0, B.blendDir = sB + dB * part, dB
-              B.hint = function(sv) return sH + dH * dB * (sv - sB) end
-              B.hostEdge = function(hs) local hst = H:at(hs); return hst and (sideH > 0 and hst.eL or hst.eR) end
-              H.edgeGaps[#H.edgeGaps + 1] = {a = min(sH, sH + dH * part), b = max(sH, sH + dH * part), side = sideH}
-            end
+            forkAlong(T, nd, A, B, b, others == 1 and far or nil)
           end
         end
       end
@@ -1618,15 +1677,19 @@ function M.linesAt(S, s)
         blockSide[e.side] = true
       end
     end
+    -- a branch drawn along this edge: one solid line, narrow where a lane leaves or joins there (the fork gap's lane: the
+    -- divider to the nose, then the gore's outline), else the through edge line at its own width (an aerial review:
+    -- solid along a branch that leaves the through lanes; game test of a split: the dashed divider was missing beside the car)
     local gap = {}
-    for _, g in ipairs(S.edgeGaps) do if s > g.a + 1e-6 and s < g.b - 1e-6 then gap[g.side] = true end end
+    for _, g in ipairs(S.edgeGaps) do if s > g.a + 1e-6 and s < g.b - 1e-6 then gap[g.side] = g end end
     if not gap[-1] then
       out[#out + 1] = {id = 'edgeR', u = right, width = autobahn and broad or narrow, dash = blockSide[-1] and block or nil}
     elseif M.MARKS.forkLine then
-      out[#out + 1] = {id = 'forkR', u = right, width = narrow, dash = guide}
+      local lane = gap[-1].lane
+      out[#out + 1] = {id = 'forkR', u = right, width = (lane or not autobahn) and narrow or broad}
     end
     if not gap[1] then out[#out + 1] = {id = 'edgeL', u = left, width = narrow, dash = blockSide[1] and block or nil}
-    elseif M.MARKS.forkLine then out[#out + 1] = {id = 'forkL', u = left, width = narrow, dash = guide} end
+    elseif M.MARKS.forkLine then out[#out + 1] = {id = 'forkL', u = left, width = narrow} end
     local at = right
     for k = 1, n - 1 do
       local wk = run.widths and run.widths[k] or w
@@ -2075,8 +2138,13 @@ function M.markMesh(plan, S, c, mesh, o)
           if o.id == l.id and abs(o.u - l.u) <= 3 * M.MARKS.jump then return o end
         end
       end
+      -- a host's line along a branch goes on as its edge line where the gore ends (the gore's outline had a gap there, the
+      -- two of different widths)
+      local side = l.id:match('^fork(%u)$') or l.id:match('^edge(%u)$')
       for _, o in ipairs(set) do
-        if abs(o.width - l.width) < 1e-6 then
+        local same = abs(o.width - l.width) < 1e-6
+        if not same and side and o.id ~= l.id and (o.id == 'fork' .. side or o.id == 'edge' .. side) then same = true end
+        if same then
           local d = abs(o.u - l.u)
           if d <= M.MARKS.jump and (not bd or d < bd) then best, bd = o, d end
         end
@@ -2105,10 +2173,15 @@ function M.markMesh(plan, S, c, mesh, o)
           local function fit(row, u)
             local over = cutSide > 0 and u - (row.eL + tol) or (-row.eR - tol) - u
             if over <= 0 then return u end
-            if far then return cutSide > 0 and row.eL or -row.eR end
+            -- (not where the cut leaves the branch no surface: its own edge there lies on the host's lane, a render of a
+            -- fork whose host keeps its lanes drew it 0.5 m inside the host's lane for 15 m from the node)
+            if far and row.eL + row.eR > .1 then return cutSide > 0 and row.eL or -row.eR end
           end
           ua, ub = fit(a, ua), fit(b, ub)
           if not (ua and ub) then lb = nil end
+          -- a lane split's first rows, 5 cm apart: the far line kept to the cut edge in the zero-width row at the node would
+          -- run across the lane to its own line in the next
+          if lb and S.split and b.s - a.s < .5 and abs(ub - ua) > .25 then lb = nil end
         end
         if lb and lm then
           -- the line inside the drawn surface only (a cut slip road's inner line lies on its host)
@@ -2155,8 +2228,16 @@ function M.goreMesh(plan, S, c, mesh, o)
   for _, list in ipairs(c.rows) do
     for _, r in ipairs(list) do
       if r.s >= S.cutA - 1e-6 and r.s <= S.cutB + 1e-6 then
-        local t = H:rayTo(r.x, r.y, r.nx * side, r.ny * side, hostEdge, r.hint)
-        if t then pts[#pts + 1] = {row = r, uIn = own, uHost = t * side} end
+        local he, ui = hostEdge, own
+        if S.split then
+          -- a lane split's blocks sit off their centre lines up to the nose (fast_roads.lane_splits): both lines per row
+          local b = M.laneBlock(H, r.hint)
+          he = (S.hostSide or -side) > 0 and b.left or b.right
+          local ob2 = M.laneBlock(S, r.s)
+          ui = side > 0 and ob2.left or ob2.right
+        end
+        local t = H:rayTo(r.x, r.y, r.nx * side, r.ny * side, he, r.hint)
+        if t then pts[#pts + 1] = {row = r, uIn = ui, uHost = t * side} end
       end
     end
   end

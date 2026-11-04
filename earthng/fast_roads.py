@@ -999,10 +999,30 @@ def section_of(seg, rev, oneway):
 class Stroke:
     __slots__ = ('id', 'parts', 'closed', 'highway', 'oneway', 'tags', 's', 'x', 'y', 'z', 'h', 'k', 'eL', 'eR',
                  'fl', 'fr', 'part_of', 'part_s', 'nodes', 'fitted', 'lanes', 'events', 'furniture', 'structures',
-                 'draw', 'attach', 'osm_dev', 'vertex_s')
+                 'draw', 'attach', 'osm_dev', 'vertex_s', 'split')
 
     def length(self):
         return float(self.s[-1])
+
+
+def _split_joint(graph, segments, node, ms, i, j):
+    """the joint road's mouth (k, e, dx, dy) when through pair (i, j) at node is a lane split's (lane_splits): a one-way
+    diverge or merge of three mouths whose joint road carries the lanes of both others, else None"""
+    if len(ms) != 3 or graph.kind.get(node) not in ('diverge', 'merge'):
+        return None
+    r = 3 - i - j
+    if any(graph.travel[m[0]] == 0 for m in ms):
+        return None
+    flows = [graph.flow(m) for m in ms]
+    jt = i if flows[i] != flows[r] else j            # the pair's mouth that flows the other way than the branch
+    other = j if jt == i else i
+
+    def lanes(m):
+        f, b_, both, _, _ = lanes_of(segments[m[0]]['tags'], False)
+        return f + b_ + both
+    if lanes(ms[jt]) != lanes(ms[other]) + lanes(ms[r]):
+        return None
+    return ms[jt]
 
 
 def build_strokes(segments, graph, emit=None, fit=True):
@@ -1016,6 +1036,12 @@ def build_strokes(segments, graph, emit=None, fit=True):
         for i, j, _ in pairs:
             a, b = ms[i], ms[j]
             tx, ty = _unit(b[2] - a[2], b[3] - a[3])
+            joint = _split_joint(graph, segments, node, ms, i, j)
+            if joint is not None:
+                # a lane split: its branches leave along the joint road, so the tangent is the joint road's own direction (the
+                # bisector took half the turn of the through branch's first OSM chord: 0.6 degrees with vertices 20 m apart,
+                # and the fit bent the approach 0.26 m sideways within 36 m of the node)
+                tx, ty = _unit(-joint[2], -joint[3])
             pair_line[(a[0], a[1])] = (tx, ty)
             pair_line[(b[0], b[1])] = (tx, ty)
 
@@ -1230,6 +1256,7 @@ def build_strokes(segments, graph, emit=None, fit=True):
         st.events, st.furniture, st.structures = [], [], []
         st.draw = [0., float(s[-1])]
         st.attach = []
+        st.split = []
         strokes.append(st)
     if emit:
         emit(f'roads v3: {len(strokes)} strokes ({fitted_n} fitted) from {len(segments)} segments in '
@@ -1555,6 +1582,281 @@ def lane_events(strokes, graph, segments, emit=None):
         stats[kind] += 1
     if emit:
         emit(f'roads v3: lane events {dict(stats)}')
+    return stats
+
+
+# =========================================================================================================
+# Lane splits
+# =========================================================================================================
+# A one-way road whose lanes part at a node into two branches (or two branches whose lanes join into one road): on
+# the real road the lanes run on side by side, one lane line between them, to the gore nose, and only there part. The
+# OSM node lies before it (a review of interchanges: about 40 m), so each branch's line already leaves the
+# divider at the node; a section centred on it drifts across the other lane and its lines step (the lane block of the
+# through stroke moved over sweep.lua's 40 m window, and the approach narrowed over TAPER before the node). Here each
+# branch keeps its lanes where they are in the joint carriageway until its own line reaches its lane's centre there,
+# then leaves on a bend tangent to both; only the paved extents and the lane width change, so the centre lines, the
+# nav lines and the heights stay the exporter's. sweep.lua places a lane block off its centre line by the clamp that
+# keeps it MARKS.inside within the paved edges (fitBlock): the inner extent is set so the clamp puts the block there.
+SPLIT_REACH = 150.     # m along a branch: as far as sweep.lua's fork rule (TUNE.forkReach) looks for the nose
+SPLIT_BEND = 80.       # m (own choice): from the nose, where its line reaches its lane's centre, a branch's lane bends onto
+                       # its own line over this (smoothstep of the line's offset: at its sharpest R ~145 m on R 600 arcs and
+                       # ~110 m on R 400, a third of the line's own; 40 m gave R 85 on R 600, 100 m no more than 80), shorter
+                       # where the branch's next junction is nearer (at least SPLIT_BEND_MIN). Game test of
+                       # a real split: a bend that began 1 m inside the centre (14 m before the nose at R 460) parted the
+                       # lanes early and drew the branch's line before the nose
+SPLIT_BEND_MIN = 15.
+SPLIT_EASE = 20.       # m (own choice): the paved extents then go back to the branch's own section
+SPLIT_STEP = .05       # m: the through stroke's section steps from the joint road to its own over this at the node
+SPLIT_SPACING = 5.     # m between stations on a branch's held stretch (10 m drew the bend in three chords)
+LANE_INSIDE = .25      # sweep.lua MARKS.inside
+
+
+def _fit_block(n, width, avail_l, avail_r, inside=LANE_INSIDE):
+    """(left, right) of a lane block in a paved section, as sweep.lua's fitBlock places it"""
+    half = n * width / 2
+    left, right = half, -half
+    if left > avail_l - inside:
+        d = left - (avail_l - inside)
+        left, right = left - d, right - d
+    if right < -(avail_r - inside):
+        d = -(avail_r - inside) - right
+        left, right = left + d, right + d
+    if left > avail_l - inside:
+        left = avail_l - inside
+    if left - right < n * 2.5:
+        left, right = half, -half
+    return left, right
+
+
+def _add_stations(st, extra):
+    """stations added at arc lengths `extra` on the chords between st's own (the line is unchanged)"""
+    extra = np.asarray([v for v in extra if 0. <= v <= st.s[-1] and np.min(np.abs(st.s - v)) > .02], float)
+    if not len(extra):
+        return
+    s = np.sort(np.r_[st.s, extra])
+    for name in ('x', 'y', 'z', 'h', 'k', 'eL', 'eR', 'fl', 'fr'):
+        setattr(st, name, np.interp(s, st.s, getattr(st, name)))
+    st.s = s
+    st.part_of = np.clip(np.searchsorted(st.part_s, s, side='right') - 1, 0, len(st.parts) - 1)
+
+
+def _way_end(xy, rev, ends_at_node, reach=150.):
+    """(heading, curvature + left) along the travel of an OSM way at its end at a node: the curvature from the heading
+    change between its first and last chord within `reach` m of the node over their distance (0 for a straight way), the
+    heading the end chord's turned by half its own turn. rev: the stroke runs against the way's node order; ends_at_node:
+    the travel arrives at the node along it (else it leaves the node)"""
+    P = np.asarray(xy, float)
+    if rev:
+        P = P[::-1]                                   # travel order
+    c = np.r_[0., np.cumsum(np.hypot(*np.diff(P, axis=0).T))]
+    near = (c[-1] - c <= reach) if ends_at_node else (c <= reach)
+    keep = P[near] if near.sum() >= 3 else (P[-3:] if ends_at_node else P[:3])
+    end = keep[-1] - keep[-2] if ends_at_node else keep[1] - keep[0]
+    h_end = math.atan2(end[1], end[0])
+    if len(keep) < 3:
+        return h_end, 0.
+    a, b = keep[1] - keep[0], keep[-1] - keep[-2]
+    dh = math.atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1])
+    run = np.r_[0., np.cumsum(np.hypot(*np.diff(keep, axis=0).T))]
+    span = (run[-1] - np.hypot(*b) / 2) - np.hypot(*a) / 2
+    k = float(dh / span) if span > 1. else 0.
+    half = k * float(np.hypot(*end)) / 2
+    return h_end + (half if ends_at_node else -half), k
+
+
+def _count(run):
+    return run[2] + run[3] + run[4]
+
+
+def _run_chain(st, s0, d):
+    """the lane runs of st from s0 in direction d (> 0: increasing s) up to the first change of the lane count"""
+    d = 1 if d > 0 else -1                            # a list step (lane_splits passes +-1.0: the pack build crashed on it)
+    runs = sorted(st.lanes, key=lambda r: r[0])
+    j = next((q for q, r in enumerate(runs) if r[0] - 1e-6 <= s0 + d * .5 <= r[1] + 1e-6), None)
+    if j is None:
+        return []
+    out = [runs[j]]
+    while 0 <= j + d < len(runs) and _count(runs[j + d]) == _count(runs[j]) and \
+            abs((runs[j][1] if d > 0 else runs[j][0]) - (runs[j + d][0] if d > 0 else runs[j + d][1])) < .05:
+        j += d
+        out.append(runs[j])
+    return out
+
+
+def lane_splits(strokes, graph, segments, emit=None):
+    """Lane splits (above): the extents, lane widths and stations of both branches, and a 'split' role for the one that
+    starts or ends at the node (sweep.lua: the through stroke's lane block steps there instead of a window)."""
+    by_seg = {}
+    for st in strokes:
+        for p, (k, rev) in enumerate(st.parts):
+            by_seg[k] = (st, p)
+    stats = defaultdict(int)
+    for node, ms in graph.mouths.items():
+        kind = graph.kind.get(node)
+        if len(ms) != 3 or kind not in ('diverge', 'merge'):
+            continue
+        rest = [(k, e) for k, e, _, _ in ms if (k, e) in graph.branch]
+        if len(rest) != 1 or rest[0][0] not in by_seg or graph.branch[rest[0]][0][0] not in by_seg:
+            continue
+        B, bp = by_seg[rest[0][0]]
+        H, _ = by_seg[graph.branch[rest[0]][0][0]]
+        out = kind == 'diverge'
+        if B is H or not (H.oneway and B.oneway) or H.closed or B.closed:
+            continue
+        if out and not (bp == 0 and B.nodes[0][0] == node) or not out and not (bp == len(B.parts) - 1 and B.nodes[-1][0] == node):
+            continue
+        here = [sv for n, sv, _ in H.nodes if n == node]
+        if len(here) != 1 or any(a['node'] == str(node) for a in B.attach) or any(e['branch'] == B.id for e in H.events):
+            continue
+        sN = here[0]
+        d = 1. if out else -1.                       # along H, away from the node into the branch's side
+        if any(min(e['taper'], e['nose']) - SPLIT_REACH <= sN <= max(e['taper'], e['nose']) + SPLIT_REACH for e in H.events):
+            stats['event_near'] += 1
+            continue
+        joint = _run_chain(H, sN, -d)
+        own_h, own_b = _run_chain(H, sN, d), _run_chain(B, 0. if out else B.length(), d)
+        if not (joint and own_h and own_b):
+            continue
+        nA, nH, nB = _count(joint[0]), _count(own_h[0]), _count(own_b[0])
+        if nA != nH + nB:
+            continue
+        w = joint[0][5]
+        # the joint road's section at the node and its lane block (as sweep.lua fits it)
+        iN = int(np.argmin(np.abs(H.s - sN)))
+        bN = int(np.argmin(np.abs(np.asarray(H.part_s) - sN)))
+        if abs(H.s[iN] - sN) > 1e-3 or abs(H.part_s[bN] - sN) > .01 or not 0 < bN < len(H.parts):
+            continue
+        pj = bN - 1 if out else bN                   # the joint road's part (part_of at the node station may be either)
+        kj, rj = H.parts[pj]
+        eLa, eRa, _ = section_of(segments[kj], rj, H.oneway)
+        left_a, right_a = _fit_block(nA, w, eLa, eRa)
+        # the reference: the joint road's centre line carried on past the node at the heading and curvature of its own OSM way
+        # there (the stroke's node tangent halves the turn to the through branch's first chord, and the fit bends towards it
+        # over ~60 m: with OSM vertices 20 m apart the held divider rose 0.5 m in 40 m on a straight approach)
+        x0, y0 = float(H.x[iN]), float(H.y[iN])
+        h0, k0 = _way_end(segments[kj]['xy'], rj, out)
+        h0 = float(_unwrap_to(np.array([h0]), np.array([H.h[iN]]))[0])
+
+        def ref(px, py):
+            """(offset + left, heading) of points against the reference"""
+            dx, dy = px - x0, py - y0
+            a, b = dx * math.cos(h0) + dy * math.sin(h0), -dx * math.sin(h0) + dy * math.cos(h0)
+            if abs(k0) < 1e-5:
+                return b, np.full(np.shape(a), h0)
+            r = 1. / k0
+            vx, vy = a / r, (b - r) / r
+            tau = np.arctan2(vx, -vy) / k0
+            return np.sign(k0) * (abs(r) - np.hypot(a, b - r)), h0 + k0 * tau
+        # which side B leaves on: the two lines 40 m (or half the shorter branch) from the node
+        reach = []
+        for X, sx in ((H, sN), (B, 0. if out else B.length())):
+            stops = [sv for n, sv, _ in X.nodes if (sv - sx) * d > 1e-3 and len(graph.mouths[n]) > 2]
+            stops.append(X.length() if d > 0 else 0.)
+            if X is B:
+                stops.append(B.draw[1] if d > 0 else B.draw[0])
+            chain = own_h if X is H else own_b
+            stops.append(chain[-1][1] if d > 0 else chain[-1][0])
+            reach.append(min(SPLIT_REACH, min(abs(v - sx) for v in stops)))
+        t_side = min(40., .5 * min(reach))
+        oH, _ = ref(np.interp(sN + d * t_side, H.s, H.x), np.interp(sN + d * t_side, H.s, H.y))
+        sb = t_side if out else B.length() - t_side
+        oB, _ = ref(np.interp(sb, B.s, B.x), np.interp(sb, B.s, B.y))
+        if abs(oB - oH) < .5:
+            stats['side_unclear'] += 1
+            continue
+        sideB = 1. if oB > oH else -1.
+        WB, WH = nB * w, nH * w
+        if sideB < 0:
+            div = right_a + WB
+            lanes = {id(B): (div - WB / 2, -1., eRa + right_a), id(H): (div + WH / 2, 1., eLa - left_a)}
+        else:
+            div = left_a - WB
+            lanes = {id(B): (div + WB / 2, 1., eLa - left_a), id(H): (div - WH / 2, -1., eRa + right_a)}
+        T_ret = TAPER.get(family(H.highway), TAPER['default'])
+        if min(reach) < SPLIT_EASE + T_ret + 10.:
+            stats['short'] += 1
+            continue
+        # each branch planned first, then changed: a branch whose line runs the wrong way leaves both as they are
+        plans, wrong = [], False
+        for X, sx, L, W in ((H, sN, reach[0], WH), (B, 0. if out else B.length(), reach[1], WB)):
+            _add_stations(X, [sx + d * SPLIT_STEP] + [sx + d * t for t in np.arange(SPLIT_SPACING, L, SPLIT_SPACING)])
+            along = (X.s - sx) * d
+            # H's station at the node keeps the joint road's section; B's is its first row (cut to nothing by sweep.lua)
+            idx = np.flatnonzero((along > (1e-6 if X is H else -1e-6)) & (along <= L + 1e-6))
+            idx = idx[np.argsort(along[idx])]
+            t = along[idx]
+            c, sg, sO = lanes[id(X)]
+            o, hr = ref(X.x[idx], X.y[idx])
+            cs = np.maximum(np.cos(X.h[idx] - hr), .5)
+            dd = sg * (o - c)
+            uq = sg * np.maximum(0., -dd / cs - W / 2 * (1. / cs - 1.))   # the block's centre off the line, held in place
+            gone = np.flatnonzero((dd >= 0.) & (t <= L - SPLIT_EASE - SPLIT_BEND_MIN))
+            t_hold = float(t[gone[0]]) if len(gone) else L - SPLIT_EASE
+            # held, the line must come towards its lane's centre: one that goes more than 1 m further from it than at the node
+            # (a branch mapped straight on beside a curved approach, the lines crossing) is no lane split (a random network:
+            # a lane held 18 m off its line, its extent negative)
+            if np.any(dd[t <= t_hold] < -(abs(c) + 1.)):
+                wrong = True
+                break
+            plans.append((X, idx, t, hr, dd, uq, gone, L, W, sg, sO))
+        if wrong:
+            stats['wrong_way'] += 1
+            continue
+        back_n = 0
+        for X, idx, t, hr, dd, uq, gone, L, W, sg, sO in plans:
+            if len(gone):
+                # the nose: the line is at its lane's centre (the block on it); from there the stations move onto the bend, a
+                # smoothstep from the joint lane to the line over SPLIT_BEND, and the block stays on them
+                j = gone[0]
+                t_nose = float(t[j])
+                uq[j:] = 0.
+                L_b = min(SPLIT_BEND, L - SPLIT_EASE - t_nose)
+                bend = (t >= t_nose) & (t <= t_nose + L_b)
+                shift = -sg * dd * (1. - _smoothstep((t - t_nose) / L_b))      # lane centre - line, across the reference
+                k = idx[bend]
+                X.x[k] = X.x[k] - np.sin(hr[bend]) * shift[bend]
+                X.y[k] = X.y[k] + np.cos(hr[bend]) * shift[bend]
+                seg_ = np.arange(max(0, k.min() - 1), min(len(X.s) - 1, k.max() + 1) + 1)
+                X.h[seg_] = _unwrap_to(np.arctan2(np.gradient(X.y[seg_], X.s[seg_]), np.gradient(X.x[seg_], X.s[seg_])), X.h[seg_])
+                t_dep = t_nose + L_b
+            else:
+                # the line never reaches its lane's centre (a straight branch mapped on the joint road's centre line): the lane
+                # comes back to its line over TAPER before the extents go back
+                t_dep = L - SPLIT_EASE
+                uq = uq * (1. - _smoothstep((t - (t_dep - T_ret)) / T_ret))
+                back_n += 1
+            # the paved extents that make sweep.lua's fitBlock put the block there: the inner one MARKS.inside beyond the
+            # block (under the other branch, which is cut along it; at least 0 where the line starts a hair past the divider),
+            # the outer one with the joint road's shoulder; then the own
+            inner = np.maximum(0., W / 2 - sg * uq + LANE_INSIDE)
+            outer = sg * uq + W / 2 + sO
+            eL_new, eR_new = (outer, inner) if sg > 0 else (inner, outer)
+            back = _smoothstep((t - t_dep) / SPLIT_EASE)
+            X.eL[idx] = eL_new + (X.eL[idx] - eL_new) * back
+            X.eR[idx] = eR_new + (X.eR[idx] - eR_new) * back
+            # the joint road's lane width up to the branch's next change of lane count (a one-lane link is 4.0 m between its
+            # shoulders: its own lane block was 25 cm wider than the lane it continues)
+            for r in (own_h if X is H else own_b):
+                r[5] = w
+        # the joint road keeps its section to the node (build_strokes tapered its far side over TAPER before it, over at most
+        # the half of the part next to the node)
+        reach_j = min(T_ret, abs(H.part_s[pj + 1] - H.part_s[pj]) / 2)
+        jm = ((H.s - sN) * d <= 1e-6) & (np.abs(H.s - sN) <= reach_j + 1e-6)
+        H.eL[jm], H.eR[jm] = eLa, eRa
+        if not out:
+            # the row at a run boundary takes the earlier run (sweep.lua lanesAt): before a merge's node that is the branch's,
+            # so the boundary moves to the step's upstream end
+            for r in H.lanes:
+                if abs(r[1] - sN) < 1e-3:
+                    r[1] = sN - SPLIT_STEP
+                elif abs(r[0] - sN) < 1e-3:
+                    r[0] = sN - SPLIT_STEP
+        B.split.append({'node': str(node), 'host': H.id})
+        stats[kind] += 1
+        if back_n:
+            stats['brought_back'] += back_n
+    if emit:
+        emit(f'roads v3: lane splits {dict(stats)}')
     return stats
 
 
@@ -1967,6 +2269,9 @@ def records(strokes, graph, segments, cell_size):
             for a in st.attach:
                 if a['node'] == str(node):        # attach stores the node id as text, the graph as given
                     roles[st.id] = ['lane', a['host']]
+            for a in st.split:
+                if a['node'] == str(node):        # lane_splits: the branch takes its lanes from the host at the node
+                    roles[st.id] = ['split', a['host']]
         st0, sv0 = lst[0]
         x = float(np.interp(sv0, st0.s, st0.x)); y = float(np.interp(sv0, st0.s, st0.y)); z = float(np.interp(sv0, st0.s, st0.z))
         # a lane-attached slip road no longer passes the node: its position is the host's
@@ -1995,6 +2300,7 @@ def build(segments, extras, floors_report, cell_size=1000., emit=None):
         with open(os.environ['EARTHNG_RULE_LOG'], 'w') as f:
             json.dump({'jogs': JOG_LOG, 'pinches': PINCH_LOG}, f)
     ev = lane_events(strokes, graph, segments, emit)
+    lane_splits(strokes, graph, segments, emit)
     clamp_pairs(strokes, emit)
     structures(strokes, segments, floors_report)
     furniture(strokes, segments, extras['barriers'] if extras else [], emit)
