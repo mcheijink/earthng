@@ -1390,13 +1390,19 @@ end
 -- their own water. So does a bridge whose deck is less than `deck` m over the plane. ctx: rect,
 -- count, sea (the plane), dem(x, y) (nil off the grids), cover(x, y) (the cover kind, 'ground' for
 -- none, and the area), segmentBins, pause, ground(x, y) (the drawn ground, optional). Returns the quads
--- ({x0, y0, x1, y1}) and whether all of the tile is sea. A quad is drawn only where the drawn ground at its
--- four corners and its centre lies at least `clear` m under the plane: on the shore the plane (0.3 m over the
--- sea level) crossed the quay and beach ground, which z-fought along the whole crossing and showed water over
--- land (in testing); a shore quad is drawn in `split` x `split` sub-quads, those over the ground that stay under the
--- plane, and open sea (ground 0.25 m under the sea level) stays covered whole.
+-- ({x0, y0, x1, y1}) and whether all of the tile is sea.
+-- Near tiles (ctx.exact): the quads are the whole sea cells, and ROADS.seaWater draws the water in them
+-- exactly where the drawn ground is under the plane. First the shore is shaped (ctx.setNode): a lattice node
+-- strictly inside the tile, within two cells of a sea cell and over `step` m from any road, and from `depth`
+-- m under the plane to `rise` m over it, goes to `depth` under it when all four cells round it are sea, else
+-- to `rise` over it. The shore then lies inside the sea cells: the ground crosses the plane once, nowhere
+-- within centimetres of it for metres, and no dry ground under the plane is left beside the water. The
+-- 2.5 m sub-quads that kept `clear` m off the ground left a stair-stepped edge and a dotted line of z-fight
+-- along every beach. Border nodes stay as they are: the next tile shares them.
+-- Far tiles: a quad is drawn only where the drawn ground at its four corners and its centre lies at least
+-- `clear` m under the plane, a shore quad in `split` x `split` sub-quads, open sea whole.
 ROADS.sea = {flat = .05, margin = 8, deck = 1, clear = .1, split = 8, wet = {ground = true, water = true, wetland = true, beach = true},
-  seaWater = {harbour = true, bay = true, lagoon = true}}
+  seaWater = {harbour = true, bay = true, lagoon = true}, depth = .5, rise = .15}
 function ROADS.seaQuads(ctx)
   local cfg, rect, n, plane, pause = ROADS.sea, ctx.rect, ctx.count, ctx.sea, ctx.pause or function() end
   local step = (rect[3] - rect[1]) / n
@@ -1474,9 +1480,34 @@ function ROADS.seaQuads(ctx)
     end
   end
   local quads = {}
+  if ctx.exact and ctx.setNode then
+    for gx = 1, n - 1 do
+      for gy = 1, n - 1 do
+        -- sea cells among the node's four, and within two cells of it
+        local wet, near = 0, false
+        for cx = gx - 2, gx + 1 do
+          for cy = gy - 2, gy + 1 do
+            if sea[key(cx, cy)] then
+              near = true
+              if cx >= gx - 1 and cx <= gx and cy >= gy - 1 and cy <= gy then wet = wet + 1 end
+            end
+          end
+        end
+        local x, y = rect[1] + gx * step, rect[2] + gy * step
+        local z = near and ctx.ground(x, y)
+        if z and z > plane - cfg.depth and z < plane + cfg.rise and not roadNear(x, y, step) then
+          ctx.setNode(x, y, wet == 4 and plane - cfg.depth or plane + cfg.rise)
+        end
+      end
+      pause()
+    end
+  end
   for gy = 0, n - 1 do
     for gx = 0, n - 1 do
-      if sea[key(gx, gy)] then
+      if sea[key(gx, gy)] and ctx.exact then
+        quads[#quads + 1] = {rect[1] + (rect[3] - rect[1]) * gx / n, rect[2] + (rect[4] - rect[2]) * gy / n,
+          rect[1] + (rect[3] - rect[1]) * (gx + 1) / n, rect[2] + (rect[4] - rect[2]) * (gy + 1) / n}
+      elseif sea[key(gx, gy)] then
         local x0, y0 = rect[1] + (rect[3] - rect[1]) * gx / n, rect[2] + (rect[4] - rect[2]) * gy / n
         local x1, y1 = rect[1] + (rect[3] - rect[1]) * (gx + 1) / n, rect[2] + (rect[4] - rect[2]) * (gy + 1) / n
         local function under(ax, ay, bx, by)
@@ -1508,6 +1539,104 @@ function ROADS.seaQuads(ctx)
     end
   end
   return quads, #quads == n * n
+end
+-- The water of the sea cells, near tiles (ROADS.seaQuads ctx.exact): each cell's two ground triangles (the
+-- lattice's (x0, y0)-(x1, y1) diagonal) cut where the drawn ground meets the plane, so the edge follows the
+-- shore. Where that edge runs within `reach` lattice steps of a road's side and the road stands `quay` m
+-- over the water, the shore is a quay: a wall from `foot` m under the plane up to the road, and a paved top
+-- from the wall to the road's edge over the bank (the coarse DEM's slope between a harbour road and its
+-- water read as a beach). ctx: quads, all, rect, sea, step, ground, lift, segmentBins, polygon, pause.
+ROADS.quay = {reach = 1.5, low = .4, high = 6, foot = 1, wall = 'plinth', top = 'sidewalk'}
+function ROADS.seaWater(ctx)
+  local plane, polygon, ground = ctx.sea, ctx.polygon, ctx.ground
+  -- open sea: one quad when the ground is under the plane at every lattice corner of the tile
+  local r = ctx.rect
+  local open = ctx.all
+  for x = r[1], open and r[3] + 1e-6 or r[1] - 1, ctx.step do
+    for y = r[2], r[4] + 1e-6, ctx.step do
+      if ground(x, y) >= plane then open = false; break end
+    end
+    if not open then break end
+  end
+  if open then
+    polygon('water', {{r[1], r[2], plane}, {r[3], r[2], plane}, {r[3], r[4], plane}, {r[1], r[4], plane}}, 'flat')
+    return
+  end
+  local shore = {}
+  for index, q in ipairs(ctx.quads) do
+    local a = {q[1], q[2], ground(q[1], q[2])}
+    local b = {q[3], q[2], ground(q[3], q[2])}
+    local c = {q[3], q[4], ground(q[3], q[4])}
+    local d = {q[1], q[4], ground(q[1], q[4])}
+    for _, tri in ipairs({{a, b, c}, {a, c, d}}) do
+      -- the part of the triangle under the plane (Sutherland-Hodgman against one plane), its cut edge kept
+      local out, cut = {}, {}
+      for k = 1, 3 do
+        local p, r = tri[k], tri[k % 3 + 1]
+        local pin, rin = p[3] < plane, r[3] < plane
+        if pin then out[#out + 1] = {p[1], p[2], plane} end
+        if pin ~= rin then
+          local t = (plane - p[3]) / (r[3] - p[3])
+          out[#out + 1] = {p[1] + (r[1] - p[1]) * t, p[2] + (r[2] - p[2]) * t, plane}
+          cut[#cut + 1] = out[#out]
+        end
+      end
+      if #out >= 3 then
+        polygon('water', out, 'flat')
+        if #cut == 2 then
+          local cx, cy = 0, 0
+          for _, p in ipairs(out) do cx, cy = cx + p[1] / #out, cy + p[2] / #out end
+          shore[#shore + 1] = {cut[1], cut[2], cx, cy}
+        end
+      end
+    end
+    if index % 64 == 0 then ctx.pause() end
+  end
+  for index, e in ipairs(ctx.segmentBins and shore or NONE) do
+    ROADS.quayAt(ctx, e[1], e[2], e[3], e[4])
+    if index % 64 == 0 then ctx.pause() end
+  end
+end
+-- A quay along the shore edge p -> q (the water's centre at wx, wy) when a road runs beside it
+function ROADS.quayAt(ctx, p, q, wx, wy)
+  local cfg, plane = ROADS.quay, ctx.sea
+  local mx, my = (p[1] + q[1]) / 2, (p[2] + q[2]) / 2
+  local best, bestD
+  for _, s in ipairs(ctx.segmentBins[(math.floor(mx / 50) + 32768) * 65536 + math.floor(my / 50) + 32768] or NONE) do
+    local tags = s.tags or NONE
+    if not ROADS.tunnel(tags) and not ROADS.bridge(tags) and not (s.road and s.road.track) then
+      local t = math.max(0, math.min(1, ((mx - s.a[1]) * s.dx + (my - s.a[2]) * s.dy) / s.len2))
+      local d = math.sqrt((mx - s.a[1] - t * s.dx) ^ 2 + (my - s.a[2] - t * s.dy) ^ 2) - s.width / 2
+      if d > .3 and d < cfg.reach * ctx.step and (not bestD or d < bestD) then best, bestD = {s, t}, d end
+    end
+  end
+  if not best then return end
+  local s, t = best[1], best[2]
+  local zr = (s.a[3] or 0) + ((s.b[3] or 0) - (s.a[3] or 0)) * t
+  if zr - plane < cfg.low or zr - plane > cfg.high then return end
+  local top = zr + ctx.lift - .02
+  local L = math.sqrt(s.len2)
+  local ux, uy = s.dx / L, s.dy / L
+  -- the road's side towards the water, and each end's foot on its edge
+  local side = ((mx - s.a[1]) * -uy + (my - s.a[2]) * ux) >= 0 and 1 or -1
+  local nx, ny = -uy * side, ux * side
+  local function edge(x, y)
+    local along = (x - s.a[1]) * ux + (y - s.a[2]) * uy
+    return {s.a[1] + ux * along + nx * s.width / 2, s.a[2] + uy * along + ny * s.width / 2, top}
+  end
+  -- the wall faces the water: from the road's side out
+  local fx, fy = wx - mx, wy - my
+  if fx * nx + fy * ny < 0 then fx, fy = nx, ny end
+  local len = math.sqrt((q[1] - p[1]) ^ 2 + (q[2] - p[2]) ^ 2)
+  local z0, h = plane - cfg.foot, top - plane + cfg.foot
+  local wall = {{p[1], p[2], z0, 0, 0}, {q[1], q[2], z0, len / 3, 0}, {q[1], q[2], top, len / 3, h / 3}, {p[1], p[2], top, 0, h / 3}}
+  local ux2, uy2, uz2 = q[1] - p[1], q[2] - p[2], 0
+  -- (b - a) x (c - a) of the quad's first corners, horizontal: turn it to face (fx, fy)
+  local cx, cy = uy2 * h - uz2 * 0, uz2 * 0 - ux2 * h
+  if cx * fx + cy * fy < 0 then wall = {wall[2], wall[1], wall[4], wall[3]}; wall[1][4], wall[2][4] = 0, len / 3; wall[3][4], wall[4][4] = len / 3, 0 end
+  ctx.polygon(cfg.wall, wall, false)
+  local ep, eq = edge(p[1], p[2]), edge(q[1], q[2])
+  ctx.polygon(cfg.top, {{p[1], p[2], top}, {q[1], q[2], top}, eq, ep}, true)
 end
 -- Two carriageways' bridges drawn as one slab (ROADS.unitedDecks) only when their ends lie within
 -- `ends` m of each other (along the host): the slab runs on to the farther end, a short overlap
@@ -8896,10 +9025,21 @@ local function build(cells, i, j, options)
   local seaQuads, seaAll = {}, false
   if sea then
     seaQuads, seaAll = ROADS.seaQuads({rect = rect, count = seaCount, sea = sea, dem = rawHeight, cover = coverAt,
-      segmentBins = segmentBins, pause = pause, ground = ground})
+      segmentBins = segmentBins, pause = pause, ground = ground, exact = not distant,
+      -- shore shaping (ROADS.seaQuads): the lattice node at (x, y) drawn at height z
+      setNode = function(x, y, z)
+        local k = lattice(x + step * .25, y + step * .25)
+        if k and nodes[k] then lower[k] = nodes[k] - z end
+      end})
+    -- the shaped nodes' normals are new
+    normalCache = {rows = {}, vals = {}, n = 0}
   end
   if seaAll then seaQuads = {rect} end
-  for _, q in ipairs(seaQuads) do
+  if sea and not distant then
+    ROADS.seaWater({quads = seaQuads, all = seaAll, rect = rect, sea = sea, step = step, ground = ground, lift = lift,
+      segmentBins = segmentBins, polygon = scene.polygon, pause = pause})
+  end
+  for _, q in ipairs(sea and distant and seaQuads or NONE) do
     scene.polygon('water', {{q[1], q[2], sea}, {q[3], q[2], sea}, {q[3], q[4], sea}, {q[1], q[4], sea}}, 'flat')
   end
   mark('groundsea')
