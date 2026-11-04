@@ -34,6 +34,9 @@ M.TUNE = {
   railClear = .45,     -- m: a rail point within this of a drawn surface is cut there (phase 3: .25 left the beam's
                        -- face and posts within 0.3 m of another road's surface, in testing)
   railMinOffset = .30, -- m outside the paved edge at least (a mapped barrier inside it is drawn at the edge)
+  railBehind = {2, 4}, -- m behind a rail where another carriageway makes it a median rail (rule:median: edges under
+                       -- 6 m apart, the rail in the middle; a mapped one up to 4 m out); 2 m apart, so a lane of 3 m
+                       -- whose near edge lies within 4 m is never missed
   navStep = 80,        -- m between nav knots at most (generator navSegment)
   spawnStep = 1,
   -- Transitions along a road (own choice, NOT from a guideline): where two strokes meet straight on
@@ -2365,7 +2368,9 @@ function M.railPaths(plan, S, c)
       local function close()
         local length = 0
         for k = 2, #run do length = length + sqrt((run[k][1] - run[k - 1][1]) ^ 2 + (run[k][2] - run[k - 1][2]) ^ 2) end
-        if #run >= 2 and length >= T.railMin then out[#out + 1] = {kind = kind, side = f.side, points = run, a = run.a, b = run.b} end
+        if #run >= 2 and length >= T.railMin then
+          out[#out + 1] = {kind = kind, side = f.side, points = run, a = run.a, b = run.b, double = run.double}
+        end
         run = {}
       end
       for _, s in ipairs(ss) do
@@ -2377,8 +2382,11 @@ function M.railPaths(plan, S, c)
           local x, y = row.x + row.nx * u, row.y + row.ny * u
           local zEdge = M.rowZ(row, f.side * e)
           local own = function(hit) return hit.S == S and abs(hit.s - s) < 40 end
-          if M.onSurface(plan, x, y, zEdge, T.railClear + M.RAIL.thick, 2.5, own) then close() else
-            if #run == 0 then run.a = s end
+          -- a carriageway behind: a median rail, two-faced (or drawn by the other carriageway: 2)
+          local median = kind == 'beam' and M.railBehind(plan, S, x, y, zEdge, row.nx * f.side, row.ny * f.side) or 0
+          if median == 2 or M.onSurface(plan, x, y, zEdge, T.railClear + M.RAIL.thick, 2.5, own) then close() else
+            if #run > 0 and run.double ~= (median == 1) then close() end
+            if #run == 0 then run.a, run.double = s, median == 1 end
             run[#run + 1] = {x, y, zEdge, s, row.h}
             run.b = s
           end
@@ -2390,7 +2398,39 @@ function M.railPaths(plan, S, c)
   return out
 end
 
--- a W-beam (two folds on the road side, a flat back, a top) and posts, or a concrete barrier profile
+-- Which way a rail faces. Its side comes from the stroke it runs along (fast_roads.furniture: the side of the nearest
+-- station, never the barrier way's direction), so the beam faces that stroke's traffic and the posts stand behind it.
+-- A rail with another carriageway behind it (an OSM median barrier, which the pack gives to both carriageways, or a
+-- rule:median rail, which it gives to one) is a median rail: a beam on each face and the posts in the middle. One-faced,
+-- the other carriageway saw the posts in front of a flat back, or the posts of the second copy through its beam.
+-- Returns 0 (no carriageway behind), 1 (a median rail this stroke draws) or 2 (the other carriageway carries the same
+-- rail on its facing side and its id sorts first: it draws it). (ux, uy): unit across, away from this stroke's road.
+local BEHIND = {}
+local function behindTest(z, S2) return S2 ~= nil and S2 ~= BEHIND.S and abs(z - BEHIND.z) < 2.5 end
+function M.railBehind(plan, S, x, y, z, ux, uy)
+  BEHIND.S, BEHIND.z = S, z
+  local S2, s2
+  for _, d in ipairs(M.TUNE.railBehind) do
+    local hz, hS, hs = M.surfaceWhere(plan, x + ux * d, y + uy * d, .05, behindTest)
+    if hz then S2, s2 = hS, hs; break end
+  end
+  BEHIND.S = nil
+  if not S2 then return 0 end
+  local st = S2:at(s2)
+  if not st or not s2 then return 1 end
+  -- the side of S2 the rail stands on
+  local towards = (x - st.x) * -sin(st.h) + (y - st.y) * cos(st.h) > 0 and 1 or -1
+  for _, f in ipairs(S2.furniture) do
+    if M.RAIL.kinds[f.kind] == 'beam' and f.side == towards and s2 >= f.s0 - 2 and s2 <= f.s1 + 2 then
+      return tostring(S2.id) < tostring(S.id) and 2 or 1
+    end
+  end
+  return 1
+end
+
+-- a W-beam (two folds on the road side, a flat back, a top) and posts, or a concrete barrier profile; a median rail
+-- (path.double) mirrors the beam about the posts and centres them on the rail's line
+local ONE, BOTH = {1}, {1, -1}
 function M.railMesh(plan, S, c, path, mesh, o, lift)
   local R = M.RAIL
   local pts = path.points
@@ -2415,46 +2455,51 @@ function M.railMesh(plan, S, c, path, mesh, o, lift)
     local low = R.height - R.beam
     prof = {{0, low}, {R.depth, low + R.beam * .3}, {R.depth, low + R.beam * .7}, {0, R.height}, {-R.thick, R.height}, {-R.thick, low}}
   end
-  local function vert(k, i)
+  -- a median rail: the posts on the line, each beam's back on them
+  local double = path.double and path.kind == 'beam'
+  local shift = double and R.thick + R.post / 2 or 0
+  local function vert(k, i, m)
     local p = pts[k]
     local tx, ty = frame(k)
-    -- (rx, ry): unit across towards the road
+    -- (rx, ry): unit across towards the road (m = -1: the mirrored beam, towards the carriageway behind)
     local rx, ry = ty * side, -tx * side
     local q = prof[i]
-    return {p[1] + rx * q[1], p[2] + ry * q[1], p[3] + lift + q[2], (p[4] or 0) / 3, q[2] / 3}
+    local u = m * (q[1] + shift)
+    return {p[1] + rx * u, p[2] + ry * u, p[3] + lift + q[2], (p[4] or 0) / 3, q[2] / 3}
   end
   local closed = path.kind == 'jersey'
-  for k = 1, #pts - 1 do
-    for i = 1, #prof - (closed and 0 or 1) do
-      local j = i % #prof + 1
-      if not (path.kind ~= 'jersey' and i == #prof) then
-        local a, b, cc, d = vert(k, i), vert(k + 1, i), vert(k + 1, j), vert(k, j)
-        -- facing: away from the beam's inside (its centroid)
-        local mx, my = (pts[k][1] + pts[k + 1][1]) / 2, (pts[k][2] + pts[k + 1][2]) / 2
+  for _, m in ipairs(double and BOTH or ONE) do
+    for k = 1, #pts - 1 do
+      for i = 1, #prof - (closed and 0 or 1) do
+        local j = i % #prof + 1
+        if not (path.kind ~= 'jersey' and i == #prof) then
+          local a, b, cc, d = vert(k, i, m), vert(k + 1, i, m), vert(k + 1, j, m), vert(k, j, m)
+          -- facing: away from the beam's inside (its centroid)
+          local tx, ty = frame(k)
+          local rx, ry = ty * side * m, -tx * side * m
+          local cu, cz = 0, 0
+          for _, q in ipairs(prof) do cu, cz = cu + q[1], cz + q[2] end
+          cu, cz = cu / #prof, cz / #prof
+          local fu = (prof[i][1] + prof[j][1]) / 2 - cu
+          local fz = (prof[i][2] + prof[j][2]) / 2 - cz
+          local facing = {rx * fu, ry * fu, fz}
+          tri(mesh, o, a, b, cc, uv, facing); tri(mesh, o, a, cc, d, uv, facing)
+        end
+      end
+    end
+    -- end caps where the run ends inside the chunk (not at a chunk join)
+    for _, e in ipairs({{1, path.a}, {#pts, path.b}}) do
+      local k, s = e[1], e[2]
+      if s and s > c0 + 1e-6 and s < c1 - 1e-6 then
         local tx, ty = frame(k)
-        local rx, ry = ty * side, -tx * side
-        local cu, cz = 0, 0
-        for _, q in ipairs(prof) do cu, cz = cu + q[1], cz + q[2] end
-        cu, cz = cu / #prof, cz / #prof
-        local fu = (prof[i][1] + prof[j][1]) / 2 - cu
-        local fz = (prof[i][2] + prof[j][2]) / 2 - cz
-        local facing = {rx * fu, ry * fu, fz}
-        tri(mesh, o, a, b, cc, uv, facing); tri(mesh, o, a, cc, d, uv, facing)
+        local f = k == 1 and -1 or 1
+        local ring = {}
+        for i = 1, #prof do ring[i] = vert(k, i, m) end
+        for i = 2, #ring - 1 do tri(mesh, o, ring[1], ring[i], ring[i + 1], uv, {tx * f, ty * f, 0}) end
       end
     end
   end
-  -- end caps where the run ends inside the chunk (not at a chunk join)
-  for _, e in ipairs({{1, path.a}, {#pts, path.b}}) do
-    local k, s = e[1], e[2]
-    if s and s > c0 + 1e-6 and s < c1 - 1e-6 then
-      local tx, ty = frame(k)
-      local f = k == 1 and -1 or 1
-      local ring = {}
-      for i = 1, #prof do ring[i] = vert(k, i) end
-      for i = 2, #ring - 1 do tri(mesh, o, ring[1], ring[i], ring[i + 1], uv, {tx * f, ty * f, 0}) end
-    end
-  end
-  -- posts every R.posts m of the stroke's s (behind the beam), the same in every chunk
+  -- posts every R.posts m of the stroke's s (behind the beam; a median rail's on its line), the same in every chunk
   if path.kind == 'beam' then
     local sA, sB = pts[1][4], pts[#pts][4]
     local p0 = math.ceil(sA / R.posts) * R.posts
@@ -2468,7 +2513,7 @@ function M.railMesh(plan, S, c, path, mesh, o, lift)
       local l = max(EPS, sqrt(tx * tx + ty * ty))
       tx, ty = tx / l, ty / l
       local rx, ry = ty * side, -tx * side
-      local back = R.thick + R.post / 2
+      local back = double and 0 or R.thick + R.post / 2
       local cx, cy = x - rx * back, y - ry * back
       local h = R.post / 2
       local z0, z1 = z + lift - R.sink, z + lift + R.height - .02

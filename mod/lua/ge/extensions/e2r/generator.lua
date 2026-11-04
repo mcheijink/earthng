@@ -1291,7 +1291,8 @@ end
 -- mirrored on its back) swept along the path with its corners rounded (up to rail.round m off
 -- a vertex), its ground line eased over rail.ease samples and one welded normal per vertex, so
 -- curves and the beam's folds shade smooth; a post every rail.posts metres on the `behind`
--- side (+1 left of the path's direction, -1 right). Only segments whose midpoint lies in
+-- side (+1 left of the path's direction, -1 right; 0: a median rail, its posts on the line and
+-- each skin of the beam moved off them by half a post). Only segments whose midpoint lies in
 -- ctx.rect: the tile that owns them, so a rail across a tile edge is drawn once.
 function ROADS.roundPath(path, radius)
   if #path < 3 or radius <= 0 then return path end
@@ -1603,10 +1604,11 @@ function ROADS.guardRail(ctx, path)
     local l = math.max(EPS, math.sqrt(nx * nx + nz * nz))
     pn[i] = {nx / l, nz / l}
   end
+  local gap = behind == 0 and rail.post / 2 or 0
   local function vertex(k, i, side, u)
     local p, f, q = pts[k], frames[k], profile[i]
     local nx, ny = -f[2], f[1]
-    local off = q[1] * side * f[3]
+    local off = (q[1] + gap) * side * f[3]
     local n = pn[i]
     return {p[1] + nx * off, p[2] + ny * off, p[3] + low + q[2], u, q[2] / rail.beam * .25,
       nx * n[1] * side, ny * n[1] * side, n[2]}
@@ -1836,6 +1838,72 @@ function ROADS.besideRoads(strips, points, sidewalk, pause)
   end
   close()
   return runs
+end
+
+-- The side of an OSM guard rail its posts stand on (ROADS.guardRail's `behind`). A barrier way's
+-- direction says nothing about the road it guards: drawn with the default (+1, left of the way)
+-- about half of the mapped rails had their posts on the traffic side of the beam. Each sample
+-- `step` m along the piece looks for a carriageway edge within `reach` m on its left and on its
+-- right: with both, it is a median sample; with one, the posts go to the other side.
+-- The majority decides: 0 (median: posts on the line), +1 or -1; no carriageway in reach: +1.
+-- pause (optional): a pause point every 8 segments of the rail (every sample measures the gap to
+-- every near strip segment, as besideRoads does)
+ROADS.railSide = {step = 4, reach = 4}
+function ROADS.railBehind(strips, points, sidewalk, pause)
+  local rs = ROADS.railSide
+  local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
+  for _, p in ipairs(points) do
+    x0, y0, x1, y1 = math.min(x0, p[1]), math.min(y0, p[2]), math.max(x1, p[1]), math.max(y1, p[2])
+  end
+  local near = {}
+  for _, strip in ipairs(strips or NONE) do
+    if not ROADS.tunnel(strip.tags) then
+      local walk = false
+      for _, w in pairs(strip.walk or NONE) do
+        if w[1] or w[-1] then walk = true; break end
+      end
+      local edge = strip.hw + (walk and sidewalk or 0)
+      local r = edge + rs.reach
+      local ps = strip.road and strip.road.points or strip.points
+      for k = 1, #ps - 1 do
+        local a, b = ps[k], ps[k + 1]
+        if math.max(a[1], b[1]) + r > x0 and math.min(a[1], b[1]) - r < x1
+          and math.max(a[2], b[2]) + r > y0 and math.min(a[2], b[2]) - r < y1 then
+          near[#near + 1] = {a[1], a[2], b[1], b[2], edge}
+        end
+      end
+    end
+  end
+  local votes = {[-1] = 0, [0] = 0, [1] = 0}
+  for k = 1, #points - 1 do
+    if pause and k % 8 == 0 then pause() end
+    local a, b = points[k], points[k + 1]
+    local dx, dy = b[1] - a[1], b[2] - a[2]
+    local l = math.sqrt(dx * dx + dy * dy)
+    if l > EPS then
+      local tx, ty = dx / l, dy / l
+      local n = math.max(1, math.ceil(l / rs.step))
+      for i = 0, n - 1 do
+        local x, y = a[1] + dx * (i + .5) / n, a[2] + dy * (i + .5) / n
+        -- is a carriageway edge within reach on the left / on the right of the rail's direction?
+        local left, right = false, false
+        for _, s in ipairs(near) do
+          local sx, sy = s[3] - s[1], s[4] - s[2]
+          local l2 = sx * sx + sy * sy
+          local u = l2 > EPS and math.max(0, math.min(1, ((x - s[1]) * sx + (y - s[2]) * sy) / l2)) or 0
+          local qx, qy = s[1] + u * sx, s[2] + u * sy
+          if math.sqrt((qx - x) ^ 2 + (qy - y) ^ 2) - s[5] <= rs.reach then
+            if (qx - x) * -ty + (qy - y) * tx >= 0 then left = true else right = true end
+          end
+        end
+        if left and right then votes[0] = votes[0] + 1
+        elseif left then votes[-1] = votes[-1] + 1
+        elseif right then votes[1] = votes[1] + 1 end
+      end
+    end
+  end
+  if votes[0] > votes[1] and votes[0] > votes[-1] then return 0 end
+  return votes[-1] > votes[1] and -1 or 1
 end
 
 -- Under the decks: a wall pier every deck.pier.every metres of a bridge (none where a road
@@ -6071,9 +6139,14 @@ function ROADS.pathShelves(ctx)
               rail = q.z - zAt > cfg.drop
             end
           end
+          -- the posts stand away from the path (behind = the rail's side of the path's direction)
+          if rail and run and run.behind ~= -q.side then
+            if #run >= 2 then shelf.rails[#shelf.rails + 1] = run end
+            run = nil
+          end
           if rail then
-            run = run or {}
             local side = -q.side
+            run = run or {behind = side}
             run[#run + 1] = {q.x + q.nx * side * (half + cfg.rail), q.y + q.ny * side * (half + cfg.rail), q.z}
           elseif run then
             if #run >= 2 then shelf.rails[#shelf.rails + 1] = run end
@@ -9165,7 +9238,8 @@ local function build(cells, i, j, options)
         for _, piece in ipairs(ROADS.besideRoads(strips, run, tune.sidewalk, pause)) do
           local path = {}
           for k, p in ipairs(piece) do path[k] = {p[1], p[2], 0} end
-          ROADS.guardRail({rect = rect, ground = ground, strips = strips, pause = pause, face = function(poly, ox, oy, oz, material)
+          ROADS.guardRail({rect = rect, ground = ground, strips = strips, pause = pause,
+            behind = ROADS.railBehind(strips, path, tune.sidewalk, pause), face = function(poly, ox, oy, oz, material)
             ROADS.orient(scene.polygon, material, poly, ox, oy, oz)
           end}, path)
         end
@@ -9197,7 +9271,7 @@ local function build(cells, i, j, options)
         if index % 32 == 0 then pause() end
       end
       for _, run in ipairs(shelf and shelf.rails or NONE) do
-        ROADS.guardRail({rect = rect, strips = strips, face = function(poly, ox, oy, oz, material)
+        ROADS.guardRail({rect = rect, strips = strips, behind = run.behind, face = function(poly, ox, oy, oz, material)
           ROADS.orient(scene.polygon, material, poly, ox, oy, oz)
         end}, run)
       end
