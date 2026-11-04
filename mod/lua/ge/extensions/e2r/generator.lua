@@ -6732,6 +6732,148 @@ end
 -- not pass).
 function ROADS.alignHumps() end
 
+-- Road clear zones: metres past a carriageway's edge kept free of trees, hedges and bushes (a crown's
+-- trunk, a hedge's middle). Rural roads from tertiary up 4.5 m, what ESAB 2006 asks of new trees by
+-- rural roads; motorways and trunk roads 6 m; unclassified roads 2.5 m; built-up streets
+-- (ROADS.section.urbanOf: a street class, a sidewalk or maxspeed <= 60) 0.75 m, past the kerb's
+-- safety strip; tracks 0.5 m. A tunnel keeps none. A tree row, a hedge or a mapped tree in the zone
+-- moves straight out across the road to its edge (VEG.clearOut); the lattice's trees are left out.
+VEG.clear = {motorway = 6, trunk = 6, primary = 4.5, secondary = 4.5, tertiary = 4.5, unclassified = 2.5,
+  urban = .75, track = .5, other = 1.5}
+-- a road segment's clear zone (cached on it), nil for a tunnel
+function VEG.clearOf(segment)
+  local c = segment.clear
+  if c == nil then
+    local tags = segment.tags or NONE
+    local class = (tags.highway or ''):gsub('_link$', '')
+    if ROADS.tunnel(tags) then c = false
+    elseif segment.road and segment.road.track then c = VEG.clear.track
+    elseif segment.urban and class ~= 'motorway' and class ~= 'trunk' then c = VEG.clear.urban
+    else c = VEG.clear[class] or VEG.clear.other end
+    segment.clear = c
+  end
+  return c or nil
+end
+-- The first road (segmentBins) whose clear zone, or pad m if more, holds (x, y): the segment, the
+-- distance from its centre line, the nearest point on it and the radius to keep; nil when clear.
+function VEG.inClear(bins, x, y, pad)
+  for _, s in ipairs(bins[(floor(x / 50) + 32768) * 65536 + floor(y / 50) + 32768] or NONE) do
+    local c = VEG.clearOf(s)
+    if c then
+      local a = s.a
+      local t = math.max(0, math.min(1, ((x - a[1]) * s.dx + (y - a[2]) * s.dy) / s.len2))
+      local qx, qy = a[1] + s.dx * t, a[2] + s.dy * t
+      local d2 = (x - qx) ^ 2 + (y - qy) ^ 2
+      local r = s.width / 2 + math.max(c, pad or 0)
+      if d2 < r * r then return s, math.sqrt(d2), qx, qy, r end
+    end
+  end
+  return nil
+end
+-- (x, y) moved straight away from each road whose clear zone holds it, to the zone's edge (three
+-- roads at most: a corner between two); nil on a centre line or when it cannot get out
+function VEG.clearOut(bins, x, y, pad)
+  for _ = 1, 3 do
+    local s, d, qx, qy, r = VEG.inClear(bins, x, y, pad)
+    if not s then return x, y end
+    if d < .05 then return nil end
+    x, y = qx + (x - qx) * (r + .05) / d, qy + (y - qy) * (r + .05) / d
+  end
+  if VEG.inClear(bins, x, y, pad) then return nil end
+  return x, y
+end
+-- A tree's set from its tags: leaf_type (a mixed row alternates on h), else the genus (or the species'
+-- first word); nil when the tags name neither a conifer nor a poplar (the caller's broadleaf choice).
+VEG.genusSet = {Pinus = 'pine', Picea = 'fir', Abies = 'fir', Larix = 'fir', Pseudotsuga = 'fir', Taxus = 'fir',
+  Thuja = 'fir', Populus = 'poplar'}
+function VEG.speciesOf(tags, h)
+  local leaf = tags.leaf_type
+  if leaf == 'needleleaved' or leaf == 'coniferous' then return 'pine' end
+  if leaf == 'mixed' then return h % 2 == 0 and 'pine' or nil end
+  if leaf == 'broadleaved' or leaf == 'deciduous' then
+    return tostring(tags.genus or ''):match('^Populus') and 'poplar' or nil
+  end
+  local genus = tostring(tags.genus or tags.species or ''):match('^(%a+)')
+  return genus and VEG.genusSet[genus] or nil
+end
+-- A mapped tree's shape (OSM natural=tree): by its tags; broadleaved takes the town's broadleaves; a
+-- tree whose tags say nothing keeps the one oak with a billboard (VEG.tree)
+function VEG.treeFor(point)
+  local tags = point.tags or NONE
+  local h = hash(tostring(point.id))
+  local name = VEG.speciesOf(tags, h)
+  if not name and (tags.leaf_type == 'broadleaved' or tags.leaf_type == 'deciduous') then name = 'town' end
+  if not name then return VEG.tree end
+  local set = VEG.use(name)
+  return set[h % #set + 1]
+end
+-- Hedges (OSM barrier=hedge): field hedges, the hedge banks of the north German plain, garden hedges.
+-- Places on a world grid along each line (where the line crosses a hedgeStep grid line of its main
+-- axis), so a hedge read from two cells or tiles keeps one rhythm, as the tree rows do. On built-up
+-- ground (built share >= hedgeTown; a village street reads .04-.14) and for a conifer hedge, the
+-- Italy cypress hedge piece (2.38 m long at scale 1) lies along the line, stretched to the place's
+-- spacing; elsewhere a quarter of the places stay empty and the rest take the bush set, a small tree on
+-- one in ten. All are Forest items: their shapes are trees and bushes (world.lua's vegetation path).
+VEG.hedge = {ITA .. 'trees/trees_italy/cypress_hedge_3m.dae'}
+VEG.fallback.hedge = 'bush'
+VEG.hedgeLong, VEG.hedgeScale, VEG.hedgeStep, VEG.hedgeTown = 2.38, .7, 1.6, .04
+-- the places of ctx.lines' hedges in ctx.rect: {x, y, key, hash, ux, uy (along), spacing, tags}
+function VEG.hedgeCandidates(ctx)
+  local out, seen, step, rect = {}, {}, VEG.hedgeStep, ctx.rect
+  for n, line in ipairs(ctx.lines) do
+    if line.kind == 'hedge' then
+      local points = line.points or NONE
+      for index = 1, #points - 1 do
+        local a, b = points[index], points[index + 1]
+        local dx, dy = b[1] - a[1], b[2] - a[2]
+        local length = math.sqrt(dx * dx + dy * dy)
+        if length > EPS then
+          local axis = math.abs(dx) >= math.abs(dy) and 1 or 2
+          local from, to = a[axis], b[axis]
+          local spacing = step * length / math.max(EPS, math.abs(to - from))
+          for k = math.ceil(math.min(from, to) / step), math.floor(math.max(from, to) / step) do
+            local t = math.abs(to - from) > EPS and (k * step - from) / (to - from) or 1
+            local x, y = a[1] + dx * t, a[2] + dy * t
+            local key = latticeKey(3, floor(x), floor(y), 2)
+            -- t = 1 is the next segment's first place
+            if t < 1 - EPS and not seen[key] and x >= rect[1] and x < rect[3] and y >= rect[2] and y < rect[4] then
+              seen[key] = true
+              out[#out + 1] = {x = x, y = y, key = key, hash = keyHash(9, key), ux = dx / length, uy = dy / length,
+                spacing = spacing, tags = line.tags or NONE}
+            end
+          end
+        end
+      end
+      if n % 32 == 0 then ctx.pause() end
+    end
+  end
+  return out
+end
+-- One hedge place: true when planted. ctx: rect, bins (segmentBins), ground, sea, blocked, builtAt, static.
+function VEG.hedgePlant(ctx, c)
+  local h = c.hash
+  local x, y = VEG.clearOut(ctx.bins, c.x, c.y, .5)
+  if not x then return false end
+  local rect = ctx.rect
+  if x < rect[1] or x >= rect[3] or y < rect[2] or y >= rect[4] then return false end
+  local z = ctx.ground(x, y)
+  if (ctx.sea and z <= ctx.sea) or ctx.blocked(x, y, .5, 1, true, true) then return false end
+  local name = VEG.speciesOf(c.tags, h)
+  local set = (name == 'pine' or name == 'fir' or ctx.builtAt(x, y, true) >= VEG.hedgeTown) and VEG.have('hedge')
+  if set and set[1] == VEG.hedge[1] then
+    local scale = VEG.hedgeScale * math.max(1, c.spacing / (VEG.hedgeLong * VEG.hedgeScale))
+    ctx.static(string.format('hedge_%d', c.key), set[1], x, y, z, math.atan2(-c.uy, c.ux), scale)
+    return true
+  end
+  if h % 4 == 0 then return false end
+  local u = keyHash(6, c.key) % 1000 / 1000
+  set = VEG.use(h % 10 == 1 and (name or 'town') or 'bush')
+  ctx.static(string.format('hedge_%d', c.key), set[floor(h / 10) % #set + 1], x, y, z, h % 6283 / 1000,
+    h % 10 == 1 and .55 + u * .25 or .55 + u * .3)
+  return true
+end
+function VEG.hedgePlanter(ctx) return function(c) return VEG.hedgePlant(ctx, c) end end
+
 local function build(cells, i, j, options)
   options = options or {}
   local pause = options.pause or options.yield or function() end
@@ -9562,9 +9704,15 @@ local function build(cells, i, j, options)
   end
   function OFFROAD.offCarriageway(point, p)
     local x, y, z = p[1], p[2], ground(p[1], p[2])
-    -- a street tree in its pit by the curb stays: only one on the asphalt itself goes
+    -- a street tree in its pit by the curb stays: only one on the asphalt itself goes; one in a road's
+    -- clear zone (VEG.clear) moves out across the road to its edge
     if point.kind ~= 'lamp' then
       if OFFROAD.onAsphalt(x, y) then return nil end
+      if point.kind == 'tree' then
+        x, y = VEG.clearOut(segmentBins, x, y, 0)
+        if not x then return nil end
+        z = ground(x, y)
+      end
       return x, y, z
     end
     -- at the drawn ground's height or the point's own (the pack's DEM, under an embankment or a
@@ -9602,7 +9750,7 @@ local function build(cells, i, j, options)
     if p and point.kind == 'stop' and wantStops then
       shelter(point, p)
     elseif p and p[1] >= rect[1] and p[1] < rect[3] and p[2] >= rect[2] and p[2] < rect[4] then
-      local shape = point.kind == 'tree' and VEG.tree or (point.kind == 'lamp' and wantLamps) and LAMP
+      local shape = point.kind == 'tree' and VEG.treeFor(point) or (point.kind == 'lamp' and wantLamps) and LAMP
       local x, y, z
       if shape then x, y, z = OFFROAD.offCarriageway(point, p) end
       if x then
@@ -9676,14 +9824,16 @@ local function build(cells, i, j, options)
     local blockedOps = 0
     -- wall: clearance from building walls (a crown), 0 for grass and stones. paved: a mapped
     -- tree may stand in a square or a car park (a grate in the paving), a lattice one may not.
-    local function blocked(x, y, pad, wall, paved)
+    -- clear: a road keeps its clear zone (VEG.clear) when that is more than pad (trees, bushes, hedges).
+    local function blocked(x, y, pad, wall, paved, clear)
       pad, wall = pad or 3.5, wall or 0
       if scene.streetReservations and VEG.streetBlocked(scene.streetReservations, x, y) then return true end
       local nearby = segmentBins[(floor(x / 50) + 32768) * 65536 + floor(y / 50) + 32768] or NONE
       for _, segment in ipairs(nearby) do
         local a = segment.a
         local t = math.max(0, math.min(1, ((x - a[1]) * segment.dx + (y - a[2]) * segment.dy) / segment.len2))
-        if (x - a[1] - t * segment.dx) ^ 2 + (y - a[2] - t * segment.dy) ^ 2 < (segment.width / 2 + pad) ^ 2 then return true end
+        if (x - a[1] - t * segment.dx) ^ 2 + (y - a[2] - t * segment.dy) ^ 2
+            < (segment.width / 2 + (clear and math.max(pad, VEG.clearOf(segment) or 0) or pad)) ^ 2 then return true end
         blockedOps = blockedOps + 1
         if blockedOps % 512 == 0 then pause() end
       end
@@ -10117,7 +10267,7 @@ local function build(cells, i, j, options)
     for _, line in ipairs(maxTrees > 0 and lists.lines or NONE) do
       if line.kind == 'tree_row' then
         local points, tags = line.points or NONE, line.tags or NONE
-        local needle = tags.leaf_type == 'needleleaved' or tags.leaf_type == 'coniferous'
+        local needle = false
         for index = 1, #points - 1 do
           local a, b = points[index], points[index + 1]
           local dx, dy = b[1] - a[1], b[2] - a[2]
@@ -10131,15 +10281,20 @@ local function build(cells, i, j, options)
             if rowPlanted < maxTrees and t < 1 - EPS and not rowSeen[position]
                 and x >= rect[1] and x < rect[3] and y >= rect[2] and y < rect[4] then
               rowSeen[position] = true
-              local z = ground(x, y)
-              if (not sea or z > sea) and not blocked(x, y, .5, 2, true) then
+              -- out of the roads' clear zones (an avenue's crowns move out to its edge)
+              x, y = VEG.clearOut(segmentBins, x, y, .5)
+              local z = x and ground(x, y)
+              if x and (not sea or z > sea) and not blocked(x, y, .5, 2, true, true) then
                 local h = keyHash(8, position)
-                -- a poplar now and then: their billboards are baked autumn yellow (the level's
-                -- imposter), and a village full of them looked like October from 150 m (veg-hatne-b)
-                local name = needle and 'pine' or (h % 10 < 1 and 'poplar' or 'town')
-                -- avenues of palms where they grow, of the climate's own street trees elsewhere
+                -- the row's leaf_type or genus (VEG.speciesOf; a mixed row alternates), else a poplar now
+                -- and then: their billboards are baked autumn yellow (the level's imposter), and a village
+                -- full of them looked like October from 150 m (veg-hatne-b)
+                local name = VEG.speciesOf(tags, h) or (h % 10 < 1 and 'poplar' or 'town')
+                needle = name == 'pine' or name == 'fir'
+                -- avenues of palms where they grow, of the climate's own street trees elsewhere (a row whose
+                -- tags name its trees keeps them)
                 local p = bio.on and bio.at(x, y)
-                if p and not needle then
+                if p and not needle and not VEG.speciesOf(tags, h) then
                   local hot = p.group == 'rainforest' or p.group == 'savanna'
                   if p.palms and h % 10 < 4 then name = hot and 'palmCoco' or 'palmFan'
                   else name = bio.species(p, {kind = 'town', key = position}, z - bio.sea, false, true, .5, h) or name end
@@ -10153,6 +10308,12 @@ local function build(cells, i, j, options)
           if index % 32 == 0 then pause() end
         end
       end
+    end
+    -- OSM hedges (VEG.hedgeCandidates), near tiles only, their own cap round 25 m cells
+    if not distant then
+      spread(VEG.hedgeCandidates({lines = lists.lines, rect = rect, pause = pause}), optNum('maxHedges', 1600, 0, 4000), 25,
+        VEG.hedgePlanter({rect = rect, bins = segmentBins, ground = ground, sea = sea, blocked = blocked, builtAt = builtAt,
+          static = static}))
     end
     spread(candidates, maxTrees - rowPlanted, 25, function(candidate)
       local x, y, h = candidate.x, candidate.y, candidate.hash
@@ -10173,7 +10334,7 @@ local function build(cells, i, j, options)
       -- A garden's small fruit-sized trees keep 3 m.
       if not (nz >= (bush and .64 or .72) and elevation < line + (bush and shrubLine or 0)
           and (not sea or z > sea) and not blocked(x, y, settled and (kind == 'garden' and 3 or 4) or nil,
-            bush and 1.5 or (settled and (kind == 'garden' and 3 or 4.5) or WALL))) then return false end
+            bush and 1.5 or (settled and (kind == 'garden' and 3 or 4.5) or WALL), nil, true)) then return false end
       local leaf = candidate.tags.leaf_type or candidate.tags.wood
       local needle = leaf == 'needleleaved' or leaf == 'coniferous'
       if leaf ~= 'broadleaved' and leaf ~= 'deciduous' and not needle and candidate.kind == 'forest' then
