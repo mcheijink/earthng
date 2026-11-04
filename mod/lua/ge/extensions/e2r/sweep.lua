@@ -2555,6 +2555,83 @@ local function sharedSide(S, s, side)
 end
 M.sharedSide = sharedSide
 
+-- Rule rails at a drop. The generator's ROADS.embankmentRails walks only its own strips, and
+-- the swept roads leave them, so a motorway or a slip road on a high embankment had a rail only where one was mapped.
+-- Where a swept carriageway's paved edge stands `height` m or more over the raw DEM `probe` m out from it for at least
+-- `run` m, and the pack has no barrier on that side, a guard rail runs `offset` m outside the edge: railMesh with the
+-- edge's side, so the beam faces the road and the posts stand behind it (as the mapped ones). None on bridges (parapets)
+-- or in tunnels, on a lane boundary (gores, added lanes, fan cuts: sharedSide), where another carriageway at about this
+-- height lies out to the probe (a divided road's inner side), or on a stroke whose rails come from the road register
+-- (e2r:rails=register: its own barrier ways). The run is judged on one lattice of s (`step` m) over the chunk and `run`
+-- m either side of it, so two chunks agree where they meet. Values: ROADS.embankment's (3 m over 8 m, 30 m runs; memory,
+-- not checked against the RPS).
+M.DROP = {height = 3, probe = 8, run = 30, step = 4, offset = .5}
+local function mappedSide(S, s, side)
+  for _, f in ipairs(S.furniture) do
+    if f.side == side and s >= f.s0 - 3 and s <= f.s1 + 3 then return true end
+  end
+  return false
+end
+function M.dropRails(plan, S, c, dem)
+  local D, T = M.DROP, M.TUNE
+  local out = {}
+  if not dem or (S.tags or NONE)['e2r:rails'] == 'register' then return out end
+  local tick = pacer(plan)
+  local c0, c1 = c.s[1], c.s[c.n]
+  local lo, hi = max(c0 - D.run, S.D0 or c0 - D.run), min(c1 + D.run, S.D1 or c1 + D.run)
+  if hi - lo < D.run then return out end
+  local ss = {}
+  for k = math.ceil(lo / D.step), floor(hi / D.step) do ss[#ss + 1] = k * D.step end
+  ss[#ss + 1] = max(c0, lo); ss[#ss + 1] = min(c1, hi)
+  table.sort(ss)
+  for _, side in ipairs({1, -1}) do
+    -- per sample: its rail point when the edge stands over a drop, else false
+    local at = {}
+    for i, s in ipairs(ss) do
+      tick()
+      local cc = s >= c0 - 1e-6 and s <= c1 + 1e-6 and c or S:chunkAt(s)
+      at[i] = false
+      if cc and not structureAt(S, s, 'bridge') and not structureAt(S, s, 'tunnel') and not sharedSide(S, s, side)
+          and not mappedSide(S, s, side) then
+        local row = M.row(plan, S, cc, s)
+        local e = side > 0 and row.eL or row.eR
+        local zEdge = M.rowZ(row, side * e)
+        local px, py = row.x + row.nx * side * (e + D.probe), row.y + row.ny * side * (e + D.probe)
+        local below = dem(px, py)
+        if below and zEdge - below >= D.height then
+          BEHIND.S, BEHIND.z = S, zEdge
+          local mx, my = row.x + row.nx * side * (e + D.probe / 2), row.y + row.ny * side * (e + D.probe / 2)
+          local other = M.surfaceWhere(plan, px, py, .05, behindTest) or M.surfaceWhere(plan, mx, my, .05, behindTest)
+          BEHIND.S = nil
+          if not other then
+            local u = side * (e + D.offset)
+            local x, y = row.x + row.nx * u, row.y + row.ny * u
+            local own = function(hit) return hit.S == S and abs(hit.s - s) < 40 end
+            if not M.onSurface(plan, x, y, zEdge, T.railClear + M.RAIL.thick, 2.5, own) then at[i] = {x, y, zEdge, s, row.h} end
+          end
+        end
+      end
+    end
+    -- the runs of `run` m and more; their samples inside the chunk
+    local i = 1
+    while i <= #ss do
+      if not at[i] then i = i + 1 else
+        local j = i
+        while j < #ss and at[j + 1] do j = j + 1 end
+        if ss[j] - ss[i] >= D.run then
+          local run = {}
+          for k = i, j do
+            if ss[k] >= c0 - 1e-6 and ss[k] <= c1 + 1e-6 and (#run == 0 or ss[k] > run[#run][4] + 1e-6) then run[#run + 1] = at[k] end
+          end
+          if #run >= 2 then out[#out + 1] = {kind = 'beam', side = side, points = run, a = run[1][4], b = run[#run][4], rule = 'drop'} end
+        end
+        i = j + 1
+      end
+    end
+  end
+  return out
+end
+
 -- a bridge deck's edge faces, soffit and parapets along the rows inside bridge structures, in pieces of
 -- at most DECK.piece m. A side is an outer edge only where it is no lane boundary (sharedSide) and no
 -- other driving surface lies within DECK.clear m outside it at about its height; only there does the
@@ -2776,6 +2853,8 @@ function M.items(plan, opts)
           end
           local rail = newMesh('e2rf_' .. M.RAIL.material)
           local paths = M.railPaths(plan, S, c)
+          -- and the rule rails at a drop (opts.dem: the generator's raw DEM)
+          for _, path in ipairs(M.dropRails(plan, S, c, opts.dem)) do paths[#paths + 1] = path end
           for _, path in ipairs(paths) do M.railMesh(plan, S, c, path, rail, o, lift) end
           c.railPaths = paths
           pause()

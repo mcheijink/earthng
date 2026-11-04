@@ -4111,6 +4111,14 @@ function VEG.streetHave(kit)
   return props, sets
 end
 
+-- Inferred street lamps (a street with no highway=street_lamp mapped near it). German practice, from memory and not
+-- checked against DIN EN 13201 or RASt 06: one row on a street up to about 12 m of carriageway (`wide`: half that), on
+-- its sidewalk side; on a wider street a row each side, staggered by half a step; `step` 30 m (inside the 25-35 m of a
+-- town street). Never on a motorway (only its mapped lamps stand). A major road not tagged lit=yes is lit only where
+-- buildings stand round it (a town's road: the open road between towns is dark). The pole's footprint stands at least
+-- `kerb` m behind a kerb and `edge` m off a paved edge with no sidewalk: the old 0.35 m put the pole at the shoulder,
+-- where a driver ran into one in play.
+VEG.lampRule = {step = 30, wide = 6, kerb = .5, edge = 1, never = {motorway = true, motorway_link = true}}
 function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, lift, walkWidth, ground, put, pause, context)
   context = context or {}
   spacing = math.max(0, tonumber(spacing) or 0)
@@ -4141,11 +4149,12 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
     end
   end
   for _, area in ipairs(context.areas or NONE) do
-    if area.kind == 'water' or area.kind == 'parking' or (area.tags or NONE).amenity == 'parking' then
+    -- a traffic island keeps every prop out, inferred lamps too (0.6 m round it, inWall)
+    if area.kind == 'water' or area.kind == 'island' or area.kind == 'parking' or (area.tags or NONE).amenity == 'parking' then
       local b = ringBounds(area.rings)
       if boundsTouch(b, rect, 1) then
         -- a car park keeps furniture out, not the lamps and trees at its edge
-        local entry = {rings = area.rings, bounds = b, parking = area.kind ~= 'water'}
+        local entry = {rings = area.rings, bounds = b, parking = area.kind ~= 'water' and area.kind ~= 'island'}
         for by = math.floor((b[2] - 1) / 50), math.floor((b[4] + 1) / 50) do
           for bx = math.floor((b[1] - 1) / 50), math.floor((b[3] + 1) / 50) do
             local bin = walls[bx * 65536 + by] or {}
@@ -4431,15 +4440,35 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
           return hw + (prop.curb and math.max(.45, .35 + prop.near) or walkWidth - math.max(.45, .1 + prop.far))
         end, nil, 'prop_' .. id)
       local major = tags.highway == 'primary' or tags.highway == 'secondary' or tags.highway == 'tertiary' or tags.highway == 'trunk'
-      if context.lamps and tags.lit ~= 'no' and (tags.lit == 'yes' or major) and (not FS or FS:fileExists(LAMP)) then
-        walk(strip.points, strip.dist, hash(id), function(k, side)
-          return side == -1 or hw >= 6 and strip.walk[k][side]
-        end, 6, 6, strip.start or 0, function(prop, k, side)
-          if strip.walk[k][side] then return hw + walkWidth - .1 - prop.far end
-          return hw + .35 + prop.near, true
-        end,
-          nil, 'streetlamp_' .. id, false, 30,
-          {LAMP, kind = 'lamp', priority = 1, face = true, fp = {-.61, .61, -.32, .32}})
+      local lr = VEG.lampRule
+      if context.lamps and tags.lit ~= 'no' and not lr.never[tags.highway] and (tags.lit == 'yes' or major)
+          and (not FS or FS:fileExists(LAMP)) then
+        local function lit(k)
+          return tags.lit == 'yes' or town(strip.points[k][1], strip.points[k][2])
+        end
+        -- the row's side: a wide street both (its sidewalks'), a narrow one the side with the only sidewalk, else the right
+        local function sides(k, side)
+          if not lit(k) then return false end
+          local w = strip.walk[k] or NONE
+          if hw >= lr.wide then return side == -1 or w[side] end
+          if side == 1 then return w[1] and not w[-1] or false end
+          return not (w[1] and not w[-1])
+        end
+        local function offset(prop, k, side)
+          if (strip.walk[k] or NONE)[side] then
+            -- the back of the sidewalk; a sidewalk too narrow for the kerb clearance: behind it, on the ground
+            local off, least = hw + walkWidth - .1 - prop.far, hw + lr.kerb + prop.near
+            if off >= least then return off end
+            return math.max(least, hw + walkWidth + .1 + prop.near), true
+          end
+          return hw + lr.edge + prop.near, true
+        end
+        local lamp = {LAMP, kind = 'lamp', priority = 1, face = true, fp = {-.61, .61, -.32, .32}}
+        -- the right row on the step, the left one half a step on (a wide street's rows staggered)
+        for _, side in ipairs({-1, 1}) do
+          walk(strip.points, strip.dist, hash(id), function(k, which) return which == side and sides(k, side) end,
+            6, 6, strip.start or 0, offset, nil, 'streetlamp_' .. id, false, lr.step, lamp, side == 1 and lr.step / 2 or 0)
+        end
       end
       if context.tree and spacing > 0 then
         walk(strip.points, strip.dist, hash(id), function(k, side)
@@ -8812,7 +8841,7 @@ local function build(cells, i, j, options)
     for material in pairs(roadDecor.used) do roads.used[material] = true end
     if SW and visualRoads then
       local items, used = ROADS.sweep.items(SW, {tileKey = key, markKind = markKind, pause = pause, roadScale = ROADS.swept.scale,
-        material = function(tags) return (roadMaterial(tags)) end, deckDepth = ROADS.deckDepth})
+        material = function(tags) return (roadMaterial(tags)) end, deckDepth = ROADS.deckDepth, dem = #terrain > 0 and demAt or nil})
       for _, item in ipairs(items) do roads.items[#roads.items + 1] = item end
       for material in pairs(used) do roads.used[material] = true end
     end
@@ -9597,7 +9626,11 @@ local function build(cells, i, j, options)
       fp = {-2, 2, -2, 2}} or nil
     local containers = {}
     local function put(name, shape, x, y, z, yaw, scale, kind)
-      if kind == 'lamp' and (OFFROAD.underDeck(x, y, z, 11) or (SW and ROADS.sweep.onSurface(SW, x, y, z, SWEPT_LAMP_CLEAR, 2.5))) then return end
+      -- a lamp under a deck or by a swept surface; an inferred street lamp also on or within half a metre of the drawn
+      -- asphalt (a junction's plate or mouth, a turning lane: the strip's own width is only its middle). A yard's lamp
+      -- stands 0.5 m off its own service road by design (YARD) and keeps that.
+      if kind == 'lamp' and (OFFROAD.underDeck(x, y, z, 11) or (SW and ROADS.sweep.onSurface(SW, x, y, z, SWEPT_LAMP_CLEAR, 2.5))
+        or name:sub(1, 11) == 'streetlamp_' and OFFROAD.nearAsphalt(x, y, VEG.lampRule.kerb)) then return end
       static(name, shape, x, y, z, yaw, scale)
       local it = scene.items[#scene.items]
       it.prop, it.streetKind, it.collision = true, kind, 'Collision Mesh'
