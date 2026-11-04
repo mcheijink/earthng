@@ -650,7 +650,7 @@ local function spawnItem(it, group, pause, tile, layer)
     if NATIVE and tile then
       S.coll = S.coll or collision.new()
       local quiet = not (tile.far or tile.horizon) and collision.quiet(meshes, layer)
-      S.coll:track(tile, obj:getID(), quiet)
+      S.coll:track(tile, obj:getID(), quiet, it.triangles)
       -- only a scene piece with something solid asks for a rebuild: roofs, windows, doors and
       -- ground covers (collision.QUIET) are left out of it anyway
       if layer == 'scene' and not quiet and not tile.dropped then
@@ -1685,16 +1685,30 @@ local function collisionPoints(p, v)
   local want = math.min(1600, math.max(LIMIT.collisionWant, speed * LIMIT.collisionLead + 100))
   -- the descent waits for collision on every tile within 500 m of the spawn (tick)
   if S.state ~= 'driving' then want = math.max(want, 750) end
-  points[1] = {p.x, p.y, want, want + LIMIT.collisionMargin}
+  -- Driving, the margin that spaces the rebuilds out (a tile kept until the car is `margin` past
+  -- the trigger) lies ahead only: a second circle of `want`, `margin` m along the heading, that
+  -- keeps but never asks (want -1). Behind and beside the car a rebuild kept want + margin, about
+  -- 8 tiles of 500 m in all, though the car leaves them; now ~5. A tile left out there asks again
+  -- once it is within `want` (>= 200 m), and the next rebuild is at most COLLISION_EVERY (2 s)
+  -- away, in which the car covers well under `want` (300 km/h: 166 of 600 m).
+  local margin = LIMIT.collisionMargin
+  if S.state == 'driving' and speed >= 5 then
+    points[1] = {p.x, p.y, want, want}
+    points[2] = {p.x + v.x / speed * margin, p.y + v.y / speed * margin, -1, want}
+  else
+    points[1] = {p.x, p.y, want, want + margin}
+  end
   local vw, vk = LIMIT.vehicleCollision[1], LIMIT.vehicleCollision[2]
-  if S.heldCar then points[2] = {S.heldCar[1], S.heldCar[2], vw, vk} end
+  if S.heldCar then points[#points + 1] = {S.heldCar[1], S.heldCar[2], vw, vk} end
   pcall(function()
     for k = 0, be:getObjectCount() - 1 do
       -- a car the parking pool has hidden needs no ground where it was left
       local obj = be:getObject(k)
       if obj:getActive() then
         local q = obj:getPosition()
-        points[#points + 1] = {q.x, q.y, vw, vk}
+        -- the car the camera follows is points[1] already; its 300 m circle kept more than
+        -- `want` behind it at town speeds
+        if (q.x - p.x) ^ 2 + (q.y - p.y) ^ 2 > 25 then points[#points + 1] = {q.x, q.y, vw, vk} end
       end
     end
   end)
@@ -1756,10 +1770,15 @@ local function updateCollision()
     S.coll:rebuild(points, size, function(id) return scenetree.findObjectById(id) end,
       function() be:reloadCollision() end)
     result.collisionHidden, result.collisionSolid, result.collisionCovered = S.coll.lastHidden, S.coll.lastSolid, covered
+    -- what the engine rebuilt (the ms follow it); reloadCollisionMaxTris below is the slowest one's
+    result.collisionTris, result.collisionObjects = S.coll.lastTris, S.coll.lastObjects
   else
     be:reloadCollision()
   end
   local ms = timer:stop()
+  if NATIVE and ms > (result.reloadCollisionMs or 0) then
+    result.reloadCollisionMaxTris, result.reloadCollisionMaxObjects = S.coll.lastTris, S.coll.lastObjects
+  end
   result.reloadCollisionMs = math.max(result.reloadCollisionMs or 0, ms)
   result.collisionReloads = (result.collisionReloads or 0) + 1
   result.collisionMsSum = (result.collisionMsSum or 0) + ms
