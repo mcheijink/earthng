@@ -52,7 +52,8 @@ def _lgln_urls(product, tiles, session):
         reply = session.get(INDEX['de-ni'] % product, params=q, timeout=60).json()
         for f in reply.get('features', ()):
             a = f['attributes']
-            key = (int(a['tile_id'][2:5]), int(a['tile_id'][5:9]))
+            tid = str(a['tile_id'])      # the service now returns the id as a number
+            key = (int(tid[2:5]), int(tid[5:9]))
             urls.setdefault(key, []).append(a[product])
         time.sleep(.5)
     return {k: sorted(v)[-1] for k, v in urls.items()}     # the newest flight's name sorts last
