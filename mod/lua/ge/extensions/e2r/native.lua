@@ -14,7 +14,11 @@ local live = liveOk and type(liveMod) == 'table' and type(liveMod.sync) == 'func
 -- delivered tile keeps only flags, while undelivered geometry is bounded by triangles/vertices.
 -- At 32 the far ring evicted itself and was rebuilt after every 250 m.
 local CELL_LIMIT, TILE_LIMIT, TRIANGLE_LIMIT, VERTEX_LIMIT, LAND_RADIUS = 32, 160, 80000, 240000, 500
-local BLOCK_LIMIT = 6
+-- A source block is 8 x 8 km, read whole in one call (readBytes). The 5 km horizon ring is an
+-- ~11 km square round the car and touches up to 3 x 3 blocks: with 6 cached, horizon builds that
+-- hop round the ring could read a block file again, in one frame of `native`. 9 hold the whole
+-- square (not measured; state.stream.blockReads and blockReadMaxMs say how often and how long).
+local BLOCK_LIMIT = 9
 -- Prepared horizon meshes, separate from the near/far triangle budget above. The 5 km ring
 -- is the one that is scheduled; 15 km and 30 km stay off until an in-game check.
 local HORIZON_RADIUS, HORIZON_TILE_LIMIT, HORIZON_TRIANGLE_LIMIT = 5000, 96, 250000
@@ -113,6 +117,18 @@ local function readBytes(path)
   local data = f:read('*a')
   f:close()
   if type(data) ~= 'string' then error('cannot read mounted source: ' .. path) end
+  return data
+end
+
+-- readBytes for a generator block (source and pack v3 roads), counted for the automation report
+local function blockBytes(path)
+  local timer = hptimer()
+  local data = readBytes(path)
+  local ms, st = timer:stop(), state and state.stream
+  if st then
+    st.blockReads = (st.blockReads or 0) + 1
+    if ms > (st.blockReadMaxMs or 0) then st.blockReadMaxMs, st.blockReadMaxKb = ms, math.floor(#data / 1024) end
+  end
   return data
 end
 
@@ -363,7 +379,7 @@ end
 local function loadBlock(key, block)
   local hit = active.blocks[key]
   if hit then hit.used = touch(); return hit end
-  local data = readBytes(block.path)
+  local data = blockBytes(block.path)
   active.pause()
   hit = {data = data, slots = cellformat.block(data), used = touch()}
   active.blocks[key] = hit
@@ -941,7 +957,7 @@ local function loadRoads3(r, rect)
           if type(block) == 'table' and type(block.mask) == 'string' and roads3.present(block.mask, slot) then
             local loaded = cache.blocks[blockKey]
             if not loaded then
-              local data = readBytes(block.path)
+              local data = blockBytes(block.path)
               loaded = {data = data, slots = roads3.block(data), used = cache.clock}
               cache.blocks[blockKey] = loaded
               evict(cache.blocks, ROAD3_BLOCKS)
@@ -976,7 +992,7 @@ local function loadRoads3(r, rect)
             if type(block) == 'table' and type(block.mask) == 'string' and roads3.present(block.mask, slot) then
               local loaded = cache.jblocks[blockKey]
               if not loaded then
-                local data = readBytes(block.path)
+                local data = blockBytes(block.path)
                 loaded = {data = data, slots = roads3.junctionBlock(data), used = cache.clock}
                 cache.jblocks[blockKey] = loaded
                 evict(cache.jblocks, ROAD3_BLOCKS)
