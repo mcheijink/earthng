@@ -1152,6 +1152,11 @@ do
   local ok, mod = pcall(require, 'ge/extensions/e2r/sweep')
   ROADS.sweep = ok and type(mod) == 'table' and mod or nil
 end
+-- Traffic signals and speed cameras (signals.lua), in ROADS: build() is near LuaJIT's 60 upvalues
+do
+  local ok, mod = pcall(require, 'ge/extensions/e2r/signals')
+  ROADS.signals = ok and type(mod) == 'table' and mod or nil
+end
 ROADS.swept = {on = true, mode = 'fast', scale = COVER_SCALE.road}
 -- Power lines and wind turbines (power.lua): near scene and far layer, never the horizon
 do
@@ -9910,6 +9915,17 @@ local function build(cells, i, j, options)
       end
     end
     pause()
+  end
+  -- Traffic signals and speed cameras beside their approaches (signals.lua). Heads and booms are TSStatics
+  -- (their lamps take instance colours: in the Forest every lamp lit), poles and cameras solid props.
+  if ROADS.signals and wantStops and not distant then
+    ROADS.signals.place({rect = rect, points = lists.points, strips = strips, stars = stars, SW = SW, sweep = ROADS.sweep,
+      offroad = OFFROAD, ground = ground, sidewalk = tune.sidewalk, oneway = ROADS.oneway, rankOf = ROADS.rankOf, pause = pause,
+      put = function(name, shape, x, y, z, yaw, fields, solid)
+        static(name, shape, x, y, z, yaw)
+        local it = scene.items[#scene.items]
+        it.fields, it.prop, it.collision = fields, solid, 'Collision Mesh'
+      end})
   end
   if wantLamps and not distant then
     local function treeAt(x, y)

@@ -869,6 +869,8 @@ class Store:
         if key not in self.scenes:
             found={}; lines={}; factory=osmium.geom.GeoJSONFactory()
             import fast_style
+            import fast_signals
+            tracker=fast_signals.Tracker()
             class Reader(osmium.SimpleHandler):
                 def area(self,a):
                     kind='building' if a.tags.get('building') not in (None,'no') else (
@@ -887,7 +889,11 @@ class Store:
                     kind=fast_style.point_kind(n.tags)
                     if kind and n.location.valid():
                         lines[-(10**12+n.id)]=(kind,dict(n.tags),Point(n.location.lon,n.location.lat))
+                        tracker.node(n.id,n.tags,kind)
                 def way(self,w):
+                    # a signal's or camera's forward/backward is its way's direction (fast_signals)
+                    if tracker.pending:
+                        tracker.way(w.tags,[(n.ref,(n.lon,n.lat) if n.location.valid() else None) for n in w.nodes])
                     # footpaths, fences, tree rows: lines, not areas (an area id is 2 x way id,
                     # so a line keys as -way id to stay apart)
                     kind=fast_style.line_kind(w.tags)
@@ -898,10 +904,13 @@ class Store:
                             return
                         if len(coords)>=2:
                             lines[-w.id]=(kind,dict(w.tags),LineString(coords))
+                def relation(self,r):
+                    tracker.relation(r.tags,[(m.type,m.ref,m.role) for m in r.members])
             # Only nodes that can be points reach Python (Kyiv tile: 21 k of 218 k, 0.57 -> 0.25 s);
             # the location index still sees every node, so ways and areas keep their geometry.
             Reader().apply_file(str(Path(self.meta['source'])/entry['file']),locations=True,
                                 filters=[osmium.filter.KeyFilter(*fast_style.POINT_KEYS).enable_for(osmium.osm.NODE)])
+            fast_signals.finish(tracker,lines,str(Path(self.meta['source'])/entry['file']))
             found.update(lines)
             ordered=sorted(found.items())
             geoms=shapely.make_valid(shapely.transform([v[1][2] for v in ordered],self.frame.local,interleaved=False))

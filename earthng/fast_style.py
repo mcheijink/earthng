@@ -5,6 +5,7 @@ import math
 import zlib
 import nature
 import power as _power
+import fast_signals
 
 TEXTURES = {
     'asphalt': {
@@ -483,7 +484,7 @@ POINT_KEYS = ('highway', 'natural', 'public_transport', 'entrance', 'leisure', '
 
 
 def point_kind(tags):
-    """'stop', 'signal' or one of ROAD_DETAILS for an OSM node, else None."""
+    """'stop', 'signal', 'speed_camera' or one of ROAD_DETAILS for an OSM node, else None."""
     highway = tags.get('highway')
     # a line's towers (their facts ride on the line, power.py) and wind turbines
     if _power.is_tower(tags):
@@ -505,10 +506,11 @@ def point_kind(tags):
         return 'mini_roundabout'
     if highway in ('turning_circle', 'turning_loop'):
         return 'turning_circle'
-    # traffic signals: the game's trafficlight_city1.dae is a head without a pole (it lay at the
-    # curb, vis-13-signals); placing is written (fast.add_street_points), off until a pole model
-    if tags.get('highway') == 'traffic_signals' and SIGNALS:
-        return 'signal'
+    # traffic signals and speed cameras: the runtime stands them on stock poles (signals.lua); the
+    # bare trafficlight_city1.dae head lay at the curb (vis-13-signals)
+    signal = fast_signals.point_kind(tags)
+    if signal:
+        return signal
     if tags.get('highway') == 'bus_stop' or (tags.get('public_transport') == 'platform' and
                                               any(tags.get(k) == 'yes' for k in ('bus', 'trolleybus', 'tram'))):
         return 'stop'
@@ -524,7 +526,6 @@ def point_kind(tags):
 ENTRANCES = ('staircase', 'main', 'home')
 
 
-SIGNALS = False
 BUS_STOP = '/art/shapes/objects/s_busstop_jri.dae'
 TRAFFIC_LIGHT = '/art/shapes/objects/trafficlight_city1.dae'
 # the shapes' own facing: the yaw that turns their front to +x of the world (measured in game)

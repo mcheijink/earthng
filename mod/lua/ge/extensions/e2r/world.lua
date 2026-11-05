@@ -680,6 +680,8 @@ local function spawnItem(it, group, pause, tile, layer)
     obj:setField('collisionType', 0, it.collision or 'Collision Mesh')
     obj:setField('decalType', 0, it.decal or 'None')
     obj.useInstanceRenderData = true
+    -- a signal head's lamps (signals.lua): its instance colours
+    for field, value in pairs(it.fields or {}) do obj:setField(field, 0, value) end
     obj:setPosRot(it.pos[1], it.pos[2], it.pos[3], it.rot[1], it.rot[2], it.rot[3], it.rot[4])
     if it.scale then obj:setScale(vec3(it.scale, it.scale, it.scale)) end
     obj:registerObject(it.name)
