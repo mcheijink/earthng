@@ -9460,10 +9460,13 @@ local function build(cells, i, j, options)
   local function fence(line)
     local tags = line.tags or NONE
     local ft = tags.fence_type
-    local concrete = tags.barrier == 'wall' or ft == 'concrete' or ft == 'brick' or ft == 'stone'
+    local concrete = tags.barrier == 'wall' or tags.barrier == 'retaining_wall' or tags.barrier == 'city_wall' or ft == 'concrete'
+      or ft == 'brick' or ft == 'stone'
     local kind = concrete and 'fence_wall' or 'fence_mesh'
-    -- a wall up to its tagged height (a yard's wall to a 6 m retaining wall), a fence to 3 m
-    local height = math.min(tags.barrier == 'wall' and 6 or 3, number(tags.height, concrete and 2 or 1.6))
+    -- a wall up to its tagged height (a yard's wall to a 6 m retaining wall), a fence to 3 m; an untagged retaining wall
+    -- stands 1 m over the drawn ground (the lattice smooths the step it holds)
+    local height = math.min((tags.barrier == 'wall' or tags.barrier == 'retaining_wall') and 6 or 3,
+      number(tags.height, tags.barrier == 'retaining_wall' and 1 or concrete and 2 or 1.6))
     local half = (concrete and tune.wallThick or tune.fenceThick) / 2
     local scale = concrete and 2.5 or 2
     local raw, pts, along = line.points or NONE, {}, {}

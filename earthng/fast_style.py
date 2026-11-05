@@ -465,7 +465,8 @@ def line_kind(tags):
     # a noise barrier is drawn beside the carriageway at its own height (generator: noise.lua)
     if tags.get('barrier') == 'noise_barrier' or tags.get('wall') == 'noise_barrier':
         return 'noise_barrier'
-    if tags.get('barrier') in ('fence', 'wall'):
+    # retaining and city walls are walls too (drawn by nothing before: generator fence() takes them as concrete)
+    if tags.get('barrier') in ('fence', 'wall', 'retaining_wall', 'city_wall'):
         return 'fence'
     if tags.get('barrier') == 'guard_rail':
         return 'guard_rail'
