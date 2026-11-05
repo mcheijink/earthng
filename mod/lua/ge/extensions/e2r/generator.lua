@@ -1203,6 +1203,11 @@ do
   local ok, mod = pcall(require, 'ge/extensions/e2r/power')
   ROADS.power = ok and type(mod) == 'table' and mod or nil
 end
+-- Paint for car parks and bus stops (lots.lua): bay lines and the stop's zig-zag, near tiles
+do
+  local ok, mod = pcall(require, 'ge/extensions/e2r/lots')
+  ROADS.lots = ok and type(mod) == 'table' and mod or nil
+end
 
 -- A generator way with no bridge of its own that runs on a swept road's surface at grade leaves it: its
 -- copy would lie on the lanes or poke through them (seen in testing: a track 0.1-0.2 m over the
@@ -9731,6 +9736,11 @@ local function build(cells, i, j, options)
       if cars < maxCars and surface and (tags.amenity == 'parking' or area.kind == 'parking') and ringsTouch(area.rings, rect) then
         local frame = footprintFrame(cleanRing(area.rings[1]))
         if frame.area >= 120 then
+          -- the bays' lines (lots.lua), on the lattice the cars below take
+          if ROADS.lots and markKind then
+            ROADS.lots.bays({frame = frame, rings = area.rings, rect = rect, inside = inside, blocked = buildingAt,
+              ground = ground, emit = function(poly) sceneDecor.polygon(markKind, poly, 'flat') end})
+          end
           local row = 0
           for v = frame.v0 + 2.75, frame.v1 - 2.7, 5.5 do
             if row % 3 ~= 1 then
@@ -9743,7 +9753,8 @@ local function build(cells, i, j, options)
                   for _, corner in ipairs({{-2.2, -.9}, {2.2, -.9}, {2.2, .9}, {-2.2, .9}}) do
                     local cx = x + corner[1] * math.cos(yaw) - corner[2] * math.sin(yaw)
                     local cy = y + corner[1] * math.sin(yaw) + corner[2] * math.cos(yaw)
-                    if not inside(area.rings, cx, cy) then fits = false end
+                    -- a corner in a building too: a car stood half inside a shed at the car park's edge
+                    if not inside(area.rings, cx, cy) or buildingAt(cx, cy) then fits = false end
                   end
                   if fits then
                     -- every free bay is a spot for the game's parked cars (parking.lua); with
@@ -9867,6 +9878,11 @@ local function build(cells, i, j, options)
     local fx, fy = -nx * side, -ny * side
     static('point_' .. tostring(point.id):gsub('[^%w_]', '_'), BUS_STOP, x, y, ground(x, y) + .25,
       math.atan2(fx, fy) + math.pi)
+    -- the stop marked on the carriageway beside it (lots.lua)
+    if ROADS.lots and markKind then
+      ROADS.lots.stop({points = hit.strip.points, k = hit.k, x = hit.x, y = hit.y, side = side, hw = hit.strip.hw,
+        lift = lift, rect = rect, emit = function(poly) sceneDecor.polygon(markKind, poly, 'flat') end})
+    end
   end
   -- OSM maps many lamps (and some trees) as nodes of the street itself or on its carriageway: from
   -- 26.10 the packs carry them, and central Kyiv had ~3,700 lamps standing in the lanes. A lamp
@@ -9999,6 +10015,8 @@ local function build(cells, i, j, options)
     if not bridge then return OFFROAD.sweptClear(x, y, z, hit.nx * side, hit.ny * side) end
     return x, y, z
   end
+  -- the scene and its decor were finished above: what the stops paint is flushed after the points
+  ROADS.lotsFrom = #sceneDecor.items
   for _, point in ipairs(distant and NONE or lists.points) do
     local p = point.pos
     if p and point.kind == 'stop' and wantStops then
@@ -10026,6 +10044,13 @@ local function build(cells, i, j, options)
         it.fields, it.prop, it.collision = fields, solid, 'Collision Mesh'
       end})
   end
+  sceneDecor.finish()
+  for k = ROADS.lotsFrom + 1, #sceneDecor.items do
+    sceneDecor.items[k].decor = true
+    scene.items[#scene.items + 1] = sceneDecor.items[k]
+  end
+  for material in pairs(sceneDecor.used) do scene.used[material] = true end
+  ROADS.lotsFrom = nil
   if wantLamps and not distant then
     local function treeAt(x, y)
       local p = bio.at(x, y)
