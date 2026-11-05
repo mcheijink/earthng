@@ -2639,14 +2639,77 @@ end
 -- edge with nothing hanging (an adjacent carriageway or slip road at another height met a wall:
 -- in-game crashes in testing). Phase 2 tested one point per row interval and always hung the
 -- outer face.
+-- The tags that choose a chunk's deck material: the way's, with bridge:structure from the chunk's
+-- bridge run (fast_roads.structures writes it there) where the way's tags lack it.
+function M.deckTags(S, c)
+  local tags = S.tags or NONE
+  if tags['bridge:structure'] then return tags end
+  for _, r in ipairs(S.structures or NONE) do
+    if r.kind == 'bridge' and r.structure and r.structure ~= '' and r.s1 >= c.s[1] and r.s0 <= c.s[c.n] then
+      return {material = tags.material, ['bridge:structure'] = r.structure}
+    end
+  end
+  return tags
+end
+
+-- The ends are closed: a parapet where it starts or stops (beside another surface, at the deck's ends)
+-- and the slab between its outer faces where a bridge stretch of the rows begins or ends. They stood
+-- open, and only the double-sided concrete hid the hollow; a deck of ROADS.deckLook's single-sided
+-- materials would show it.
 function M.deckMesh(plan, S, c, mesh, o, lift, depth)
   local D = M.DECK
   local uv = function(p) return (p[4] or 0), (p[5] or 0) end
   local tick = pacer(plan)
+  -- a point du outside the row edge on `side`, dz over the surface, at t between rows a and b
+  local function edgeAt(a, b, side, t, du, dz, U, V)
+    local function P(row, u)
+      return {row.x + row.nx * u, row.y + row.ny * u, M.rowZ(row, u > 0 and min(u, row.eL) or max(u, -row.eR)) + lift + dz}
+    end
+    local p = P(a, (side > 0 and a.eL or -a.eR) + side * du)
+    local q = P(b, (side > 0 and b.eL or -b.eR) + side * du)
+    return {p[1] + (q[1] - p[1]) * t, p[2] + (q[2] - p[2]) * t, p[3] + (q[3] - p[3]) * t, U, V}
+  end
+  local function along(a, b, dir)
+    local tx, ty = b.x - a.x, b.y - a.y
+    local l = math.sqrt(tx * tx + ty * ty)
+    return l > 1e-9 and {tx / l * dir, ty / l * dir, 0} or nil
+  end
+  -- a parapet's cross-section at t, facing along the rows (dir -1 back, +1 ahead)
+  local function parapetCap(a, b, side, t, dir)
+    local facing = along(a, b, dir)
+    if not facing then return end
+    local w, h = D.thick / 2.5, D.parapet / 2.5
+    local p0, p1 = edgeAt(a, b, side, t, 0, 0, 0, h), edgeAt(a, b, side, t, D.thick, 0, w, h)
+    local p2, p3 = edgeAt(a, b, side, t, D.thick, D.parapet, w, 0), edgeAt(a, b, side, t, 0, D.parapet, 0, 0)
+    tri(mesh, o, p0, p1, p2, uv, facing)
+    tri(mesh, o, p0, p2, p3, uv, facing)
+  end
+  -- the slab's cross-section at t between its outer faces (reach: per side, how far they stand out)
+  local function slabCap(a, b, t, reach, dir)
+    local facing = along(a, b, dir)
+    if not facing then return end
+    local w = (a.eL + a.eR + reach[1] + reach[-1]) / 2.5
+    local p0, p1 = edgeAt(a, b, -1, t, reach[-1], -depth, 0, depth / 2.5), edgeAt(a, b, 1, t, reach[1], -depth, w, depth / 2.5)
+    local p2, p3 = edgeAt(a, b, 1, t, reach[1], 0, w, 0), edgeAt(a, b, -1, t, reach[-1], 0, 0, 0)
+    tri(mesh, o, p0, p1, p2, uv, facing)
+    tri(mesh, o, p0, p2, p3, uv, facing)
+  end
   for _, list in ipairs(c.rows) do
+    -- was: per side, whether the previous bridge piece's parapet stood (nil off a bridge);
+    -- last: that piece {a, b, t1, reach}, for the caps where the bridge stretch ends
+    local was, last = {}, nil
+    local function close()
+      if not last then return end
+      for _, side in ipairs({1, -1}) do
+        if was[side] then parapetCap(last[1], last[2], side, last[3], 1) end
+      end
+      slabCap(last[1], last[2], last[3], last[4], 1)
+      was, last = {}, nil
+    end
     for k = 1, #list - 1 do
       local a, b = list[k], list[k + 1]
       tick()
+      if not structureAt(S, (a.s + b.s) / 2, 'bridge') then close() end
       if structureAt(S, (a.s + b.s) / 2, 'bridge') then
         local n = max(1, math.ceil((b.s - a.s) / D.piece))
         local function P(row, u, dz)
@@ -2676,6 +2739,9 @@ function M.deckMesh(plan, S, c, mesh, o, lift, depth)
               end
             end
             reach[side] = free and D.thick or 0
+            if free and not was[side] then parapetCap(a, b, side, t0, -1) end
+            if not free and was[side] then parapetCap(a, b, side, t0, 1) end
+            was[side] = free
             if free then
               local top, low = D.parapet, -depth
               tri(mesh, o, at(t0, D.thick, top, u0, 0), at(t1, D.thick, top, u1, 0), at(t1, D.thick, low, u1, 1), uv, {nx, ny, 0})
@@ -2697,9 +2763,12 @@ function M.deckMesh(plan, S, c, mesh, o, lift, depth)
           end
           tri(mesh, o, Q(t0, -1), Q(t1, -1), Q(t1, 1), uv, {0, 0, -1})
           tri(mesh, o, Q(t0, -1), Q(t1, 1), Q(t0, 1), uv, {0, 0, -1})
+          if not last then slabCap(a, b, t0, reach, -1) end
+          last = {a, b, t1, reach}
         end
       end
     end
+    close()
   end
 end
 
@@ -2858,7 +2927,8 @@ function M.items(plan, opts)
           for _, path in ipairs(paths) do M.railMesh(plan, S, c, path, rail, o, lift) end
           c.railPaths = paths
           pause()
-          local deck = newMesh('e2rf_' .. M.DECK.material)
+          -- the deck's material by its tags (generator ROADS.deckMaterial: material=*, bridge:structure=*)
+          local deck = newMesh('e2rf_' .. (opts.deckMaterial and opts.deckMaterial(M.deckTags(S, c)) or M.DECK.material))
           M.deckMesh(plan, S, c, deck, o, lift, opts.deckDepth and opts.deckDepth(S.tags) or 1.5)
           stats.railTris = stats.railTris + item({rail, deck}, n .. 'f', nil, S.id)
           pause()

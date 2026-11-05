@@ -1133,6 +1133,40 @@ function ROADS.deckDepth(tags)
   local rank = ROADS.rankOf(tags)
   return rank >= 4.5 and 1.5 or rank >= 2.5 and 1.2 or ROADS.deck.depth
 end
+-- A bridge's deck, parapets, piers and abutments: concrete (fence_wall) unless its tags say otherwise,
+-- material=* first, then bridge:structure=* (an arch or a humpback is masonry, a truss steel). The
+-- plain wall materials of the houses (BLD's hw_ and clad_ kinds, no windows in them).
+ROADS.deckLook = {
+  material = {concrete = 'fence_wall', reinforced_concrete = 'fence_wall', stone = 'hw_stone', masonry = 'hw_stone',
+    brick = 'hw_oldbrick', wood = 'hw_wood', steel = 'clad_metal', metal = 'clad_metal', iron = 'clad_metal'},
+  structure = {arch = 'hw_stone', humpback = 'hw_stone', truss = 'clad_metal'}}
+function ROADS.deckMaterial(tags)
+  local look = ROADS.deckLook
+  return look.material[tags.material or ''] or look.structure[tags['bridge:structure'] or ''] or 'fence_wall'
+end
+-- The end of a parapet run (fraction f of its segment; dir -1 at the run's start, +1 at its end): the
+-- cross-section from the deck's surface to the parapet's top, inner to outer face, facing along
+-- (tx, ty) * dir. A run used to stop open at the deck's ends and beside another carriageway, and the
+-- double-sided wall material showed the hollow inside. along(offset, dz, f, v): a point of the run.
+function ROADS.parapetCap(face, along, inner, outer, f, dir, tx, ty, material)
+  local deck = ROADS.deck
+  local w, h = deck.thick / deck.repeatU, deck.parapet / deck.repeatU
+  local a, b = along(inner, 0, f, h), along(outer, 0, f, h)
+  local c, d = along(outer, deck.parapet, f, 0), along(inner, deck.parapet, f, 0)
+  a[4], b[4], c[4], d[4] = 0, w, w, 0
+  face({a, b, c, d}, tx * dir, ty * dir, 0, material)
+end
+-- A deck's end (strip point i, dir -1 at its first point, +1 at its last): the slab's cross-section
+-- from the soffit to the surface between its outer faces (offsets l > r). An abutment covers it to
+-- 5 cm over the soffit; over a free end, or one without an abutment, the slab stood open.
+-- edge(i, offset, dz): a point beside the strip.
+function ROADS.deckEndCap(face, edge, i, l, r, depth, dir, tx, ty, material)
+  local deck = ROADS.deck
+  local w, h = (l - r) / deck.repeatU, depth / deck.repeatU
+  local a, b, c, d = edge(i, r, -depth), edge(i, l, -depth), edge(i, l, 0), edge(i, r, 0)
+  a[4], a[5], b[4], b[5], c[4], c[5], d[4], d[5] = 0, h, w, h, w, 0, 0, 0
+  face({a, b, c, d}, tx * dir, ty * dir, 0, material)
+end
 -- Guard rail (OSM barrier=guard_rail, and 40 m of a main road's approach to a bridge): a
 -- galvanised W-beam `beam` m tall whose top is `height` over the base, on posts every `posts` m.
 -- profile: its folds ({off the centre line, up from the beam's foot}), `thick` m deep in all.
@@ -2132,7 +2166,7 @@ function ROADS.substructure(ctx)
               if clear and roadUnder(x - ty * across * f, y + tx * across * f) then clear = false end
             end
             if clear then
-              ROADS.box(face, 'fence_wall', x, y, tx, ty, across, pier.thick / 2, zg - pier.sink, z + .05, deck.repeatU)
+              ROADS.box(face, ROADS.deckMaterial(strip.tags), x, y, tx, ty, across, pier.thick / 2, zg - pier.sink, z + .05, deck.repeatU)
             end
           end
         end
@@ -2147,7 +2181,7 @@ function ROADS.substructure(ctx)
             if roadUnder(x - ty * across * f, y + tx * across * f) then open = true end
           end
           if owns(x, y) and z - zg > .1 and not open then
-            ROADS.box(face, 'fence_wall', x, y, tx, ty, wide(k) + deck.thick, pier.thick / 2, zg - pier.sink, z + .05, deck.repeatU)
+            ROADS.box(face, ROADS.deckMaterial(strip.tags), x, y, tx, ty, wide(k) + deck.thick, pier.thick / 2, zg - pier.sink, z + .05, deck.repeatU)
           end
         end
       end
@@ -2258,6 +2292,9 @@ function ROADS.unitedDecks(ctx)
       end
       local depth = 0
       for _, strip in ipairs(members) do depth = math.max(depth, ROADS.deckDepth(strip.tags)) end
+      -- the slab's material: its host's tags (ROADS.deckMaterial); runEnd: per side, the last
+      -- sample interval's last piece, i if its parapet was free, -i if not (ROADS.parapetCap)
+      local material, runEnd = ROADS.deckMaterial(host.tags), {}
       local function frame(s)
         local x, y, z, tx, ty, k = atDist(host, s)
         local nx, ny = -ty, tx
@@ -2318,7 +2355,16 @@ function ROADS.unitedDecks(ctx)
             ctx.roads.polygon(host.material, quad, 'flat')
             ctx.face({corner(a, a.left, -depth, u0, 0), corner(b, b.left, -depth, u1, 0),
               corner(b, b.right, -depth, u1, (a.left - a.right) / deck.repeatU),
-              corner(a, a.right, -depth, u0, (a.left - a.right) / deck.repeatU)}, 0, 0, -1)
+              corner(a, a.right, -depth, u0, (a.left - a.right) / deck.repeatU)}, 0, 0, -1, material)
+            -- the slab's ends, closed between its edges (ROADS.deckEndCap)
+            for _, slabEnd in ipairs({{a, -1, i == 1}, {b, 1, i == #samples - 1}}) do
+              local q, dir = slabEnd[1], slabEnd[2]
+              if slabEnd[3] then
+                local w, h = (q.left - q.right) / deck.repeatU, depth / deck.repeatU
+                ctx.face({corner(q, q.right, -depth, 0, h), corner(q, q.left, -depth, w, h),
+                  corner(q, q.left, 0, w, 0), corner(q, q.right, 0, 0, 0)}, q.tx * dir, q.ty * dir, 0, material)
+              end
+            end
             for _, side in ipairs({{a.left, b.left, 1}, {a.right, b.right, -1}}) do
               local edgeA, edgeB, outward = side[1], side[2], side[3]
               local outerA, outerB = edgeA + deck.thick * outward, edgeB + deck.thick * outward
@@ -2330,6 +2376,8 @@ function ROADS.unitedDecks(ctx)
                 local p, q = corner(a, offA, dz, u0, v), corner(b, offB, dz, u1, v)
                 return {p[1] + (q[1] - p[1]) * f, p[2] + (q[2] - p[2]) * f, p[3] + (q[3] - p[3]) * f, p[4] + (q[4] - p[4]) * f, v}
               end
+              -- (ROADS.parapetCap's offsets: 0 the parapet's inner face, 1 its outer one)
+              local function along(o, dz, f, v) return line(f, o == 0 and edgeA or outerA, o == 0 and edgeB or outerB, dz, v) end
               local free = {}
               for s = 1, pieces do free[s] = not (ctx.onOther and ctx.onOther(group, line((s - .5) / pieces, edgeA, edgeB, 0, 0))) end
               local s = 1
@@ -2340,18 +2388,31 @@ function ROADS.unitedDecks(ctx)
                   local f0, f1 = (s - 1) / pieces, e / pieces
                   ctx.face({line(f0, outerA, outerB, top, 0), line(f1, outerA, outerB, top, 0),
                     line(f1, outerA, outerB, low, (top - low) / deck.repeatU),
-                    line(f0, outerA, outerB, low, (top - low) / deck.repeatU)}, ox, oy, 0)
+                    line(f0, outerA, outerB, low, (top - low) / deck.repeatU)}, ox, oy, 0, material)
                   ctx.face({line(f0, edgeA, edgeB, top, 0), line(f1, edgeA, edgeB, top, 0),
                     line(f1, edgeA, edgeB, 0, top / deck.repeatU),
-                    line(f0, edgeA, edgeB, 0, top / deck.repeatU)}, -ox, -oy, 0)
+                    line(f0, edgeA, edgeB, 0, top / deck.repeatU)}, -ox, -oy, 0, material)
                   ctx.face({line(f0, edgeA, edgeB, top, 0), line(f1, edgeA, edgeB, top, 0),
                     line(f1, outerA, outerB, top, deck.thick / deck.repeatU),
-                    line(f0, outerA, outerB, top, deck.thick / deck.repeatU)}, 0, 0, 1)
+                    line(f0, outerA, outerB, top, deck.thick / deck.repeatU)}, 0, 0, 1, material)
+                  -- under the parapet: the soffit stops at the paved edge (a slot open from below, which
+                  -- a single-sided material of ROADS.deckLook would show as a gap to the sky)
+                  ctx.face({line(f0, edgeA, edgeB, low, 0), line(f1, edgeA, edgeB, low, 0),
+                    line(f1, outerA, outerB, low, deck.thick / deck.repeatU),
+                    line(f0, outerA, outerB, low, deck.thick / deck.repeatU)}, 0, 0, -1, material)
+                  if s > 1 or i == 1 or runEnd[outward] == 1 - i then
+                    ROADS.parapetCap(ctx.face, along, 0, 1, f0, -1, a.tx, a.ty, material)
+                  end
+                  if e < pieces or i == #samples - 1 then
+                    ROADS.parapetCap(ctx.face, along, 0, 1, f1, 1, a.tx, a.ty, material)
+                  end
                   s = e + 1
                 else
                   s = s + 1
                 end
               end
+              if not free[1] and runEnd[outward] == i - 1 then ROADS.parapetCap(ctx.face, along, 0, 1, 0, 1, a.tx, a.ty, material) end
+              runEnd[outward] = free[pieces] and i or -i
             end
           end
         end
@@ -2408,7 +2469,7 @@ function ROADS.unitedDecks(ctx)
             local zg = ctx.ground(x, y)
             local clear = z - zg >= pier.gap and not blocked(x, y, sample.tx, sample.ty, across)
             if clear then
-              ROADS.box(ctx.face, 'fence_wall', x, y, sample.tx, sample.ty, across, pier.thick / 2, zg - pier.sink, z + .05, deck.repeatU)
+              ROADS.box(ctx.face, material, x, y, sample.tx, sample.ty, across, pier.thick / 2, zg - pier.sink, z + .05, deck.repeatU)
             end
           end
         end
@@ -2425,7 +2486,7 @@ function ROADS.unitedDecks(ctx)
           local z = sample.z + sample.slope * mid + lift - depth
           local zg = ctx.ground(x, y)
           if owns(x, y) and z - zg > .1 and not blocked(x, y, sample.tx, sample.ty, across) then
-            ROADS.box(ctx.face, 'fence_wall', x, y, sample.tx, sample.ty, across, pier.thick / 2, zg - pier.sink, z + .05, deck.repeatU)
+            ROADS.box(ctx.face, material, x, y, sample.tx, sample.ty, across, pier.thick / 2, zg - pier.sink, z + .05, deck.repeatU)
           end
         end
       end
@@ -8109,23 +8170,43 @@ local function build(cells, i, j, options)
                   local f0, f1 = (s - 1) / n, e / n
                   -- the edge face, outside, from the parapet's top to the soffit
                   face({along(outer, top, f0, 0), along(outer, top, f1, 0),
-                    along(outer, low, f1, (top - low) / deck.repeatU), along(outer, low, f0, (top - low) / deck.repeatU)}, ox, oy, 0)
+                    along(outer, low, f1, (top - low) / deck.repeatU), along(outer, low, f0, (top - low) / deck.repeatU)}, ox, oy, 0,
+                    ROADS.deckMaterial(strip.tags))
                   -- the parapet's inner face and its top
                   face({along(inner, top, f0, 0), along(inner, top, f1, 0),
-                    along(inner, 0, f1, top / deck.repeatU), along(inner, 0, f0, top / deck.repeatU)}, -ox, -oy, 0)
+                    along(inner, 0, f1, top / deck.repeatU), along(inner, 0, f0, top / deck.repeatU)}, -ox, -oy, 0,
+                    ROADS.deckMaterial(strip.tags))
                   face({along(inner, top, f0, 0), along(inner, top, f1, 0),
-                    along(outer, top, f1, deck.thick / deck.repeatU), along(outer, top, f0, deck.thick / deck.repeatU)}, 0, 0, 1)
+                    along(outer, top, f1, deck.thick / deck.repeatU), along(outer, top, f0, deck.thick / deck.repeatU)}, 0, 0, 1,
+                    ROADS.deckMaterial(strip.tags))
+                  -- the run's ends: the deck's own, a piece over another carriageway, or a previous
+                  -- segment that ended over one (strip.deckRun: its last piece, k if free, -k if not)
+                  if s > 1 or k == 1 or (strip.deckRun and strip.deckRun[sign] == 1 - k) then
+                    ROADS.parapetCap(face, along, inner, outer, f0, -1, dx, dy, ROADS.deckMaterial(strip.tags))
+                  end
+                  if e < n or k == #points - 1 then
+                    ROADS.parapetCap(face, along, inner, outer, f1, 1, dx, dy, ROADS.deckMaterial(strip.tags))
+                  end
                   s = e + 1
                 else
                   s = s + 1
                 end
               end
+              if not free[1] and strip.deckRun and strip.deckRun[sign] == k - 1 then
+                ROADS.parapetCap(face, along, inner, outer, 0, 1, dx, dy, ROADS.deckMaterial(strip.tags))
+              end
+              strip.deckRun = strip.deckRun or {}
+              strip.deckRun[sign] = free[n] and k or -k
             end
             -- the soffit, seen from the road under the bridge
             local l = (hw + (strip.walk[k][1] and tune.sidewalk or 0))
             local r = -(hw + (strip.walk[k][-1] and tune.sidewalk or 0))
             face({at(k, l, -depth, u0, 0), at(k + 1, l, -depth, u1, 0),
-              at(k + 1, r, -depth, u1, (l - r) / deck.repeatU), at(k, r, -depth, u0, (l - r) / deck.repeatU)}, 0, 0, -1)
+              at(k + 1, r, -depth, u1, (l - r) / deck.repeatU), at(k, r, -depth, u0, (l - r) / deck.repeatU)}, 0, 0, -1,
+              ROADS.deckMaterial(strip.tags))
+            -- the slab's ends, closed between its outer faces
+            if k == 1 then ROADS.deckEndCap(face, edge, 1, l, r, depth, -1, dx, dy, ROADS.deckMaterial(strip.tags)) end
+            if k == #points - 1 then ROADS.deckEndCap(face, edge, k + 1, l, r, depth, 1, dx, dy, ROADS.deckMaterial(strip.tags)) end
           end
           if k % 32 == 0 then pause() end
         end
@@ -9141,7 +9222,8 @@ local function build(cells, i, j, options)
     for material in pairs(roadDecor.used) do roads.used[material] = true end
     if SW and visualRoads then
       local items, used = ROADS.sweep.items(SW, {tileKey = key, markKind = markKind, pause = pause, roadScale = ROADS.swept.scale,
-        material = function(tags) return (roadMaterial(tags)) end, deckDepth = ROADS.deckDepth, dem = #terrain > 0 and demAt or nil})
+        material = function(tags) return (roadMaterial(tags)) end, deckDepth = ROADS.deckDepth, deckMaterial = ROADS.deckMaterial,
+        dem = #terrain > 0 and demAt or nil})
       for _, item in ipairs(items) do roads.items[#roads.items + 1] = item end
       for material in pairs(used) do roads.used[material] = true end
     end
@@ -10811,6 +10893,7 @@ M.SWEPT = ROADS.swept
 M.HEIGHTS = {auto = true}
 M.SECTION = ROADS.section   -- the cross-section rule, for the offline tests
 M.PATHLIFT = ROADS.pathLift   -- bundle7 (P1): the footway lift beside raised swept roads, for the offline tests
+M.DECKMATERIAL = ROADS.deckMaterial   -- a bridge's material by its tags, for the offline tests
 M.YARD = YARD
 M.triangulate = triangulate
 M.clip = clip
