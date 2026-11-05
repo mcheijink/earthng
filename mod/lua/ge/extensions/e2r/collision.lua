@@ -15,6 +15,7 @@
 --     before each rebuild): same key, same reach, so the near ground is solid wherever the far
 --     one would be, and the far ground (coarser, > 5 cm over the near one in a quarter of the
 --     cells) only doubled the triangles and could bump the wheels.
+--   - lattice towers and wires (power.lua): thin members and strips, mostly far over the car.
 -- Hiding and showing ~1000 meshes costs ~1.5 ms; rendering does not see it (one Lua call).
 -- What a rebuild keeps sets its time: lastTris and lastObjects count it (the cost figures above
 -- put a town tile of ~40 solid meshes and ~20k triangles at 6-9 ms, ~8 such tiles at ~45 ms).
@@ -28,7 +29,8 @@ for _, kind in ipairs({'roof', 'roof_tile', 'roof_metal', 'roof_sheet', 'roof_mt
     'win_pvc', 'win_wood', 'door_house', 'door_garage', 'door_rust', 'chimney',
     'roof_mtile_green', 'footway', 'footway_asphalt', 'trodden', 'ground',
     'paved', 'water', 'glacier', 'bare_rock', 'scree', 'beach', 'wetland', 'orchard', 'vineyard', 'farmland',
-    'meadow', 'heath', 'scrub', 'forest', 'park', 'bare_ground', 'gable', 'parapet'}) do
+    'meadow', 'heath', 'scrub', 'forest', 'park', 'bare_ground', 'gable', 'parapet',
+    'power_steel', 'power_wire'}) do
   QUIET.scene['e2rf_' .. kind] = true
 end
 M.QUIET = QUIET

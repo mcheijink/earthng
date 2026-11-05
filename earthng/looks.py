@@ -61,6 +61,7 @@ LAYERS = (
     ('barriers', 'Fences and walls', True),
     ('treeRows', 'Tree rows', True),
     ('stops', 'Stops in the data', True),
+    ('power', 'Power lines and wind turbines', True),
 )
 
 
@@ -231,6 +232,8 @@ def keep_scenery(kind, include):
         return bool(include.get('treeRows', True))
     if kind == 'stop':
         return bool(include.get('stops', True))
+    if kind in ('power_line', 'power_tower', 'wind_turbine'):
+        return bool(include.get('power', True))
     # road details (fast_style.ROAD_DETAILS) belong to the road
     if kind in ('path', 'signal', 'road', 'junction', 'crossing', 'give_way', 'stop_sign',
                 'mini_roundabout', 'turning_circle', 'island', 'gantry'):

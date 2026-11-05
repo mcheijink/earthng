@@ -1153,6 +1153,11 @@ do
   ROADS.sweep = ok and type(mod) == 'table' and mod or nil
 end
 ROADS.swept = {on = true, mode = 'fast', scale = COVER_SCALE.road}
+-- Power lines and wind turbines (power.lua): near scene and far layer, never the horizon
+do
+  local ok, mod = pcall(require, 'ge/extensions/e2r/power')
+  ROADS.power = ok and type(mod) == 'table' and mod or nil
+end
 
 -- A generator way with no bridge of its own that runs on a swept road's surface at grade leaves it: its
 -- copy would lie on the lanes or poke through them (seen in testing: a track 0.1-0.2 m over the
@@ -9588,6 +9593,11 @@ local function build(cells, i, j, options)
       end
     end
     pause()
+  end
+  -- power lines and wind turbines: few triangles a tower or span, no collision but the turbines'
+  if ROADS.power and not options.horizon then
+    ROADS.power.build({rect = rect, lines = lists.lines, points = lists.points, ground = ground,
+      triangle = scene.triangle, pause = pause, far = distant})
   end
   local function static(name, shape, x, y, z, yaw, scale)
     scene.items[#scene.items + 1] = {kind = 'static', name = 'e2rl_' .. key .. '_' .. name,

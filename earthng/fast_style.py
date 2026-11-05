@@ -4,6 +4,7 @@ surface kind, and a facade per building. No textures are shipped; all paths are 
 import math
 import zlib
 import nature
+import power as _power
 
 TEXTURES = {
     'asphalt': {
@@ -202,7 +203,8 @@ TEXTURES['car'] = {'baseColorMap': f'{ART}/real/cars.color.png'}
 # 20 m, ref 30 drawn at 8, 20 and 40 m from the same DDS).
 CHAINLINK_MIP_REF = 80
 EXTRA = {'fence_mesh': {'alphaTest': True, 'alphaRef': 30, 'doubleSided': True, 'castShadows': False},
-         'fence_wall': {'doubleSided': True}}
+         'fence_wall': {'doubleSided': True}, 'power_steel': {'doubleSided': True},
+         'power_wire': {'doubleSided': True, 'castShadows': False}, 'turbine': {'doubleSided': True}}
 # Road decals are cut by their opacity, not blended: a translucent ProceduralMesh is lit in the
 # forward pass, and an edge came out 0.8 of the verge in the sun and 1.1 in the shade beside it
 # (decals-trunk-01). The game's own decal roads draw into the deferred buffers instead.
@@ -297,6 +299,12 @@ KINDS['trodden'] = ('trodden', [.42, .36, .28, 1], 'DIRT', 3.0, 'plan')
 KINDS['fence_wall'] = ('fence_po2', [.62, .62, .60, 1], 'ROCK', 2.5, 'wall')
 KINDS['fence_mesh'] = ('fence_mesh', [.30, .32, .30, 1], 'METAL', 2.0, 'wall')
 KINDS['car'] = ('car', [.6, .6, .62, 1], 'METAL', 1.0, 'wall')       # parked cars carry their own UVs
+# power.lua: galvanised lattice towers and poles, conductors, wind turbines. Flat colours: they are
+# seen from a few hundred metres to the far ring, where a map would only shimmer. Members and wires
+# are single quads, so both sides; the wires cast no shadow (thin strips flickered in it).
+KINDS['power_steel'] = (None, [.50, .52, .53, 1], 'METAL', 4.0, 'wall')
+KINDS['power_wire'] = (None, [.26, .27, .28, 1], 'METAL', 4.0, 'wall')
+KINDS['turbine'] = (None, [.86, .87, .86, 1], 'METAL', 4.0, 'wall')
 # A yard's own things (generator.lua YARD): playground frames, sandpits, mushrooms and container
 # screens take a cell of the paint atlas (fast_art.YARD_COLOURS), as cars do. Front gardens and
 # playgrounds are fenced with a low railing of bars: one quad, the bars cut by opacity, the paint
@@ -459,6 +467,8 @@ def line_kind(tags):
         return 'guard_rail'
     if tags.get('barrier') == 'hedge':
         return 'hedge'
+    if _power.is_line(tags):
+        return 'power_line'           # overhead lines (power.py; power=minor_line stays out)
     return None
 
 
@@ -469,12 +479,17 @@ UNMARKED = ('no', 'none', 'unmarked')
 
 
 # Every key point_kind reads: the exporter hands Python only nodes with one of them.
-POINT_KEYS = ('highway', 'natural', 'public_transport', 'entrance', 'leisure')
+POINT_KEYS = ('highway', 'natural', 'public_transport', 'entrance', 'leisure', 'power')
 
 
 def point_kind(tags):
     """'stop', 'signal' or one of ROAD_DETAILS for an OSM node, else None."""
     highway = tags.get('highway')
+    # a line's towers (their facts ride on the line, power.py) and wind turbines
+    if _power.is_tower(tags):
+        return 'power_tower'
+    if _power.is_turbine(tags):
+        return 'wind_turbine'
     if tags.get('natural') == 'tree':
         return 'tree'
     if highway == 'street_lamp':

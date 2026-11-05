@@ -34,6 +34,7 @@ import fast_junctions
 import fast_sources as sources
 import looks
 import nature
+import power
 
 
 FORMAT = 'earthng-features-v2'
@@ -247,12 +248,20 @@ def compile_cell(store, rect, include=None):
                 cell['junctions'].append({'id': f'{fid}:{n}',
                                           'rings': _rings(store, part, height), 'height': height})
     seen.clear()
-    pending, points = [], []
+    pending, points, wires = [], [], []
     for fid, kind, data, geometry in _scenery(store, padded):
         if kind == 'coastline' or (kind, fid) in seen or not looks.keep_scenery(kind, include):
             continue
         seen.add((kind, fid))
         tags = data.get('tags', {})
+        # power lines keep whole spans and their towers' facts (power.py); a tower is no point of its own
+        if kind == 'power_line':
+            wires.append((fid, tags, geometry))
+            continue
+        if kind == 'power_tower':
+            continue
+        if kind == 'wind_turbine':
+            tags = power.keep(tags, power.TURBINE_TAGS)
         if kind != 'building' and not shapely.box(*padded).contains(geometry):
             # A forest or field spans dozens of cells; whole, it was copied into each of them
             # (4/5 of a rural cell). Lua clips to the tile anyway, and the tile lies inside
@@ -275,6 +284,17 @@ def compile_cell(store, rect, include=None):
                        'tags': tags}
             points.append(feature)
             cell['points'].append(feature)
+    if wires:
+        reach = power.TOWER_REACH
+        towers = {power.key(geometry.x, geometry.y): data.get('tags', {})
+                  for _, kind, data, geometry in _scenery(store, [padded[0]-reach, padded[1]-reach,
+                                                                   padded[2]+reach, padded[3]+reach])
+                  if kind == 'power_tower' and geometry.geom_type == 'Point'}
+        for fid, tags, geometry in wires:
+            for n, part in enumerate(_parts(geometry, 'LineString')):
+                for feature in power.line_runs(fid, n, list(part.coords), tags, padded, towers):
+                    cell['lines'].append({'id': feature['id'], 'kind': feature['kind'], 'tags': feature['tags'],
+                                          'points': _xyz(store, feature['xy'], None, pending)})
     _sample_pending(store, pending)
     for feature in points:
         feature['pos'] = feature['pos'][0]
@@ -852,7 +872,7 @@ def _region_end(archive, ctx, emit, cover_meta=None, vegetation=None, look=None,
 
 # What a finished region of an export depends on besides its source index: the exporter's own code.
 _PART_CODE = ('build_country', 'country_format', 'fast_sources', 'fast_roads', 'fast_junctions', 'fast_style', 'nature', 'looks', 'landcover', 'dtm',
-              'fast_profile')
+              'fast_profile', 'power')
 HEIGHTS_FORMAT = 'earthng-heights-1'
 
 
