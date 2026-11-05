@@ -1157,6 +1157,12 @@ do
   local ok, mod = pcall(require, 'ge/extensions/e2r/signals')
   ROADS.signals = ok and type(mod) == 'table' and mod or nil
 end
+-- Noise barriers (noise.lua): placed beside the carriageways, of their tagged height. Without the module,
+-- a wall=noise_barrier way stays a fence.
+do
+  local ok, mod = pcall(require, 'ge/extensions/e2r/noise')
+  ROADS.noise = ok and type(mod) == 'table' and mod or nil
+end
 ROADS.swept = {on = true, mode = 'fast', scale = COVER_SCALE.road}
 -- Power lines and wind turbines (power.lua): near scene and far layer, never the horizon
 do
@@ -7051,7 +7057,9 @@ local function build(cells, i, j, options)
       if index % 16 == 0 then pause() end
     end
     for index, line in ipairs(lists.lines) do
-      local kind = (line.kind == 'guard_rail' or line.kind == 'barrier' or line.kind == 'wall' or line.kind == 'fence') and line.kind
+      -- (a noise barrier is moved out of the carriageway by noise.lua, not cut)
+      local kind = (line.kind == 'guard_rail' or line.kind == 'barrier' or line.kind == 'wall' or line.kind == 'fence')
+        and not (ROADS.noise and ROADS.noise.owns(line)) and line.kind
       if kind and #(line.points or NONE) >= 2 then
         for n, run in ipairs(ROADS.sweep.cutLine(SW, line.points, kind)) do
           lines[#lines + 1] = {id = tostring(line.id) .. ':sw' .. n, kind = line.kind, tags = line.tags, points = run}
@@ -9454,7 +9462,8 @@ local function build(cells, i, j, options)
     local ft = tags.fence_type
     local concrete = tags.barrier == 'wall' or ft == 'concrete' or ft == 'brick' or ft == 'stone'
     local kind = concrete and 'fence_wall' or 'fence_mesh'
-    local height = math.min(3, number(tags.height, concrete and 2 or 1.6))
+    -- a wall up to its tagged height (a yard's wall to a 6 m retaining wall), a fence to 3 m
+    local height = math.min(tags.barrier == 'wall' and 6 or 3, number(tags.height, concrete and 2 or 1.6))
     local half = (concrete and tune.wallThick or tune.fenceThick) / 2
     local scale = concrete and 2.5 or 2
     local raw, pts, along = line.points or NONE, {}, {}
@@ -9551,6 +9560,7 @@ local function build(cells, i, j, options)
       end}, line)
     end
     local barrier = (line.kind == 'fence' or line.kind == 'guard_rail') and #points >= 2
+      and not (ROADS.noise and ROADS.noise.owns(line))
     -- a long rail's three passes over the strips ran 12 ms in one piece (generator_budget.py): each takes pause
     for _, run in ipairs(barrier and (ROADS.offDecks(strips, points, ground, pause) or {points}) or NONE) do
       if #run >= 2 and line.kind == 'fence' then
@@ -9608,6 +9618,10 @@ local function build(cells, i, j, options)
     scene.items[#scene.items + 1] = {kind = 'static', name = 'e2rl_' .. key .. '_' .. name,
       pos = {x, y, z}, rot = {0, 0, math.sin(yaw / 2), math.cos(yaw / 2)}, scale = scale or 1,
       shape = shape, decor = true, layer = 'scene', collision = 'None'}
+  end
+  if ROADS.noise and not options.horizon then
+    ROADS.noise.draw({lines = lists.lines, rect = rect, segmentBins = segmentBins, lift = lift, ground = ground,
+      wall = scene, decor = sceneDecor, far = distant, strips = strips, skirts = SW and SW.skirts, pause = pause})
   end
   mark('lines')
   local parking = {}

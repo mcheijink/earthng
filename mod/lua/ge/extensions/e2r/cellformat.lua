@@ -50,6 +50,8 @@ M.FAST = {motorway = true, motorway_link = true, trunk = true, trunk_link = true
 M.DETAIL_MARGIN = 30
 M.DETAILS = {crossing = true, give_way = true, stop_sign = true, mini_roundabout = true, turning_circle = true,
   signal = true, speed_camera = true}
+-- a noise barrier moves up to 25 m out of a carriageway (noise.lua): it reaches into the tile from that far off
+M.NOISE_MARGIN = 30
 
 -- One cell from data[first..last]; ox, oy: its south-west corner in region metres.
 -- keep (optional {x0, y0, x1, y1}): only features whose bounds reach it (with the margins above)
@@ -177,7 +179,7 @@ function M.cell(data, first, last, ox, oy, rect, pause, keep)
       elseif kind == 'lines' then
         f.kind = ref(); f.tags = tags()
         local n = read(2)
-        keepIt = wanted(M.MARGIN)
+        keepIt = wanted(f.kind == 'noise_barrier' and M.NOISE_MARGIN or M.MARGIN)
         if keepIt then f.points = points(0, n) end
       else
         f.kind = ref(); f.tags = tags()

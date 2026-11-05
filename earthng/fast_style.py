@@ -448,8 +448,8 @@ UNPAVED = {'unpaved', 'dirt', 'ground', 'earth', 'grass', 'sand', 'gravel', 'fin
 
 
 def line_kind(tags):
-    """'path', 'fence', 'guard_rail', 'gantry' (an overhead sign frame across a road) or 'tree_row' for
-    an OSM way drawn as a line, 'coastline' for the shore the exporter fixes the DEM with (never
+    """'path', 'fence', 'noise_barrier', 'guard_rail', 'gantry' (an overhead sign frame across a road) or
+    'tree_row' for an OSM way drawn as a line, 'coastline' for the shore the exporter fixes the DEM with (never
     drawn), else None."""
     if tags.get('natural') == 'coastline':
         return 'coastline'
@@ -462,6 +462,9 @@ def line_kind(tags):
         return 'path'
     if tags.get('natural') == 'tree_row':
         return 'tree_row'
+    # a noise barrier is drawn beside the carriageway at its own height (generator: noise.lua)
+    if tags.get('barrier') == 'noise_barrier' or tags.get('wall') == 'noise_barrier':
+        return 'noise_barrier'
     if tags.get('barrier') in ('fence', 'wall'):
         return 'fence'
     if tags.get('barrier') == 'guard_rail':
