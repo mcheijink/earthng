@@ -2710,11 +2710,18 @@ M.sharedSide = sharedSide
 M.DROP = {height = 3, probe = 8, run = 30, step = 4, offset = .5}
 local function mappedSide(S, s, side)
   for _, f in ipairs(S.furniture) do
-    if f.side == side and s >= f.s0 - 3 and s <= f.s1 + 3 then return true end
+    if f.side == side then
+      -- a mapped run that ends short of a bridge runs on to it (railPaths): the stretch up to it is mapped too
+      local lo, hi = railJoins(S, f, M.TUNE)
+      local a, b = lo and lo.s1 - M.TUNE.railOverrun or f.s0, hi and hi.s0 + M.TUNE.railOverrun or f.s1
+      if s >= a - 3 and s <= b + 3 then return true end
+    end
   end
   return false
 end
-function M.dropRails(plan, S, c, dem)
+-- A rule rail that ends at a bridge runs on to it like a mapped one (TUNE.railJoin, railPaths): samples just outside the
+-- bridge's start and end, every 1.5 m over the draw-in, and one `railOverrun` m inside the bridge, at the parapet. depth: the deck's.
+function M.dropRails(plan, S, c, dem, depth)
   local D, T = M.DROP, M.TUNE
   local out = {}
   if not dem or (S.tags or NONE)['e2r:rails'] == 'register' then return out end
@@ -2725,16 +2732,57 @@ function M.dropRails(plan, S, c, dem)
   local ss = {}
   for k = math.ceil(lo / D.step), floor(hi / D.step) do ss[#ss + 1] = k * D.step end
   ss[#ss + 1] = max(c0, lo); ss[#ss + 1] = min(c1, hi)
+  -- the bridges whose ends lie in the range: the samples that join a rail to them (and the stretch of the draw-in)
+  local joins, inside = {}, {}
+  if T.railJoin and T.railJoin > 0 then
+    local reach = T.railTaper + 8 * max(0, D.offset - T.railJoinOffset)
+    for _, r in ipairs(S.structures or NONE) do
+      if r.kind == 'bridge' then
+        for _, e in ipairs({{r.s0, -1}, {r.s1, 1}}) do
+          local s, away = e[1], e[2]
+          if s >= lo and s <= hi then
+            joins[#joins + 1] = {s = s, away = away, reach = reach}
+            ss[#ss + 1] = s + away * 1e-3
+            for d = 1.5, reach, 1.5 do ss[#ss + 1] = s + away * d end
+            local deep = s - away * T.railOverrun
+            ss[#ss + 1] = deep
+            inside[floor(deep * 1000 + .5)] = joins[#joins]
+          end
+        end
+      end
+    end
+  end
   table.sort(ss)
+  -- the sideways offset at s: D.offset, drawn in to the parapet within reach of a bridge's end where one stands on `side`
+  local function offsetAt(s, side, standing)
+    local off = D.offset
+    for _, j in ipairs(joins) do
+      local d = (s - j.s) * j.away
+      if standing[j] and d < j.reach then
+        local w = smooth(max(0, d) / j.reach)
+        off = min(off, T.railJoinOffset + (D.offset - T.railJoinOffset) * w)
+      end
+    end
+    return off
+  end
   for _, side in ipairs({1, -1}) do
+    -- the bridge ends with a parapet on this side
+    local standing = {}
+    for _, j in ipairs(joins) do
+      local cc = j.s >= c0 - 1e-6 and j.s <= c1 + 1e-6 and c or S:chunkAt(j.s)
+      if cc and M.parapetStands(plan, S, cc, j.s - j.away, side, depth or 1.5) then standing[j] = true end
+    end
     -- per sample: its rail point when the edge stands over a drop, else false
     local at = {}
     for i, s in ipairs(ss) do
       tick()
       local cc = s >= c0 - 1e-6 and s <= c1 + 1e-6 and c or S:chunkAt(s)
       at[i] = false
-      if cc and not structureAt(S, s, 'bridge') and not structureAt(S, s, 'tunnel') and not sharedSide(S, s, side)
-          and not mappedSide(S, s, side) then
+      -- a sample inside a bridge is the overrun of a joined rail, only where the parapet stands
+      local deep = inside[floor(s * 1000 + .5)]
+      deep = deep and standing[deep]
+      if cc and (deep or not structureAt(S, s, 'bridge')) and not structureAt(S, s, 'tunnel') and not sharedSide(S, s, side)
+          and (deep or not mappedSide(S, s, side)) then
         local row = M.row(plan, S, cc, s)
         local e = side > 0 and row.eL or row.eR
         local zEdge = M.rowZ(row, side * e)
@@ -2746,7 +2794,7 @@ function M.dropRails(plan, S, c, dem)
           local other = M.surfaceWhere(plan, px, py, .05, behindTest) or M.surfaceWhere(plan, mx, my, .05, behindTest)
           BEHIND.S = nil
           if not other then
-            local u = side * (e + D.offset)
+            local u = side * (e + offsetAt(s, side, standing))
             local x, y = row.x + row.nx * u, row.y + row.ny * u
             local own = function(hit) return hit.S == S and abs(hit.s - s) < 40 end
             if not M.onSurface(plan, x, y, zEdge, T.railClear + M.RAIL.thick, 2.5, own) then at[i] = {x, y, zEdge, s, row.h} end
@@ -3068,7 +3116,7 @@ function M.items(plan, opts)
           local jersey = look.stock and newMesh('e2rf_' .. M.RAIL.jerseyMaterial) or rail
           local paths = M.railPaths(plan, S, c, opts.deckDepth and opts.deckDepth(S.tags) or 1.5)
           -- and the rule rails at a drop (opts.dem: the generator's raw DEM)
-          for _, path in ipairs(M.dropRails(plan, S, c, opts.dem)) do paths[#paths + 1] = path end
+          for _, path in ipairs(M.dropRails(plan, S, c, opts.dem, opts.deckDepth and opts.deckDepth(S.tags) or 1.5)) do paths[#paths + 1] = path end
           for _, path in ipairs(paths) do M.railMesh(plan, S, c, path, path.kind == 'jersey' and jersey or rail, o, lift, look) end
           c.railPaths = paths
           pause()

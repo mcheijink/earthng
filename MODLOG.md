@@ -11,7 +11,8 @@
   median rail one 10 m station short. New switch `extras.railsOffDecks` (default on = upstream; the fork profile turns it
   off): off, a mapped rail runs on to the deck's end and draws in to the parapet over its last metres, ending inside it
   (`ROADS.joinDecks`), the plain approach rail does the same, and the parapet starts at the end. The swept rails do the
-  same unconditionally (`TUNE.railJoin`, 0 = off); a two-faced median rail runs on to the end plane as it is.
+  same unconditionally (`TUNE.railJoin`, 0 = off), the rule rails at a drop too; a two-faced median rail runs on to the end
+  plane as it is.
   Tests: `earthng/bridge_rail_test.py`.
 
 ## 2026-11-02: release 0.7.0, landmark fixes from the stills

@@ -380,5 +380,53 @@ class SweptRails(unittest.TestCase):
         self.assertFalse([m for m in mats if self.L.globals().QUIET(m, 'road') and m in (RAIL, WALL)])
 
 
+@unittest.skipIf(luajit21 is None, 'needs lupa with LuaJIT')
+class SweptDropRails(unittest.TestCase):
+    """The rule rails at a drop (sweep.lua M.dropRails): the road stands 6 m over the raw ground, no barrier is mapped"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.L = runtime()
+        _, data, version = swept_pack([])
+        low = cell()
+        low['terrain'] = dict(flat_terrain(), heights=[Z - 6.] * 101 * 101)
+        cls.scene = Scene(cls.L, low, cls.L.globals().SWEPT(data, version))
+
+    def ends(self, join):
+        tune = self.L.globals().SWEEP.TUNE
+        old = tune.railJoin
+        try:
+            tune.railJoin = join
+            rails, walls = self.scene.points(RAIL), self.scene.points(WALL)
+        finally:
+            tune.railJoin = old
+        out = {}
+        for plane, direction in ((200., 1), (400., -1)):
+            for name, (ylo, yhi), toward in (('south', (80, 98), 1), ('north', (112, 130), -1)):
+                near = window(rails, plane - 30, plane + 30, ylo, yhi)
+                near = near[near[:, 0] < plane + 1] if direction > 0 else near[near[:, 0] > plane - 1]
+                gap = (plane - near[:, 0].max()) if direction > 0 else (near[:, 0].min() - plane)
+                r = window(rails, plane - .5, plane + .5, ylo, yhi)
+                w = window(walls, plane - .05, plane + .05, ylo, yhi)
+                step = None
+                if len(r):
+                    step = (r[:, 1].max() - w[:, 1].max()) if toward > 0 else (r[:, 1].min() - w[:, 1].min())
+                out[(name, plane)] = (gap, step)
+        return out
+
+    def test_a_rule_rail_stopped_short_of_the_bridge(self):
+        for key, (gap, _) in self.ends(0).items():
+            self.assertTrue(3 < gap < 4.5, '%s: gap %.2f' % (key, gap))
+
+    def test_a_rule_rail_runs_on_to_the_bridge_and_joins_the_parapet(self):
+        ends = self.ends(14)
+        self.assertEqual(len(ends), 4)
+        for key, (gap, step) in ends.items():
+            self.assertTrue(-.5 <= gap <= .1, '%s: gap %.2f' % (key, gap))
+            # its face toward the traffic does not stand out past the parapet's (south: larger y is toward the road)
+            self.assertIsNotNone(step, key)
+            self.assertLessEqual(abs(step), .06, '%s: step %.3f' % (key, step))
+
+
 if __name__ == '__main__':
     unittest.main()
