@@ -59,7 +59,8 @@ DRIVEWAY = 3.0                                        # service=driveway / alley
 # width tag. The generator's ROADS.shoulder holds the same rule and paints the edge lines
 # inside it.
 # motorway: 0.75 m on the median side, 2.5 m on the right; with the fork's road rules (set_road_rules, the
-# EARTHNG_ROAD_RULES switch) 0.25 m and 3.3 m, as measured on German motorways (official data against aerials)
+# EARTHNG_ROAD_RULES switch) 0.25 m and 3.3 m, as measured against a motorway aerial (ALKIS: the paved edge lies 3.05-3.45 m past the right edge line and
+# 0-0.35 m past the left one)
 SHOULDER = {'motorway': (.75, 2.5), 'trunk': (1., 1.), 'primary': (.5, .5), 'secondary': (.25, .25)}
 SHOULDER_MOTORWAY = {False: (.75, 2.5), True: (.25, 3.3)}
 
