@@ -783,7 +783,7 @@ local function clampTune(tune)
   return quality.clamp(tune)
 end
 
--- Switches a pack carries in its region manifest: `extras` = {signals, lots, roadProfiles, lampRows, openSea},
+-- Switches a pack carries in its region manifest: `extras` = {signals, lots, roadProfiles, lampRows, openSea, shops, landmarks, railsOffDecks},
 -- the fields of generator.EXTRAS. They are applied when the landing starts, before the first tile is built.
 -- A key a pack leaves out stays at the generator's default, and a pack without `extras` restores the
 -- defaults an earlier pack changed (nothing leaks from one pack into the next). Values set by hand

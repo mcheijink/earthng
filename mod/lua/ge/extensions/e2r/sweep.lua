@@ -37,6 +37,11 @@ M.TUNE = {
   railBehind = {2, 4}, -- m behind a rail where another carriageway makes it a median rail (rule:median: edges under
                        -- 6 m apart, the rail in the middle; a mapped one up to 4 m out); 2 m apart, so a lane of 3 m
                        -- whose near edge lies within 4 m is never missed
+  -- Where a rail meets a bridge deck it joins the deck's parapet (M.railPaths): a rail that stops within railJoin m of the
+  -- bridge's end runs on to it, its last railTaper m (at least 8 x the sideways step) draw in to the parapet, and it ends
+  -- railOverrun m inside it, its face railJoinOffset m (a concrete barrier: railJoinJersey) from the parapet's inner face, so
+  -- there is no gap and no rail end toward the traffic. railJoin = 0: off, a rail ends where it is mapped.
+  railJoin = 14, railTaper = 6, railOverrun = .3, railJoinOffset = .08, railJoinJersey = .15,
   navStep = 80,        -- m between nav knots at most (generator navSegment)
   spawnStep = 1,
   -- Transitions along a road (own choice, NOT from a guideline): where two strokes meet straight on
@@ -2404,15 +2409,55 @@ local function structureAt(S, s, kind)
 end
 M.structureAt = structureAt
 
--- rails: the mapped runs in chunk c's range, sampled at its rows, cut where they reach a drawn surface
-function M.railPaths(plan, S, c)
+-- Does the deck of S have a parapet on `side` at s, as deckMesh decides it: on an outer edge (no lane boundary) with no other
+-- surface at about its height within DECK.clear outside it. s is clamped into chunk c, depth is the deck's.
+function M.parapetStands(plan, S, c, s, side, depth)
+  local D = M.DECK
+  s = max(c.s[1], min(c.s[c.n], s))
+  local row = M.row(plan, S, c, s)
+  local e = side > 0 and row.eL or row.eR
+  if e <= .05 or M.sharedSide(S, s, side) then return false end
+  local own = function(hit) return hit.S == S and abs(hit.s - s) < 40 end
+  local z = M.rowZ(row, side * e)
+  for _, du in ipairs({.05, D.thick, D.thick + D.clear}) do
+    local u = side * (e + du)
+    if M.onSurface(plan, row.x + row.nx * u, row.y + row.ny * u, z - depth / 2, .02, depth / 2 + 2.0, own) then return false end
+  end
+  return true
+end
+
+-- The bridges a mapped rail run (f.s0..f.s1) ends at: the one that begins just past its end (hi) and the one that ends just
+-- before its start (lo), each within TUNE.railJoin m. A rail starting or ending on a bridge is left as mapped.
+local function railJoins(S, f, T)
+  if not (T.railJoin and T.railJoin > 0) then return nil, nil end
+  local lo, hi
+  for _, r in ipairs(S.structures or NONE) do
+    if r.kind == 'bridge' then
+      if r.s0 >= f.s1 - 1e-6 and r.s0 - f.s1 <= T.railJoin and (not hi or r.s0 < hi.s0) then hi = r end
+      if r.s1 <= f.s0 + 1e-6 and f.s0 - r.s1 <= T.railJoin and (not lo or r.s1 > lo.s1) then lo = r end
+    end
+  end
+  return lo, hi
+end
+
+-- rails: the mapped runs in chunk c's range, sampled at its rows, cut where they reach a drawn surface. A run that ends
+-- within TUNE.railJoin m of a bridge deck runs on to it and joins its parapet (railJoins, TUNE.railTaper); depth: the deck's.
+function M.railPaths(plan, S, c, depth)
   local T = M.TUNE
   local tick = pacer(plan)
   local out = {}
   local c0, c1 = c.s[1], c.s[c.n]
   for _, f in ipairs(S.furniture) do
     local kind = M.RAIL.kinds[f.kind]
-    local a, b = max(f.s0, c0, S.D0), min(f.s1, c1, S.D1)
+    local lo, hi = nil, nil
+    if kind then lo, hi = railJoins(S, f, T) end
+    local jo = kind == 'jersey' and T.railJoinJersey or T.railJoinOffset
+    -- the parapet must stand at that end of the deck, else the rail is left as mapped
+    if lo and not M.parapetStands(plan, S, c, lo.s1 - 1, f.side, depth or 1.5) then lo = nil end
+    if hi and not M.parapetStands(plan, S, c, hi.s0 + 1, f.side, depth or 1.5) then hi = nil end
+    local f0 = lo and lo.s1 - T.railOverrun or f.s0
+    local f1 = hi and hi.s0 + T.railOverrun or f.s1
+    local a, b = max(f0, c0, S.D0), min(f1, c1, S.D1)
     if kind and b - a > 1e-3 then
       -- sample s: the stations and rows inside, the ends; skip the fan junctions (+ railStop)
       local stops = {}
@@ -2429,13 +2474,29 @@ function M.railPaths(plan, S, c)
       -- and the rows (bundle5: an added lane's S-shaped taper lies between two stations; the beam cut its corner)
       for _, list in ipairs(c.rows) do for _, r in ipairs(list) do add(r.s) end end
       for _, r in ipairs(stops) do add(r[1]); add(r[2]) end
+      -- a joined end draws in to the parapet: the samples there are 1.5 m apart (and at the bridge's end itself)
+      local reach = T.railTaper + 8 * max(0, max(f.offset, T.railMinOffset) - jo)
+      if lo then add(lo.s1); for d = 1.5, reach, 1.5 do add(lo.s1 + d) end end
+      if hi then add(hi.s0); for d = 1.5, reach, 1.5 do add(hi.s0 - d) end end
       table.sort(ss)
+      -- the sideways offset at s from the paved edge: as mapped, drawn in to the parapet within reach of a joined end
+      local function offsetAt(s, full)
+        local d = math.huge
+        if hi then d = min(d, hi.s0 - s) end
+        if lo then d = min(d, s - lo.s1) end
+        local len = max(T.railTaper, 8 * (full - jo))
+        if d >= len or full <= jo then return full end
+        return jo + (full - jo) * smooth(d / len)
+      end
       local run = {}
       local function close()
         local length = 0
         for k = 2, #run do length = length + sqrt((run[k][1] - run[k - 1][1]) ^ 2 + (run[k][2] - run[k - 1][2]) ^ 2) end
         if #run >= 2 and length >= T.railMin then
-          out[#out + 1] = {kind = kind, side = f.side, points = run, a = run.a, b = run.b, double = run.double}
+          local join = {}
+          if lo and run.a <= lo.s1 + 1e-6 then join.a = lo.s1 end
+          if hi and run.b >= hi.s0 - 1e-6 then join.b = hi.s0 end
+          out[#out + 1] = {kind = kind, side = f.side, points = run, a = run.a, b = run.b, double = run.double, join = join}
         end
         run = {}
       end
@@ -2444,12 +2505,18 @@ function M.railPaths(plan, S, c)
         if insideAny(stops, s) then close() else
           local row = M.row(plan, S, c, s)
           local e = f.side > 0 and row.eL or row.eR
-          local u = f.side * (e + max(f.offset, T.railMinOffset))
+          local full = max(f.offset, T.railMinOffset)
+          local u = f.side * (e + full)
           local x, y = row.x + row.nx * u, row.y + row.ny * u
           local zEdge = M.rowZ(row, f.side * e)
           local own = function(hit) return hit.S == S and abs(hit.s - s) < 40 end
-          -- a carriageway behind: a median rail, two-faced (or drawn by the other carriageway: 2)
+          -- a carriageway behind: a median rail, two-faced (or drawn by the other carriageway: 2). It runs on to the bridge as
+          -- it is (the decks stand apart, and a two-faced rail ends level with their parapets); a single rail draws in
           local median = kind == 'beam' and M.railBehind(plan, S, x, y, zEdge, row.nx * f.side, row.ny * f.side) or 0
+          if median == 0 and (lo or hi) then
+            u = f.side * (e + offsetAt(s, full))
+            x, y = row.x + row.nx * u, row.y + row.ny * u
+          end
           if median == 2 or M.onSurface(plan, x, y, zEdge, T.railClear + M.RAIL.thick, 2.5, own) then close() else
             if #run > 0 and run.double ~= (median == 1) then close() end
             if #run == 0 then run.a, run.double = s, median == 1 end
@@ -2999,7 +3066,7 @@ function M.items(plan, opts)
           local rail = newMesh(look.name)
           -- a stock look is a W-beam sheet: a concrete barrier gets a mesh of its own kind (else the same mesh)
           local jersey = look.stock and newMesh('e2rf_' .. M.RAIL.jerseyMaterial) or rail
-          local paths = M.railPaths(plan, S, c)
+          local paths = M.railPaths(plan, S, c, opts.deckDepth and opts.deckDepth(S.tags) or 1.5)
           -- and the rule rails at a drop (opts.dem: the generator's raw DEM)
           for _, path in ipairs(M.dropRails(plan, S, c, opts.dem)) do paths[#paths + 1] = path end
           for _, path in ipairs(paths) do M.railMesh(plan, S, c, path, path.kind == 'jersey' and jersey or rail, o, lift, look) end

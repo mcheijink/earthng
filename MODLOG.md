@@ -1,5 +1,19 @@
 # EarthNG native mod migration
 
+## 2026-11-06: guard rails run on to a bridge deck, stock rail material
+
+- Guard rails use the game's own `italy_guardrails` material, UVs fitted to its sheet (one panel per 4 m post spacing, so a
+  joint sits on every post). Fallbacks, logged once: a runtime `e2rf_guardrail` from the game's own textures, then `clad_metal`.
+- A rail stopped short of a bridge deck. Upstream's generator keeps a mapped rail out of a deck's way on purpose (a rail under
+  a deck is wrong): 8 m off the edges and ends of a deck 3.5 m or more over the ground, and a 3 m circle round a deck's ends,
+  so the rail ends 4 to 12 m short. Its deck drawing also leaves out the parapet's first piece beside the approach's end.
+  The swept roads' rails (`sweep.lua`) stop where the exporter ended the run: a mapped run on its last 2 m sample, a rule
+  median rail one 10 m station short. New switch `extras.railsOffDecks` (default on = upstream; the fork profile turns it
+  off): off, a mapped rail runs on to the deck's end and draws in to the parapet over its last metres, ending inside it
+  (`ROADS.joinDecks`), the plain approach rail does the same, and the parapet starts at the end. The swept rails do the
+  same unconditionally (`TUNE.railJoin`, 0 = off); a two-faced median rail runs on to the end plane as it is.
+  Tests: `earthng/bridge_rail_test.py`.
+
 ## 2026-11-02: release 0.7.0, landmark fixes from the stills
 
 - Stills of ten world landmarks showed what no bench had: the Eiffel Tower as floating plates (skillion

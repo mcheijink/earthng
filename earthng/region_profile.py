@@ -11,7 +11,8 @@ EARTHNG_PROFILE=fork
     roadProfiles and lampRows on, and openSea on (the sea plane then floods only the sea joined to a
     seed, so marsh and polder land below the sea level stays dry); shops and landmarks off (upstream's
     shop signs, storefronts, glyph letters and hw_ashlar / roof_gold landmark walls and domes, which this
-    region's planet has no materials for).
+    region's planet has no materials for), and railsOffDecks off (upstream keeps a mapped guard rail 8 m off a
+    high bridge deck and a few metres short of any deck end; here the rail runs on to the deck and joins its parapet).
 A pack without `extras` leaves the generator at its defaults.
 """
 import os
@@ -23,7 +24,7 @@ import os
 FORK_ENV = {'EARTHNG_ROAD_RULES': '1', 'EARTHNG_POWER': '1', 'EARTHNG_NOISE': '1', 'EARTHNG_CAMERAS': '1',
             'EARTHNG_BRIDGE_FLOORS': '1', 'EARTHNG_PCG': '1', 'EARTHNG_SPANS': '0', 'EARTHNG_TIDAL': '0'}
 FORK_EXTRAS = {'signals': True, 'lots': True, 'roadProfiles': True, 'lampRows': True, 'openSea': True,
-               'shops': False, 'landmarks': False}
+               'shops': False, 'landmarks': False, 'railsOffDecks': False}
 
 
 def switch(variable, default):

@@ -17,7 +17,7 @@ import region_profile
 import test_country as fixture
 
 SWITCHES = ('signals', 'lots', 'roadProfiles', 'lampRows', 'openSea')
-OFF_SWITCHES = ('shops', 'landmarks')       # upstream's art the fork's planet does not ship: default on, off in the profile
+OFF_SWITCHES = ('shops', 'landmarks', 'railsOffDecks')       # upstream's behaviour the fork switches off (art its planet does not ship, rails kept off decks): default on, off in the profile
 
 
 def without_profile():
