@@ -15,6 +15,14 @@ sys.path.insert(0, os.path.join(ROOT, 'earthng'))
 import fast_style  # noqa: E402
 import looks  # noqa: E402
 
+
+def setUpModule():
+    fast_style.NOISE = True        # noise barriers are their own kind only with EARTHNG_NOISE
+
+
+def tearDownModule():
+    fast_style.NOISE = False
+
 EAST_Y, WEST_Y, PAVED = 100., 114., 11.
 CLEAR = 1.5
 SOUTH_EDGE = EAST_Y - PAVED / 2 - CLEAR        # 93: the eastbound's outer corridor edge

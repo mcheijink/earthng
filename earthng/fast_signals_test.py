@@ -12,6 +12,14 @@ import fast_signals as fs  # noqa: E402
 import fast_style  # noqa: E402
 import looks  # noqa: E402
 
+
+def setUpModule():
+    fast_style.CAMERAS = True      # speed cameras are off in the exporter unless EARTHNG_CAMERAS is set
+
+
+def tearDownModule():
+    fast_style.CAMERAS = False
+
 LON, LAT = .5, .5
 D = .0005   # about 55 m
 

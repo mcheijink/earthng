@@ -11,6 +11,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fast_profile as fp  # noqa: E402
 import fast_sources  # noqa: E402
 
+
+def setUpModule():
+    # the German class rules are off unless asked for (fast_profile.set_road_rules)
+    fast_sources.set_road_rules(True)
+
+
+def tearDownModule():
+    fast_sources.set_road_rules(False)
+
 _ID = [0]
 
 

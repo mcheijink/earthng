@@ -7,7 +7,7 @@ import os
 import sys
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))).replace(os.sep, '/')   # forward slashes: a Windows path in a Lua string needs no escapes
 try:
     import lupa.luajit21 as lupa
 except ImportError:      # pragma: no cover
@@ -50,7 +50,7 @@ class Runtime:
 
     def build(self, roads, points):
         cell = self.table({'roads': roads, 'points': points})
-        result = self.gen.build(self.lua.table(cell), 0, 0, self.table({'tileSize': 500}))
+        result = self.gen.build(self.lua.table(cell), 0, 0, self.table({'tileSize': 500, 'signals': True}))
         scene = result[1]
         out = []
         for item in scene['items'].values():
