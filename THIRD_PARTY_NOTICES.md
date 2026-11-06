@@ -13,6 +13,14 @@ of the following data and assets:
   under the tile usage policy: https://operations.osmfoundation.org/policies/tiles/
 - Terrarium elevation tiles: https://registry.opendata.aws/terrain-tiles/
   See the source attribution and terms there when redistributing elevation data.
+- National 1 m terrain models (`EARTHNG_DTM=1`, `earthng/dtm.py`): road heights and the ground
+  grid in Niedersachsen are derived from Digitales Gelaendemodell DGM1 (and checked against
+  Digitales Oberflaechenmodell DOM1), (c) GeoBasis-DE/LGLN <year>, CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/), modified (sampled and smoothed road profiles,
+  block-averaged ground grid). https://ni-lgln-opengeodata.hub.arcgis.com/ . Packs built with
+  it carry this credit in their manifest and CREDITS.txt (the year is the flight year of the
+  tiles used). The raw tiles in `data/dgm1` and `data/dom1` are never shipped. Other providers
+  listed in `dtm.py` are documented only; check their terms before adding their tiles.
 - Estonian elevation (`--local-dem`): Map data: Republic of Estonia Land and Spatial
   Development Board (Maa- ja Ruumiamet), under its open data licence:
   https://geoportaal.maaruum.ee/opendata-licence . State the extraction year
