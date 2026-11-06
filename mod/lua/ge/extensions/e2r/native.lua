@@ -5,6 +5,7 @@
 local M = {}
 local catalog = require('ge/extensions/e2r/countries')
 local generator = require('ge/extensions/e2r/generator')
+local roads3 = require('ge/extensions/e2r/roads3')
 local coordinates = require('ge/extensions/e2r/coordinates')
 local cellformat = require('ge/extensions/e2r/cellformat')
 local liveOk, liveMod = pcall(require, 'ge/extensions/e2r/live')
@@ -17,12 +18,25 @@ local BLOCK_LIMIT = 6
 -- Prepared horizon meshes, separate from the near/far triangle budget above. The 5 km ring
 -- is the one that is scheduled; 15 km and 30 km stay off until an in-game check.
 local HORIZON_RADIUS, HORIZON_TILE_LIMIT, HORIZON_TRIANGLE_LIMIT = 5000, 96, 250000
+-- split screen: the near bubble round each other player's car (m), within the near radius
+local EXTRA_RADIUS = 800
 local HORIZON_STEP, HORIZON_BLOCK = 100, 1000
 -- The vista: from a summit or a pass the land past 5 km is in view. When the camera stands
 -- VISTA_RELIEF over the lowest ground known round it and moves slower than VISTA_SPEED, the
 -- horizon runs on to VISTA_RADIUS in 4 km blocks of 400 m steps, read from the cells' elevation
 -- grids alone (cellformat.terrain). Driving never schedules it.
 local VISTA_RADIUS, VISTA_BLOCK, VISTA_STEP, VISTA_RELIEF, VISTA_SPEED = 24000, 4000, 400, 250, 15
+-- The road ahead at speed (night 26.10: a central Kyiv near tile took ~1 s of Lua, ~4 s at the
+-- frame's budget, and at 300 km/h the car ran off the built roads). A near tile's priority is the
+-- time the car takes to reach it: along its heading, a step sideways counting `across` times
+-- (a step back `back` times), blended in from `slow` to `fast` m/s; below that the old distance.
+-- Past the near radius the tiles a `corridor` s drive ahead (within `half` m of the heading line,
+-- `reach` m at most) are near too. A tile's road goes out before its scene (generator.lua
+-- roadReady): its scene waits `lag` s plus `lagPerMs` s for every m/s over `slow`, in at most
+-- `parked` suspended builds. Under `urgent` s from a missing road the frame gives the generator
+-- `urgentMs`.
+local AHEAD = {across = 3, back = 3, slow = 10, fast = 30, corridor = 15, half = 150, reach = 2000,
+  lag = 3, lagPerMs = .1, parked = 3, urgent = 6, urgentMs = 6}
 local FORMATS = {['earthng-features-v1'] = 1, ['earthng-features-v2'] = 2}
 -- the climate under the vista's far plane (generator.lua loads the same module)
 local okBiome, biomeModule = pcall(require, 'ge/extensions/e2r/biome')
@@ -546,6 +560,7 @@ local function land(req)
   local country, descriptor, x, y, r = at(req.lat, req.lon)
   if not r then fail('no_data: this point has no complete mounted source neighbourhood'); return state.job end
   active = {region = r, cells = {}, blocks = {}, tiles = {}, horizon = {}, failed = {}, clock = 0, everBuilt = {}, desired = {}, evicted = {}, epoch = 1,
+    parked = {},   -- tile key -> {co}: a near tile whose road is out and whose scene waits (update)
     lows = {},   -- cell key -> its lowest ground (world z), for the vista's relief
     epochPoint = {x, y}, prioritiesDirty = true, startupPinned = true,
     manifests = setmetatable({}, {__mode = 'v'}),
@@ -585,22 +600,51 @@ local function priorities()
   local tune = a.tune or {}
   local radius, farRadius = tune.nearM or 1000, tune.farM or 3000
   st.loadRadius, st.farRadius = radius, farRadius
-  for i = math.floor(math.min(p.x - farRadius, ax - radius) / t), math.floor(math.max(p.x + farRadius, ax + radius) / t) do
-    for j = math.floor(math.min(p.y - farRadius, ay - radius) / t), math.floor(math.max(p.y + farRadius, ay + radius) / t) do
+  -- the heading, the corridor's end and the weight of the heading in a near tile's arrival time
+  local ux, uy = speed > 0 and (p.vx or 0) / speed or 0, speed > 0 and (p.vy or 0) / speed or 0
+  local reach = speed >= 15 and math.min(speed * AHEAD.corridor, AHEAD.reach) or 0
+  local ex, ey = p.x + ux * reach, p.y + uy * reach
+  local w = math.max(0, math.min(1, (speed - AHEAD.slow) / (AHEAD.fast - AHEAD.slow)))
+  local ext = t / 2 * (math.abs(ux) + math.abs(uy))
+  local span = math.max(radius, AHEAD.half + t)
+  for i = math.floor(math.min(p.x - farRadius, ax - radius, ex - span) / t), math.floor(math.max(p.x + farRadius, ax + radius, ex + span) / t) do
+    for j = math.floor(math.min(p.y - farRadius, ay - radius, ey - span) / t), math.floor(math.max(p.y + farRadius, ay + radius, ey + span) / t) do
       local cx, cy = (i + 0.5) * t, (j + 0.5) * t
       local d = math.min(math.sqrt((cx - p.x) ^ 2 + (cy - p.y) ^ 2), math.sqrt((cx - ax) ^ 2 + (cy - ay) ^ 2))
       local farD = math.sqrt((cx - p.x) ^ 2 + (cy - p.y) ^ 2)
       -- the renderer drops tiles well behind the car at speed (world.lua updateTiles, behind());
       -- wanting them back here rebuilt each one after it was dropped
       local behind = speed >= 15 and ((cx - p.x) * p.vx + (cy - p.y) * p.vy) < 0 and farD > radius * 0.6 + 250
+      local along = (cx - p.x) * ux + (cy - p.y) * uy
+      local alongE = math.max(0, math.abs(along) - ext)
+      local acrossE = math.max(0, math.abs((cx - p.x) * uy - (cy - p.y) * ux) - ext)
+      local corridor = reach > 0 and along > 0 and alongE <= reach and acrossE <= AHEAD.half
       if tileCovered(a.region, i, j) then
-        if d <= radius and not behind then
-          out[keyOf(i, j)] = {i = i, j = j, priority = d / math.max(speed, 5), size = t}
+        if (d <= radius or corridor) and not behind then
+          local iso = d / math.max(speed, 5)
+          local arrival = ((along < 0 and AHEAD.back or 1) * alongE + AHEAD.across * acrossE) / math.max(speed, 5)
+          out[keyOf(i, j)] = {i = i, j = j, priority = iso + (arrival - iso) * w, size = t}
         elseif farD <= farRadius then
           -- Ground stays wanted at any speed. Buildings and trees are the part that used to
           -- churn the far ring above 90 km/h; they wait until the car slows down.
           out[keyOf(i, j)] = {i = i, j = j, far = true, decor = speed <= st.farFast,
             priority = 1e6 + farD, size = t}
+        end
+      end
+    end
+  end
+  -- Split screen: each other player's car keeps a near bubble (ground, roads, scenes) out to
+  -- EXTRA_RADIUS, ranked like a tile that far from a slow car; the far ring stays the first car's.
+  local extraR = math.min(radius, EXTRA_RADIUS)
+  for _, q in ipairs(a.extraPoses or {}) do
+    for i = math.floor((q.x - extraR) / t), math.floor((q.x + extraR) / t) do
+      for j = math.floor((q.y - extraR) / t), math.floor((q.y + extraR) / t) do
+        local cx, cy = (i + 0.5) * t, (j + 0.5) * t
+        local d = math.sqrt((cx - q.x) ^ 2 + (cy - q.y) ^ 2)
+        if d <= extraR and tileCovered(a.region, i, j) then
+          local key, rank = keyOf(i, j), d / 5
+          local cur = out[key]
+          if not cur or cur.far or cur.priority > rank then out[key] = {i = i, j = j, priority = rank, size = t} end
         end
       end
     end
@@ -775,7 +819,9 @@ local function trimTiles()
       local selected = a.startupPinned and a.landing and a.landing.selected == key
       local priority = a.desired[key] and a.desired[key].priority or 1e20
       local helps = anyEntry or entry.triangles > 0 or entry.vertices > 0
-      if helps and not required and not selected and not inRenderer(entry) and (not worst or priority > worstPriority or (priority == worstPriority and entry.used < oldest)) then
+      -- a tile whose road is out and whose scene is being built or parked (update) stays
+      local building = (a.parked and a.parked[key]) or (a.work and a.workKey == key and not a.workFar and not a.workHorizon)
+      if helps and not required and not selected and not building and not inRenderer(entry) and (not worst or priority > worstPriority or (priority == worstPriority and entry.used < oldest)) then
         worst, worstPriority, oldest = key, priority, entry.used
       end
     end
@@ -849,6 +895,103 @@ local function loadTerrain(key, i, j)
   return cell
 end
 
+-- Pack v3 road cells round a tile (roads3.lua), only while the swept-roads switch is on
+-- (generator.SWEPT, world.lua sweptRoads) and the region carries the section. A chunk is stored in
+-- the cell of its middle station and is at most 200 m long, so every chunk reaching ROAD3_MARGIN m
+-- round the tile is in the cells read here. Blocks and decoded cells are cached; any error leaves
+-- the tile to the generator's own roads.
+local ROAD3_MARGIN, ROAD3_CELLS, ROAD3_BLOCKS = 250, 24, 4
+-- Road and ground heights from the exporter's new pipeline (a national DTM, or the DEM rules): the region
+-- manifest's heights, or the heightSources of the first DTM packs. The generator then keeps the exported
+-- profiles (no runtime height passes) and fits the ground to them by cross-section (generator.lua
+-- ROADS.section). generator.HEIGHTS.auto = false (world.lua heightPipeline(false)) turns it off.
+local function heightPipeline(data)
+  if not (generator.HEIGHTS and generator.HEIGHTS.auto) then return nil end
+  local h = data.heights
+  if type(h) == 'table' and (h.dtm or h.rules) then return true end
+  if type(data.heightSources) == 'table' and #data.heightSources > 0 then return true end
+  return nil
+end
+
+local function loadRoads3(r, rect)
+  local section = generator.SWEPT and generator.SWEPT.on and roads3.section(r.data)
+  if not section then return nil end
+  local cache = active.roads3
+  if not cache then cache = {blocks = {}, cells = {}, clock = 0}; active.roads3 = cache end
+  local ok, result = pcall(function()
+    local s, b, cells = section.cellSize, section.blockCells, {}
+    for i = math.floor((rect[1] - ROAD3_MARGIN) / s), math.floor((rect[3] + ROAD3_MARGIN) / s) do
+      for j = math.floor((rect[2] - ROAD3_MARGIN) / s), math.floor((rect[4] + ROAD3_MARGIN) / s) do
+        local key = keyOf(i, j)
+        cache.clock = cache.clock + 1
+        local hit = cache.cells[key]
+        if not hit then
+          hit = {used = cache.clock}
+          local blockKey = keyOf(math.floor(i / b), math.floor(j / b))
+          local block = section.blocks[blockKey]
+          local slot = i % b + (j % b) * b
+          if type(block) == 'table' and type(block.mask) == 'string' and roads3.present(block.mask, slot) then
+            local loaded = cache.blocks[blockKey]
+            if not loaded then
+              local data = readBytes(block.path)
+              loaded = {data = data, slots = roads3.block(data), used = cache.clock}
+              cache.blocks[blockKey] = loaded
+              evict(cache.blocks, ROAD3_BLOCKS)
+            end
+            loaded.used = cache.clock
+            local range = loaded.slots[slot]
+            if range then hit.data = roads3.cell(loaded.data, range[1], range[2], i * s, j * s, section.version, active.pause) end
+          end
+          cache.cells[key] = hit
+          evict(cache.cells, ROAD3_CELLS)
+        end
+        hit.used = cache.clock
+        if hit.data then cells[#cells + 1] = hit.data end
+      end
+    end
+    -- phase 3: the junction surfaces (manifest roads.junctions, its own block files), same cells
+    local jsec = roads3.junctionSection(section)
+    local jcells
+    if jsec then
+      jcells = {}
+      cache.jblocks, cache.jcells = cache.jblocks or {}, cache.jcells or {}
+      for i = math.floor((rect[1] - ROAD3_MARGIN) / s), math.floor((rect[3] + ROAD3_MARGIN) / s) do
+        for j = math.floor((rect[2] - ROAD3_MARGIN) / s), math.floor((rect[4] + ROAD3_MARGIN) / s) do
+          local key = keyOf(i, j)
+          cache.clock = cache.clock + 1
+          local hit = cache.jcells[key]
+          if not hit then
+            hit = {used = cache.clock}
+            local blockKey = keyOf(math.floor(i / b), math.floor(j / b))
+            local block = jsec.blocks[blockKey]
+            local slot = i % b + (j % b) * b
+            if type(block) == 'table' and type(block.mask) == 'string' and roads3.present(block.mask, slot) then
+              local loaded = cache.jblocks[blockKey]
+              if not loaded then
+                local data = readBytes(block.path)
+                loaded = {data = data, slots = roads3.junctionBlock(data), used = cache.clock}
+                cache.jblocks[blockKey] = loaded
+                evict(cache.jblocks, ROAD3_BLOCKS)
+              end
+              loaded.used = cache.clock
+              local range = loaded.slots[slot]
+              if range then hit.data = roads3.junctionCell(loaded.data, range[1], range[2], i * s, j * s, active.pause) end
+            end
+            cache.jcells[key] = hit
+            evict(cache.jcells, ROAD3_CELLS)
+          end
+          hit.used = cache.clock
+          if hit.data then jcells[#jcells + 1] = hit.data end
+        end
+      end
+    end
+    return roads3.merge(cells, jcells)
+  end)
+  if ok then return result end
+  if log then log('W', 'e2r', 'pack v3 roads not read, the tile keeps the generator roads: ' .. tostring(result)) end
+  return nil
+end
+
 local function buildTile(key, wanted)
   local r = active.region
   local size = wanted.size or r.data.tileSize
@@ -874,7 +1017,41 @@ local function buildTile(key, wanted)
     for j = math.floor((y0 - pad) / s), math.ceil((y0 + size + pad) / s) - 1 do addCell(i, j, false) end
   end
   local center = active.landing and {active.landing.x, active.landing.y} or nil
+  local swept = not wanted.vista and not wanted.horizon and loadRoads3(r, tileRect) or nil
   local tune = active.tune or {}
+  local st = state.stream
+  local function stamp(road, nav)
+    if road.spawn and not finite(road.spawn.yaw) and vector(road.spawn.dir, 3) then
+      road.spawn.yaw = math.atan2(-road.spawn.dir[1], road.spawn.dir[2])
+    end
+    road.tile, road.source = {wanted.i, wanted.j}, r.descriptor.id
+    road.materials = '/earthng/planet/materials.json'
+    road.packs = '/e2r_stream/fast-art/v10/packs.json'
+    road.navSegments = type(nav) == 'table' and nav.segments or {}
+  end
+  -- While driving a near tile's road goes out as soon as it is built (AHEAD), and the build
+  -- yields AHEAD to update(), which parks it until the scene's turn. The landing builds whole.
+  local early
+  local roadReady = not wanted.far and not wanted.horizon and not active.startupPinned and function(road, nav)
+    local entry = active.tiles[key] or {}
+    if entry.road and entry.sceneLost then
+      -- a rebuild for the scene alone: the renderer has this road already
+      entry.sceneLost = nil
+    else
+      stamp(road, nav)
+      entry.road, entry.nav, entry.scene = road, nav, nil
+      entry.roadTaken, entry.roadDelivered, entry.sceneTaken, entry.sceneDelivered = nil, nil, nil, nil
+      active.manifests[key .. ':road'] = road
+      entry.used = touch()
+      entry.triangles, entry.vertices = entrySize(entry)
+      active.tiles[key] = entry
+      st.ready[key], st.scenes[key], st.far[key] = true, nil, nil
+      active.nearKnownAt = nil
+      trimTiles()
+    end
+    early = true
+    coroutine.yield(AHEAD)
+  end
   local road, scene, far, nav = generator.build(cells, wanted.i, wanted.j,
     {tileSize = size, regionId = r.descriptor.id, center = center, pause = active.pause,
       materials = '/earthng/planet/materials.json', packs = '/e2r_stream/fast-art/v10/packs.json',
@@ -888,18 +1065,12 @@ local function buildTile(key, wanted)
       maxTrees = tune.maxTrees, maxFarTrees = tune.maxFarTrees, maxGrass = tune.maxGrass,
       maxRocks = tune.maxRocks, forestSpacing = tune.forestSpacing, groundSpacing = tune.groundSpacing,
       groundTrees = tune.groundTrees, parkedCars = tune.parkedCars, propSpacing = tune.propSpacing,
-      detail = tune.detail})
+      detail = tune.detail, roadReady = roadReady or nil, roads3 = swept, heightPipeline = heightPipeline(r.data)})
   if type(road) ~= 'table' or type(road.items) ~= 'table' or type(road.mats) ~= 'table'
     or type(scene) ~= 'table' or type(scene.items) ~= 'table' then error('generator returned an invalid tile manifest') end
   if wanted.far and (type(far) ~= 'table' or type(far.items) ~= 'table') then error('generator returned an invalid far manifest') end
-  if road.spawn and not finite(road.spawn.yaw) and vector(road.spawn.dir, 3) then
-    road.spawn.yaw = math.atan2(-road.spawn.dir[1], road.spawn.dir[2])
-  end
-  road.tile, road.source, scene.source = {wanted.i, wanted.j}, r.descriptor.id, r.descriptor.id
-  road.materials, scene.materials = '/earthng/planet/materials.json', '/earthng/planet/materials.json'
-  road.packs = '/e2r_stream/fast-art/v10/packs.json'
-  road.navSegments = type(nav) == 'table' and nav.segments or {}
-  local st = state.stream
+  if not early then stamp(road, nav) end
+  scene.source, scene.materials = r.descriptor.id, '/earthng/planet/materials.json'
   if wanted.horizon then
     far.source, far.materials = r.descriptor.id, '/earthng/planet/materials.json'
     far.tileSize = size
@@ -928,11 +1099,15 @@ local function buildTile(key, wanted)
     entry.serial = (entry.serial or 0) + 1
     active.manifests[key .. ':far'] = far
     st.far[key] = entry.serial
+  elseif early then
+    -- the road went out already (roadReady): only the scene is new
+    entry.scene, entry.sceneTaken, entry.sceneDelivered = scene, nil, nil
+    active.manifests[key .. ':scene'] = scene
   else
     entry.road, entry.scene, entry.nav = road, scene, nav
     active.manifests[key .. ':road'], active.manifests[key .. ':scene'] = road, scene
+    entry.roadTaken, entry.sceneTaken, entry.roadDelivered, entry.sceneDelivered = nil, nil, nil, nil
   end
-  if not wanted.far then entry.roadTaken, entry.sceneTaken, entry.roadDelivered, entry.sceneDelivered = nil, nil, nil, nil end
   entry.used = touch()
   entry.triangles, entry.vertices = entrySize(entry)
   active.tiles[key] = entry
@@ -949,14 +1124,29 @@ end
 -- on a smaller budget: they can wait, the frame cannot (central Kyiv spent 5.3 ms a frame
 -- here while driving). A near tile coming due gets the whole budget back at once.
 local FAR_BUDGET_MS = 2
+-- pending: a near tile without its road, or one whose scene the car left before it was built
+-- and is near again; urgent: such a road due within AHEAD.urgent s
 local function nearPending(wanted)
+  local pending, urgent = false, false
   for key, entry in pairs(wanted) do
     if not entry.far and not entry.horizon and not active.failed[key] then
       local cached = active.tiles[key]
-      if not (cached and cached.road) then return true end
+      if not (cached and cached.road) then
+        pending, urgent = true, urgent or entry.priority < AHEAD.urgent
+      elseif cached.sceneLost then
+        pending = true
+      end
     end
   end
-  return false
+  return pending, urgent
+end
+
+-- A parked scene build given up (the car has left its tile, or a road ahead needs the room): the
+-- road stays, and the tile is built again for its scene if it is wanted near once more.
+local function loseScene(key)
+  active.parked[key] = nil
+  local entry = active.tiles[key]
+  if entry and not entry.scene then entry.sceneLost = true end
 end
 
 local function update(dt, budgetMs, farBudgetMs)
@@ -965,22 +1155,43 @@ local function update(dt, budgetMs, farBudgetMs)
   if live and active.region.country.id == 'live' and live.absorb(active.region) then
     active.prioritiesDirty = true
   end
+  active.parked, active.parkedFar = active.parked or {}, active.parkedFar or {}
   local dirty = active.prioritiesDirty
-  local wanted, best, bestKey = dirty and priorities() or active.desired, nil, nil
+  local wanted, best, bestKey, bestPriority = dirty and priorities() or active.desired, nil, nil, nil
   local timer = hptimer()
   -- farBudgetMs: the far ring's own budget instead of FAR_BUDGET_MS (showcase stills; the
   -- game passes none), and then the frame may take up to 50 ms
   budgetMs = finite(budgetMs) and math.max(0.1, math.min(farBudgetMs and 50 or 8, budgetMs)) or 2
   if dirty or active.nearKnownAt ~= state.stream.built then
-    active.nearWaiting, active.nearKnownAt = nearPending(wanted), state.stream.built
+    active.nearWaiting, active.nearUrgent = nearPending(wanted)
+    active.nearKnownAt = state.stream.built
   end
-  if not active.startupPinned and not active.nearWaiting then budgetMs = math.min(budgetMs, farBudgetMs or FAR_BUDGET_MS) end
+  local nearWork = active.nearWaiting or next(active.parked) ~= nil
+    or (active.work and not active.workFar and not active.workHorizon)
+  if not active.startupPinned and not nearWork then budgetMs = math.min(budgetMs, farBudgetMs or FAR_BUDGET_MS) end
+  -- the road the car reaches within seconds is missing: the frame pays for it rather than the car
+  if not active.startupPinned and not farBudgetMs and active.nearUrgent then budgetMs = math.max(budgetMs, AHEAD.urgentMs) end
   state.stream.budgetMs = budgetMs
   active.timer, active.budget = timer, budgetMs
+  local p = active.pose
+  local speed = math.sqrt((p.vx or 0) ^ 2 + (p.vy or 0) ^ 2)
+  local lag = AHEAD.lag + math.max(0, speed - AHEAD.slow) * AHEAD.lagPerMs
   local steps = 0
   repeat
+    -- At the frame's first step a scene build (its road is out) goes back among the parked, and a
+    -- far one too when a road is urgent: a road that came due since then goes first, and the
+    -- build's own turn resumes it where it stopped.
+    if active.work and steps == 0 and not active.startupPinned then
+      if active.workScene then
+        active.parked[active.workKey] = {co = active.work}
+        active.work = nil
+      elseif (active.workFar or active.workHorizon) and active.nearUrgent then
+        active.parkedFar[active.workKey] = {co = active.work, far = active.workFar, horizon = active.workHorizon}
+        active.work = nil
+      end
+    end
     if not active.work then
-      best, bestKey = nil, nil
+      best, bestKey, bestPriority = nil, nil, nil
       local queued = 0
       -- Far tiles wait while far geometry the renderer has not taken fills half the budget:
       -- a generator ahead of the renderer (a stills budget, a fast drive) built them only to
@@ -1000,23 +1211,69 @@ local function update(dt, budgetMs, farBudgetMs)
       local full = farTriangles > TRIANGLE_LIMIT * .5 or farVertices > VERTEX_LIMIT * .5
       for key, entry in pairs(wanted) do
         local cached = entry.horizon and active.horizon[key] or active.tiles[key]
-        local ready
+        local ready, priority = nil, entry.priority
         if entry.horizon then ready = cached and cached.horizon
         elseif entry.far then ready = cached and cached.far and (not entry.decor or cached.decor)
-        else ready = cached and cached.road end
+        else
+          ready = cached and cached.road and not cached.sceneLost
+          -- a scene owed comes after the roads due before it, as a parked one does
+          if cached and cached.road then priority = priority + lag end
+        end
         local layerKey = key .. (entry.horizon and ':horizon' or (entry.far and ':far' or ':road'))
         if not ready and not active.failed[key] and active.evicted[layerKey] ~= active.epoch then
           queued = queued + 1
-          if not (full and entry.far) and (not best or entry.priority < best.priority or (entry.priority == best.priority and key < bestKey)) then best, bestKey = entry, key end
+          -- one far build at a time: a parked one is finished before another starts
+          local farWaits = (entry.far or entry.horizon) and next(active.parkedFar) ~= nil
+          if not (full and entry.far) and not farWaits and (not best or priority < bestPriority or (priority == bestPriority and key < bestKey)) then
+            best, bestKey, bestPriority = entry, key, priority
+          end
         end
       end
-      state.stream.queued = queued
-      if not best then break end
-      local key, entry = bestKey, best
-      active.workKey = key
-      active.workFar = entry.far and not entry.horizon or false
-      active.workHorizon = entry.horizon and true or false
-      active.work = coroutine.create(function() buildTile(key, entry) end)
+      -- Parked scene builds (their roads are out): the nearest goes on when it is due before the
+      -- best road; one the car has left is given up.
+      local parkedKey, parkedPriority, worstKey, worstPriority, parkedCount = nil, nil, nil, nil, 0
+      for key in pairs(active.parked) do
+        local want = wanted[key]
+        if not want or want.far or want.horizon then
+          loseScene(key)
+        else
+          local priority = want.priority + lag
+          parkedCount = parkedCount + 1
+          if not parkedPriority or priority < parkedPriority then parkedKey, parkedPriority = key, priority end
+          if not worstPriority or priority > worstPriority then worstKey, worstPriority = key, priority end
+        end
+      end
+      local farKey, farPriority
+      for key, slot in pairs(active.parkedFar) do
+        local want = wanted[key]
+        if not want or not want.far or (want.horizon and true or false) ~= slot.horizon then
+          active.parkedFar[key] = nil
+        elseif not farPriority or want.priority < farPriority then
+          farKey, farPriority = key, want.priority
+        end
+      end
+      state.stream.queued, state.stream.parked = queued, parkedCount
+      if farKey and (not best or farPriority < bestPriority) and (not parkedKey or farPriority < parkedPriority) then
+        local slot = active.parkedFar[farKey]
+        active.parkedFar[farKey] = nil
+        active.work, active.workKey, active.workScene = slot.co, farKey, false
+        active.workFar, active.workHorizon = slot.far, slot.horizon
+      elseif parkedKey and (not best or parkedPriority <= bestPriority) then
+        active.work = active.parked[parkedKey].co
+        active.parked[parkedKey] = nil
+        active.workKey, active.workFar, active.workHorizon, active.workScene = parkedKey, false, false, true
+      elseif best then
+        -- a road due before every parked scene, and no room for one more: the latest scene goes
+        if parkedCount >= AHEAD.parked and not best.far and not best.horizon then loseScene(worstKey) end
+        local key, entry = bestKey, best
+        active.workKey = key
+        active.workFar = entry.far and not entry.horizon or false
+        active.workHorizon = entry.horizon and true or false
+        active.workScene = false
+        active.work = coroutine.create(function() buildTile(key, entry) end)
+      else
+        break
+      end
       state.stream.building = 1
       if state.job and state.job.state == 'working' then state.job.stage = 'Generating roads and scenery in Lua' end
     end
@@ -1033,6 +1290,10 @@ local function update(dt, budgetMs, farBudgetMs)
     if not ok then
       active.failed[active.workKey] = tostring(message)
       if active.landing and active.landing.required[active.workKey] and state.job.state == 'working' then fail(message) end
+      active.work = nil
+    elseif message == AHEAD and coroutine.status(active.work) == 'suspended' then
+      -- the road is out (buildTile's roadReady): the scene waits for its turn
+      active.parked[active.workKey] = {co = active.work}
       active.work = nil
     elseif coroutine.status(active.work) == 'dead' then
       active.work = nil
@@ -1052,6 +1313,16 @@ local function pose(p)
   active.pose = {x = p.x, y = p.y, z = finite(p.z) and p.z or nil,
     vx = finite(p.vx) and math.max(-10000, math.min(10000, p.vx)) or 0,
     vy = finite(p.vy) and math.max(-10000, math.min(10000, p.vy)) or 0}
+  -- split screen: the other players' cars (world.lua writePose), each with a near bubble of its own
+  local extra, extraSig = {}, ''
+  for _, q in ipairs(type(p.extra) == 'table' and p.extra or {}) do
+    if type(q) == 'table' and finite(q.x) and finite(q.y) and math.abs(q.x) < 1e12 and math.abs(q.y) < 1e12 then
+      extra[#extra + 1] = {x = q.x, y = q.y}
+      extraSig = extraSig .. string.format('_%d_%d', math.floor(q.x / active.region.data.tileSize),
+        math.floor(q.y / active.region.data.tileSize))
+    end
+  end
+  active.extraPoses = extra
   -- The wanted set depends on the car's tile, the look-ahead point's tile and the far switch;
   -- recomputing it (~170 tiles) for every pose made garbage in every frame.
   local t = active.region.data.tileSize
@@ -1059,9 +1330,14 @@ local function pose(p)
   local ahead = math.min(speed * 3, 2000)
   local ax = speed > 0 and p.x + active.pose.vx / speed * ahead or p.x
   local ay = speed > 0 and p.y + active.pose.vy / speed * ahead or p.y
-  local signature = string.format('%d_%d_%d_%d_%s_%s_%d', math.floor(p.x / t), math.floor(p.y / t),
-    math.floor(ax / t), math.floor(ay / t), tostring(speed <= state.stream.farFast), tostring(speed < VISTA_SPEED),
-    finite(p.z) and math.floor(p.z / 100) or 0)
+  -- and the corridor's end and the speed in 10 m/s steps: a near tile's priority is a time
+  local reach = speed >= 15 and math.min(speed * AHEAD.corridor, AHEAD.reach) or 0
+  local ex = speed > 0 and p.x + active.pose.vx / speed * reach or p.x
+  local ey = speed > 0 and p.y + active.pose.vy / speed * reach or p.y
+  local signature = string.format('%d_%d_%d_%d_%d_%d_%d_%s_%s_%d', math.floor(p.x / t), math.floor(p.y / t),
+    math.floor(ax / t), math.floor(ay / t), math.floor(ex / t), math.floor(ey / t), math.floor(speed / 10),
+    tostring(speed <= state.stream.farFast), tostring(speed < VISTA_SPEED),
+    finite(p.z) and math.floor(p.z / 100) or 0) .. extraSig
   if signature ~= active.poseSignature then active.poseSignature, active.prioritiesDirty = signature, true end
   local ep = active.epochPoint
   if (p.x - ep[1]) ^ 2 + (p.y - ep[2]) ^ 2 >= 250 * 250 then
@@ -1135,6 +1411,7 @@ local function unload(key, layer)
   if active.workKey == key and ((horizonOnly and active.workHorizon) or (farOnly and active.workFar) or (not farOnly and not horizonOnly and not active.workFar and not active.workHorizon)) then
     active.work, active.workKey, st.building = nil, nil, 0
   end
+  if (farOnly or horizonOnly) and active.parkedFar then active.parkedFar[key] = nil end
   if horizonOnly then
     if entry then entry.horizon, entry.horizonDelivered, entry.horizonTaken = nil, nil, nil end
     st.horizon[key], active.evicted[key .. ':horizon'] = nil, nil
@@ -1149,8 +1426,9 @@ local function unload(key, layer)
     st.far[key], active.evicted[key .. ':far'] = nil, nil
     active.manifests[key .. ':far'] = nil
   else
+    if active.parked then active.parked[key] = nil end
     if entry then
-      entry.road, entry.scene, entry.nav = nil, nil, nil
+      entry.road, entry.scene, entry.nav, entry.sceneLost = nil, nil, nil, nil
       entry.roadDelivered, entry.sceneDelivered, entry.roadTaken, entry.sceneTaken = nil, nil, nil, nil
     end
     st.ready[key], st.scenes[key], active.evicted[key .. ':road'] = nil, nil, nil

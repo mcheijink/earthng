@@ -8,7 +8,7 @@ local im = ui_imgui
 local imguiUtils = require('ui/imguiUtils')
 local ffi = require('ffi')
 local logTag = 'e2r_world'
-local LANG = 'uk'   -- build_mod.py --lang en rewrites this line (the English packages: UK, California, New York)
+local LANG = 'en'   -- build_mod.py --lang en rewrites this line (the English packages: UK, California, New York)
 local NATIVE = true   -- fixed for releases; protocol stubs remain for isolated widget tests
 local native = NATIVE and require('ge/extensions/e2r/native') or nil
 -- On M, not a chunk local: this file is already at LuaJIT's 200-local limit.
@@ -138,9 +138,34 @@ local frameTimer = hptimer()
 -- Streaming limits; see the comments where each is used.
 local LIMIT = {pairsDriving = 3, pairsLanding = 24, plantBatch = 128,
   forestStep = 0.12, forestKind = 1.5, forestMax = 2500, propMax = 600,
-  collisionWant = 200, collisionLead = 6, collisionMargin = 200, vehicleCollision = {100, 300}}
+  collisionWant = 200, collisionLead = 6, collisionMargin = 200, vehicleCollision = {100, 300},
+  roadAhead = 15, roadUrgent = 8, roadFloorMs = 2.5}
 -- Read-only view for the development probe (earthng/probe.py); nothing in the mod calls it.
 function M.dbg() return {S = S, result = result, native = native, detail = detailStream, test = test} end
+
+-- Pack v3 swept roads (generator.lua ROADS.swept, sweep.lua; patches/ROAD-OBJECTS.md phase 2). Off by
+-- default; set it before the landing (built tiles keep their roads). Console:
+--   extensions.e2r_world.sweptRoads(true)            motorways, trunks and their links
+--   extensions.e2r_world.sweptRoads(true, 'fitted')  every class the exporter fits
+--   extensions.e2r_world.sweptRoads(false)           the generator's roads again
+-- A pack without the v3 road section keeps the generator's roads either way.
+function M.sweptRoads(on, mode)
+  local sw = require('ge/extensions/e2r/generator').SWEPT
+  if on ~= nil then sw.on = on and true or false end
+  if mode == 'fast' or mode == 'fitted' then sw.mode = mode end
+  return {on = sw.on, mode = sw.mode}
+end
+
+-- Packs whose road and ground heights come from the exporter's new pipeline (a national DTM or the DEM
+-- rules; the region manifest's heights or heightSources) keep the exported road profiles and get the
+-- cross-section ground (generator.lua ROADS.section). Set it before the landing. Console:
+--   extensions.e2r_world.heightPipeline(false)   the runtime height passes and the generic pull, as before
+--   extensions.e2r_world.heightPipeline(true)    from the manifest again (the default)
+function M.heightPipeline(on)
+  local h = require('ge/extensions/e2r/generator').HEIGHTS
+  if on ~= nil then h.auto = on and true or false end
+  return {auto = h.auto}
+end
 
 -- the 4th field of a preset: the tile package area it belongs to (status.area, the tile folder's
 -- name without the date); a UK region also belongs to the whole united-kingdom package
@@ -881,9 +906,22 @@ local function writePose()
     active[key] = tile.failed and 'error' or (tile.collided and 'collision_active' or
       (tile.roadComplete and 'loaded' or 'loading'))
   end
+  -- split screen: the other players' cars, so the generator keeps a near bubble round each of them
+  -- (only the first player's car or camera used to be the focus: the second player's world unloaded)
+  local extra
+  if S.state == 'driving' then
+    for k = 1, 3 do
+      local ok, veh = pcall(getPlayerVehicle, k)
+      if ok and veh and veh ~= getPlayerVehicle(0) then
+        local q, w = veh:getPosition(), veh:getVelocity()
+        extra = extra or {}
+        extra[#extra + 1] = {x = q.x, y = q.y, vx = w.x, vy = w.y}
+      end
+    end
+  end
   S.poseSeq = (S.poseSeq or 0) + 1
   local pose = {x = p.x, y = p.y, z = p.z, vx = v.x, vy = v.y, t = os.time(), seq = S.poseSeq,
-    region = S.stream and S.stream.region, state = S.state, ahead = ahead,
+    region = S.stream and S.stream.region, state = S.state, ahead = ahead, extra = extra,
     active = active, deliveryP99 = S.deliveryP99 or 2}
   if NATIVE then native.pose(pose); return end
   -- a UDP datagram to the companion never blocks; writing pose.json once held a frame 5.2 s
@@ -1102,11 +1140,14 @@ local function trafficRunning()
   return gameplay_traffic and gameplay_traffic.getState and gameplay_traffic.getState() ~= 'off'
 end
 
-local function navBuild()
+local function navBuild(force)
   local p = focus()
   if not p then return end
   local t = hptimer()
   local nodes, segs, count = {}, 0, 0
+  -- the set of segments in range: when a 250 m move or a tile batch leaves it unchanged, the graph and the
+  -- stock minimap are left alone (each minimap reset blanks its roads until it rebuilds its tree)
+  local sig = {}
   local function node(id, x, y, z, r)
     local n = nodes[id]
     if not n then
@@ -1153,8 +1194,17 @@ local function navBuild()
         ::knot::
       end
       segs = segs + 1
+      sig[#sig + 1] = tostring(sid)
     end
   end
+  table.sort(sig)
+  sig = table.concat(sig, ',')
+  if not force and sig == S.navSig and next(map.getMap().nodes or {}) then
+    S.navDirty, S.navAt, S.navPos = false, S.now, {p.x, p.y}
+    return
+  end
+  S.navSig = sig
+  if count == 0 then log('I', 'e2r', 'nav: graph rebuilt with no roads in range') end
   -- junction radii grew after their first links were made
   for _, n in pairs(nodes) do
     for lid, data in pairs(n.links) do
@@ -1190,8 +1240,19 @@ local function navStep()
   local foreign = S.navSerial and map.getMap().buildSerial ~= S.navSerial
   local p = focus()
   local moved = p and (not S.navPos or (p.x - S.navPos[1]) ^ 2 + (p.y - S.navPos[2]) ^ 2 > NAV_MOVE * NAV_MOVE)
+  -- someone else's graph (no roads on our levels) is replaced at once, not after the 2 s batch wait: the
+  -- minimap and traffic were left without roads meanwhile
+  if foreign and p then
+    local serial = map.getMap().buildSerial
+    if S.navForeignLogged ~= serial then
+      S.navForeignLogged = serial
+      log('I', 'e2r', 'nav: graph rebuilt elsewhere (serial ' .. tostring(serial) .. '), restoring')
+    end
+    navBuild(true)
+    return
+  end
   -- New tiles must appear even while parked. Batch updates instead of resetting per tile.
-  if (foreign or moved or S.navDirty) and S.now - (S.navAt or -10) >= 2 then navBuild() end
+  if (moved or S.navDirty) and S.now - (S.navAt or -10) >= 2 then navBuild() end
 end
 
 local function setTraffic(amount)
@@ -1276,13 +1337,21 @@ local function updateTiles()
     if not fast or speed < 15 then return false end
     return ((cx - p.x) * v.x + (cy - p.y) * v.y) < 0 and d > loadR * 0.6 + 250
   end
+  -- native: a near tile's wanted value is the seconds until the car reaches it (native.lua AHEAD;
+  -- far tiles and the horizon are 1e6 and up). At speed the near set runs on along the heading
+  -- past loadR: such a road is kept and started like one inside it.
+  local wantedNow = NATIVE and st.wanted or {}
+  local function dueNear(key)
+    local due = wantedNow[key]
+    return due and due < 1e6 and due or nil
+  end
   -- unload far tiles (their queued items are skipped)
   for key, tile in pairs(S.tiles) do
     local cx, cy = tileCentre(tile.i, tile.j)
     local d = math.sqrt((cx - p.x) ^ 2 + (cy - p.y) ^ 2)
     -- A free camera far from the car owns the bubble; the tiles under the parked car used to
     -- unload with the rest and it fell through the world (night-fence-02, z 179 -> 0.2).
-    local held = S.heldCar and (cx - S.heldCar[1]) ^ 2 + (cy - S.heldCar[2]) ^ 2 <= 600 * 600
+    local held = (S.heldCar and (cx - S.heldCar[1]) ^ 2 + (cy - S.heldCar[2]) ^ 2 <= 600 * 600) or dueNear(key)
     if not held and (d > unloadR or behind(cx, cy, d)) then
       retireForest(tile)
       dropGroup('E2RT_' .. key); buryGroup('E2RD_' .. key); buryGroup('E2RS_' .. key)
@@ -1298,9 +1367,11 @@ local function updateTiles()
     end
   end
   -- start the nearest ready tile in range (one per call keeps the material loads apart);
-  -- the look-ahead point counts the speed, so the tile ahead comes before the one behind
+  -- the look-ahead point counts the speed, so the tile ahead comes before the one behind.
+  -- Natively the first is the one the car reaches first (its wanted seconds), and a road due
+  -- within LIMIT.roadAhead s starts however long the queue of scenes is.
   local ax, ay = p.x + v.x * 3, p.y + v.y * 3
-  local best, bestD
+  local best, bestD, bestRank
   for key, n in pairs(st.ready or {}) do
     if not S.tiles[key] then
       local i, j = key:match('^(-?%d+)_(-?%d+)$')
@@ -1308,10 +1379,15 @@ local function updateTiles()
       local cx, cy = tileCentre(i, j)
       local dp = math.sqrt((cx - p.x) ^ 2 + (cy - p.y) ^ 2)
       local d = math.min(dp, math.sqrt((cx - ax) ^ 2 + (cy - ay) ^ 2))
-      if d <= loadR and not behind(cx, cy, dp) and (not bestD or d < bestD) then best, bestD = {key, i, j}, d end
+      local due = dueNear(key)
+      local rank = due or d
+      if (d <= loadR or due) and not behind(cx, cy, dp) and (not bestRank or rank < bestRank) then
+        best, bestD, bestRank = {key, i, j}, d, rank
+      end
     end
   end
-  if best and #S.queue < 400 then startTile(best[1], best[2], best[3]) end
+  local soon = best and dueNear(best[1])
+  if best and (#S.queue < 400 or (soon and soon < LIMIT.roadAhead)) then startTile(best[1], best[2], best[3]) end
   -- the nearest scene (look-ahead point too) whose road is in: it used to wait for every road tile
   -- in loadR and then took any one, so buildings next to the car came after roads 1 km away
   if fast and #S.queue < 300 and st.scenes then
@@ -1342,7 +1418,11 @@ local function updateTiles()
       -- forest as soon as the near scene starts; its ground mesh stays until the
       -- near ground has replaced it.
       if near and near.sceneStarted then retireForest(far); far.vegetationDropped = true end
-      if d > farR + 500 or (near and near.sceneComplete) then
+      -- The far ground and roads used to stay until the near scene finished too: with the near ground
+      -- (in the road layer) already in, two ground levels showed for the whole spawn (in testing,
+      -- offline: far ground > 5 cm over near in 25 % of cells). The far tile goes once
+      -- the near roads and ground are in and its scene has started.
+      if d > farR + 500 or (near and (near.sceneComplete or (near.roadComplete and near.sceneStarted))) then
         retireForest(far)
         buryGroup('E2RF_' .. key)
         far.dropped = true
@@ -1478,7 +1558,12 @@ local function stepQueue()
   local frame = hptimer()
   -- Retires queued by updateTiles this frame start before new crowns are added.
   -- test.genBudget (showcase stills): frame time does not matter, the place must finish loading
-  local budget = test and test.genBudget or math.max(.5, BUDGET_MS - (S.nativeMs or 0))
+  -- A road due within LIMIT.roadUrgent s at the head of the queue (updateTiles sorts it) gets
+  -- LIMIT.roadFloorMs however much the generator took: at 0.5 ms it spawned a piece a frame.
+  local head, wanted = S.queue[1], S.status and S.status.stream and S.status.stream.wanted
+  local urgent = NATIVE and head and not (head.scene or head.far or head.horizon) and wanted
+    and (wanted[head.key] or 1e6) < LIMIT.roadUrgent
+  local budget = test and test.genBudget or math.max(urgent and LIMIT.roadFloorMs or .5, BUDGET_MS - (S.nativeMs or 0))
   local function over() return frame:stop() >= budget end
   local function pause() if over() then coroutine.yield() end end
   if S.co and S.job and S.job.tile.dropped then S.co, S.job = nil, nil end
@@ -2251,7 +2336,7 @@ local function autopilotStep(dt)
   local throttle = math.max(0, math.min(0.6, (target - speed) * 0.25))
   local brake = speed > target + 1.5 and math.min(1, (speed - target) * 0.3) or 0
   -- the arcade gearbox engages reverse when the brake is held at a standstill (and then the
-  -- throttle brakes): below 2 m/s stop with the parking brake instead (route-02 stall at 1.8 km)
+  -- throttle brakes): below 2 m/s stop with the parking brake instead (a stall seen in testing)
   local park = 0
   if speed < 2 then
     brake = 0
@@ -3418,8 +3503,10 @@ local function drawWindow()
     if im.Button(L('Обрати інше місце', 'Pick another place')) then S.pickerOpen = true; S.viewDirty = true end
     drawLangButton()
     -- the mini map follows the car (an arrow along the heading); a drag frees it
-    S.mini = S.mini or {center = {lat = S.center.lat, lon = S.center.lon}, zoom = 15, follow = true}
-    drawMap(360, 180, S.mini)
+    -- square, 1 km across at the latitude (a km by km map)
+    S.mini = S.mini or {center = {lat = S.center.lat, lon = S.center.lon}, follow = true,
+      zoom = math.log(40075016.7 * math.cos(math.rad(S.center.lat or 0)) * 360 / 256000) / math.log(2)}
+    drawMap(360, 360, S.mini)
     if not S.mini.follow then
       if im.Button(L('До авто', 'To the car')) then S.mini.follow = true end
       im.SameLine()
