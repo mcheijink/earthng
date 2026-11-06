@@ -9,6 +9,18 @@ import power as _power
 import fast_signals
 import retail
 
+# Scenery the fork added to the exporter; each is off unless its switch is set, so a pack comes out as
+# the upstream exporter makes it (the Lua side draws only what a pack holds):
+#   EARTHNG_POWER=1   overhead lines of the main grid, their towers and wind turbines (power.py)
+#   EARTHNG_NOISE=1   noise barriers as their own kind (a wall of its tagged height beside the carriageway);
+#                     off, a noise barrier is a fence or a wall as before
+#   EARTHNG_CAMERAS=1 speed cameras (signal nodes are kept either way)
+def _switch(name):
+    return os.environ.get(name, '0').strip().lower() not in ('', '0', 'off', 'no', 'false')
+
+
+POWER, NOISE, CAMERAS = _switch('EARTHNG_POWER'), _switch('EARTHNG_NOISE'), _switch('EARTHNG_CAMERAS')
+
 TEXTURES = {
     'asphalt': {
         'baseColorMap': '/assets/materials/tileable/road/m_road_asphalt_rough_01/t_road_asphalt_rough_01_b.color.png',
@@ -521,7 +533,7 @@ def line_kind(tags):
     if tags.get('natural') == 'tree_row':
         return 'tree_row'
     # a noise barrier is drawn beside the carriageway at its own height (generator: noise.lua)
-    if tags.get('barrier') == 'noise_barrier' or tags.get('wall') == 'noise_barrier':
+    if NOISE and (tags.get('barrier') == 'noise_barrier' or tags.get('wall') == 'noise_barrier'):
         return 'noise_barrier'
     # retaining and city walls are walls too (drawn by nothing before: generator fence() takes them as concrete)
     if tags.get('barrier') in ('fence', 'wall', 'retaining_wall', 'city_wall'):
@@ -530,7 +542,7 @@ def line_kind(tags):
         return 'guard_rail'
     if tags.get('barrier') == 'hedge':
         return 'hedge'
-    if _power.is_line(tags):
+    if POWER and _power.is_line(tags):
         return 'power_line'           # overhead lines (power.py; power=minor_line below is upstream's street wire)
     # a street's own wires. The main grid (power=line, its towers, substations) stays off the map
     if tags.get('power') == 'minor_line':
@@ -558,9 +570,9 @@ def point_kind(tags):
         return retail_kind
     highway = tags.get('highway')
     # a line's towers (their facts ride on the line, power.py) and wind turbines
-    if _power.is_tower(tags):
+    if POWER and _power.is_tower(tags):
         return 'power_tower'
-    if _power.is_turbine(tags):
+    if POWER and _power.is_turbine(tags):
         return 'wind_turbine'
     if tags.get('natural') == 'tree':
         return 'tree'
@@ -580,6 +592,8 @@ def point_kind(tags):
     # traffic signals and speed cameras: the runtime stands them on stock poles (signals.lua); the
     # bare trafficlight_city1.dae head lay at the curb (vis-13-signals)
     signal = fast_signals.point_kind(tags)
+    if signal == fast_signals.CAMERA and not CAMERAS:
+        signal = None
     if signal:
         return signal
     # Retain the surveyed fact even when an older runtime does not draw it.

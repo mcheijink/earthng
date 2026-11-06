@@ -80,6 +80,28 @@ CURVE_MIN = {'motorway': (10000., 5700.), 'trunk': (8000., 4000.), 'primary': (6
              'trunk_link': (2500., 1000.), 'primary_link': (2500., 1000.), 'secondary_link': (1500., 800.),
              'tertiary_link': (1500., 800.)}
 
+# The class rules above, as the German design guides give them, are the fork's: HOLD_UNDER (the motorway
+# and trunk keep their line under a deck), the motorway grade of 4.5 % instead of 5 %, 8 grade passes instead
+# of 4 and the CURVE_MIN radii. They are off unless EARTHNG_ROAD_RULES=1 (or set_road_rules(True)); off, the
+# solve is upstream's: its own grades (GRADE_MAX at 5 % on motorways, 4 passes), no radii, no held line.
+# The deck floors over water (FLOOR_*) only act when the exporter hands floors in.
+_FORK_RULES = dict(HOLD_UNDER=HOLD_UNDER, GRADE_MOTORWAY=GRADE_MAX['motorway'], GRADE_PASSES=GRADE_PASSES,
+                   CURVE_MIN=dict(CURVE_MIN))
+ROAD_RULES = False
+
+
+def set_road_rules(on):
+    """Switch the fork's class rules on or off (module state read at the next solve); returns the flag."""
+    global HOLD_UNDER, GRADE_PASSES, CURVE_MIN, ROAD_RULES, SIGNATURE
+    ROAD_RULES = bool(on)
+    HOLD_UNDER = _FORK_RULES['HOLD_UNDER'] if on else ()
+    GRADE_MAX['motorway'] = _FORK_RULES['GRADE_MOTORWAY'] if on else .05
+    GRADE_PASSES = _FORK_RULES['GRADE_PASSES'] if on else 4
+    CURVE_MIN = dict(_FORK_RULES['CURVE_MIN']) if on else {}
+    SIGNATURE = f'profile-rules:{"on" if RULES else "off"}:roads:{"on" if on else "off"}'
+    return ROAD_RULES
+
+
 # ---------------------------------------------------------------------------------------------------
 # DEM rules (EARTHNG_DEM_RULES=1; off by default until validated, ALTITUDE-REFERENCE.md "DEM
 # contamination"). The coarse DEM (Terrarium z12, an effective footprint of sigma about 60 m here)
@@ -95,6 +117,7 @@ CURVE_MIN = {'motorway': (10000., 5700.), 'trunk': (8000., 4000.), 'primary': (6
 #    its data weight is lowered to RAMP_W so the decks' clearance and grade rules shape the ramps.
 RULES = os.environ.get('EARTHNG_DEM_RULES', '0').strip() not in ('', '0', 'off', 'no', 'false')
 SIGNATURE = f'profile-rules:{"on" if RULES else "off"}'
+set_road_rules(os.environ.get('EARTHNG_ROAD_RULES', '0').strip().lower() not in ('', '0', 'off', 'no', 'false'))
 STRUCT_NEAR, STRUCT_FAR, STRUCT_W = 80., 250., .05
 FOREST_BIAS, FOREST_SIGMA, COVER_CELL = 10., 100., 20.
 HUBER, IRLS = 1.5, 3
@@ -513,9 +536,11 @@ def kind(tags):
     return 'road'
 
 
-def held_stations(segments, kinds, s, seg_of, run, xb, xt, count, classes=HOLD_UNDER):
-    """Stations of a HOLD_UNDER road (of `classes`, None: any; not a bridge or tunnel) within HOLD_REACH m
+def held_stations(segments, kinds, s, seg_of, run, xb, xt, count, classes=''):
+    """Stations of a HOLD_UNDER road (classes '': HOLD_UNDER now; None: any; not a bridge or tunnel) within HOLD_REACH m
     of a crossing under a deck, measured along that road: a bool mask over the stations."""
+    if classes == '':
+        classes = HOLD_UNDER
     held = np.zeros(count, bool)
     bounds = np.r_[run, count]
     lower = seg_of[xb]
@@ -924,7 +949,10 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
     # highway nearly straight on) share a change-of-grade term. Within segments alone the grade could
     # turn freely at every node: a Niedersachsen pack had the motorway go from +2.4 % to -2.0 % at a way
     # joint (a crest of about 500 m radius at 123 km/h).
-    ja, jb, jc, jl, links = joints(segments, s, ids, pos_st, run)
+    if ROAD_RULES:
+        ja, jb, jc, jl, links = joints(segments, s, ids, pos_st, run)
+    else:                       # upstream's solve: the grade may turn freely at a way joint
+        ja, jb, jc, jl, links = np.zeros((0, 3), int), np.zeros(0, int), np.zeros(0, int), np.zeros(0), []
     if len(ja):
         ta, tb, tc, tl = np.r_[ta, ja[:, 0]], np.r_[tb, jb], np.r_[tc, jc], np.r_[tl, jl]
         tri_pair += [(segments[u]['tags'].get('highway'), segments[w]['tags'].get('highway')) for u, w in ja[:, 1:].tolist()]

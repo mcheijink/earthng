@@ -1246,13 +1246,20 @@ ROADS.swept = {on = true, mode = 'fast', scale = COVER_SCALE.road}
 --   signals       static traffic signals and speed cameras on stock poles (signals.lua); upstream's own
 --                 signals are options.experimentalDetail's, and with that on these stay out
 --   lots          bay lines on car parks and the zig-zag at bus stops (lots.lua)
+--   openSea       the sea plane floods only the sea joined to a seed (a level block or a mapped tidal flat), so
+--                 marsh and polder land under the sea level stays dry; off, every low quad that is not land
+--                 or a road is sea (the lattice-shaped shore of ROADS.seaWater is the same either way)
+--   lampRows      German lamp practice for the inferred street lamps (rows by street width, lit only in towns)
 --   roadProfiles  the runtime vertical alignment of roads: floors over water, class grades and radii
 --                 (German design limits), humps, carriageway pairs
-ROADS.extras = {signals = false, lots = false, roadProfiles = false}
+ROADS.extras = {signals = false, lots = false, roadProfiles = false, lampRows = false, openSea = false}
 function ROADS.extra(options, name)
   local v = options and options[name]
   if v == nil then v = ROADS.extras[name] end
   return v == true
+end
+function ROADS.applyExtras()
+  ROADS.shoulders.motorway = ROADS.extras.roadProfiles and {.25, 3.3} or {.75, 2.5}
 end
 -- Power lines and wind turbines (power.lua): near scene and far layer, never the horizon
 do
@@ -1561,11 +1568,13 @@ function ROADS.seaQuads(ctx)
     pause()
   end
   local sea, stack = {}, {}
-  for _, q in ipairs(seeds) do
+  -- ROADS.extras.openSea: only the sea joined to a seed (below); off, every low quad that is no land or road is sea
+  if not ROADS.extras.openSea then sea = open end
+  for _, q in ipairs(ROADS.extras.openSea and seeds or NONE) do
     local k = key(q[1], q[2])
     if open[k] and not sea[k] then sea[k], stack[#stack + 1] = true, q end
   end
-  for gx = lo, hi - 2 do
+  for gx = lo, ROADS.extras.openSea and hi - 2 or lo - 1 do
     for gy = lo, hi - 2 do
       local k = key(gx, gy)
       if open[k] and open[key(gx + 1, gy)] and open[key(gx, gy + 1)] and open[key(gx + 1, gy + 1)] and not sea[k] then
@@ -1759,7 +1768,7 @@ function ROADS.guardRail(ctx, path)
   -- cut where it runs onto one (a gore's rail into the merge, a bridge-approach rail across a slip road);
   -- pieces under railClear.min m go
   if ctx.strips and not ctx.cleared then
-    local rc, runs, run = ROADS.railClear, {}, {}
+    local rc, runs, run, onRoad = ROADS.railClear, {}, {}, false
     local function close()
       local length = 0
       for k = 2, #run do length = length + math.sqrt((run[k][1] - run[k - 1][1]) ^ 2 + (run[k][2] - run[k - 1][2]) ^ 2) end
@@ -1775,15 +1784,18 @@ function ROADS.guardRail(ctx, path)
       for i = k == 1 and 0 or 1, n do
         local t = i / n
         local q = {a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, (a[3] or 0) + ((b[3] or 0) - (a[3] or 0)) * t}
-        if ROADS.onCarriageway(ctx.strips, q[1], q[2], rc.margin) then close() else run[#run + 1] = q end
+        if ROADS.onCarriageway(ctx.strips, q[1], q[2], rc.margin) then onRoad = true; close() else run[#run + 1] = q end
       end
     end
     close()
-    local sub = {}
-    for key, v in pairs(ctx) do sub[key] = v end
-    sub.cleared = true
-    for _, r in ipairs(runs) do ROADS.guardRail(sub, r) end
-    return
+    -- a rail clear of every carriageway stays whole (its corners are rounded over its own vertices, not the samples)
+    if onRoad then
+      local sub = {}
+      for key, v in pairs(ctx) do sub[key] = v end
+      sub.cleared = true
+      for _, r in ipairs(runs) do ROADS.guardRail(sub, r) end
+      return
+    end
   end
   local rail, rect, face = ROADS.rail, ctx.rect, ctx.face
   local behind = ctx.behind or 1
@@ -2611,7 +2623,9 @@ end
 -- Paved shoulder (m) outside the edge lines, left and right of the node order: tagged
 -- (shoulder:left:width and shoulder:right:width, from the road register), else by class where the
 -- way has no width tag: the pack widened the carriageway by it (fast_sources.shoulder, same rule).
-ROADS.shoulders = {motorway = {.25, 3.3}, trunk = {1, 1}, primary = {.5, .5}, secondary = {.25, .25}}   -- bundle8: motorway 0.25 / 3.3 (fast_sources.SHOULDER)
+ROADS.shoulders = {motorway = {.75, 2.5}, trunk = {1, 1}, primary = {.5, .5}, secondary = {.25, .25}}
+-- the German motorway's shoulders (0.25 m on the median side, 3.3 m on the right; fast_sources.SHOULDER with the
+-- exporter's EARTHNG_ROAD_RULES) follow ROADS.extras.roadProfiles, see ROADS.applyExtras
 ROADS.shouldersOneway = {trunk = {.5, 1.5}, primary = {.25, .75}}
 function ROADS.shoulder(tags)
   local tagLeft, tagRight = tonumber(tags['shoulder:left:width']), tonumber(tags['shoulder:right:width'])
@@ -7668,15 +7682,20 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
         end, nil, 'prop_' .. id)
       local major = tags.highway == 'primary' or tags.highway == 'secondary' or tags.highway == 'tertiary' or tags.highway == 'trunk'
       local lr = VEG.lampRule
-      if context.lamps and tags.lit ~= 'no' and not lr.never[tags.highway] and (tags.lit == 'yes' or major)
+      -- ROADS.extras.lampRows: German practice (one row on a narrow street, staggered rows on a wide one, an unlit
+      -- major road lit only in a town, none on a motorway). Off, upstream's rule: a row on the right and, on
+      -- a wide street, on a sidewalk side, on every major road not tagged lit=no.
+      local rows = ROADS.extras.lampRows
+      if context.lamps and tags.lit ~= 'no' and not (rows and lr.never[tags.highway]) and (tags.lit == 'yes' or major)
           and (not FS or FS:fileExists(LAMP)) then
         local function lit(k)
-          return tags.lit == 'yes' or town(strip.points[k][1], strip.points[k][2])
+          return not rows or tags.lit == 'yes' or town(strip.points[k][1], strip.points[k][2])
         end
         -- the row's side: a wide street both (its sidewalks'), a narrow one the side with the only sidewalk, else the right
         local function sides(k, side)
           if not lit(k) then return false end
           local w = strip.walk[k] or NONE
+          if not rows then return side == -1 or hw >= 6 and w[side] end
           if hw >= lr.wide then return side == -1 or w[side] end
           if side == 1 then return w[1] and not w[-1] or false end
           return not (w[1] and not w[-1])
@@ -7694,7 +7713,8 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
         -- the right row on the step, the left one half a step on (a wide street's rows staggered)
         for _, side in ipairs({-1, 1}) do
           walk(strip.points, strip.dist, hash(id), function(k, which) return which == side and sides(k, side) end,
-            6, 6, strip.start or 0, offset, nil, 'streetlamp_' .. id, false, lr.step, lamp, side == 1 and lr.step / 2 or 0)
+            6, 6, strip.start or 0, offset, nil, 'streetlamp_' .. id, false, lr.step, lamp,
+            rows and side == 1 and lr.step / 2 or 0)
         end
       end
       if context.tree and spacing > 0 then
@@ -8936,25 +8956,22 @@ local function liftDecks(roads, pause)
           for k, z in ipairs(want) do m.points[k][3] = z end
         end
       end
-      -- The united slab runs along the host and takes a mate only where it runs beside it. A
-      -- mate's end past the host's (a deck with neither slab nor its own asphalt and soffit there:
-      -- a hole) or the host's past a mate's (the slab's parapet ran diagonally across the mate's
-      -- lanes: a concrete wall in the lane at a motorway bridgeheads) by more than ROADS.united.ends:
-      -- such a group stays separate decks, each whole. (8 m of a mate past the host were let
-      -- through, and the host's ends were not checked.)
-      local loose, h = false, meta[host]
+      -- The united slab runs along the host and takes a mate only where it runs beside it: a
+      -- deck sticking out past the host's end would have neither slab nor (its own are
+      -- suppressed in a group) asphalt and soffit, a hole with the lane marks floating over it.
+      -- Such a group stays separate decks, each whole, at their own heights (the levelling
+      -- raised a deck to the other carriageway's, and the ramps after it).
+      -- A mate beside the host along its whole length stays one deck, though the host runs on
+      -- past it (the host's ends are not tested).
+      local loose = false
       for _, i in ipairs(list) do
         if i ~= host then
-          local m = meta[i]
-          local len = m.dist[#m.dist]
-          for s = 0, len + 4, 4 do
-            local x, y = pointAt(m, math.min(s, len))
-            if not project(h, x, y, ROADS.united.ends) then loose = true end
+          local m, out = meta[i], 0
+          for s = 0, m.dist[#m.dist], 4 do
+            local x, y = pointAt(m, s)
+            if not project(meta[host], x, y) then out = out + 4 end
           end
-          for _, s in ipairs({0, h.dist[#h.dist]}) do
-            local x, y = pointAt(h, s)
-            if not project(m, x, y, ROADS.united.ends) then loose = true end
-          end
+          if out > 8 then loose = true end
         end
       end
       if loose then
@@ -12737,7 +12754,7 @@ local function build(cells, i, j, options)
       for _, segment in ipairs(segmentBins[(floor(x / 50) + 32768) * 65536 + floor(y / 50) + 32768] or NONE) do
         local a = segment.a
         local t = math.max(0, math.min(1, ((x - a[1]) * segment.dx + (y - a[2]) * segment.dy) / segment.len2))
-        if (x - a[1] - t * segment.dx) ^ 2 + (y - a[2] - t * segment.dy) ^ 2 < (segment.width / 2 + .5 + half) ^ 2 then return true end
+        if (x - a[1] - t * segment.dx) ^ 2 + (y - a[2] - t * segment.dy) ^ 2 < (segment.width / 2 + .5) ^ 2 then return true end
       end
       return false
     end
@@ -13092,7 +13109,7 @@ local function build(cells, i, j, options)
   -- under a flyover stood up through the deck (seen in testing). Tunnels are not over it.
   function OFFROAD.underDeck(x, y, z, top)
     for _, s in ipairs(segmentBins[(floor(x / 50) + 32768) * 65536 + floor(y / 50) + 32768] or NONE) do
-      if not ROADS.tunnel(s.tags) then
+      if ROADS.bridge(s.tags) and not ROADS.tunnel(s.tags) then   -- a deck, not a road on an embankment
         local a = s.a
         local t = math.max(0, math.min(1, ((x - a[1]) * s.dx + (y - a[2]) * s.dy) / s.len2))
         local qx, qy = a[1] + s.dx * t, a[2] + s.dy * t
@@ -14245,6 +14262,7 @@ end
 M.build = build
 M.SWEPT = ROADS.swept
 M.EXTRAS = ROADS.extras
+M.applyExtras = ROADS.applyExtras
 -- The new height pipeline (native.lua heightPipeline, world.lua heightPipeline): auto = from the region's
 -- manifest; false keeps the runtime height passes and the generic ground pull for every pack.
 M.HEIGHTS = {auto = true}

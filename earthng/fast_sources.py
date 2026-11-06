@@ -20,6 +20,8 @@ import shapely
 from shapely.geometry import LineString, MultiPoint, Point, shape
 from shapely.ops import transform
 
+import fast_profile
+
 VERSION = 'fast-21'         # source index cache; 14: full clearance and abutments; 15: widths, shoulders, rails, raceways; 16: both, clearance matches a 1.5 m deck; 17: deck and road share the clearance (no runaway hills); 18: only crossing centre lines are overpasses; 19 (upstream): a bridge split over water keeps its deck; 19 (fork): profile by class (fast_profile), plan-view curves (fast_curves, its SIGNATURE in the identity); 20 (fork): decks over navigable water (fast_roads.bridge_floors), pack v3 roads behind EARTHNG_PACK=3, the index-stage code in the identity (INDEX_CODE); 21: both lines merged
 GEOMETRY = 'fast-33'         # mesh/material semantics; bump to reject tiles built by older code
 TILE = 500.0
@@ -56,9 +58,21 @@ DRIVEWAY = 3.0                                        # service=driveway / alley
 # Paved shoulder (m) outside the edge line, (left, right) of the direction, where a way has no
 # width tag. The generator's ROADS.shoulder holds the same rule and paints the edge lines
 # inside it.
-# motorway: 0.25 m on the median side, 3.3 m on the right (ALKIS against a motorway aerial: the paved edge lies
-# 3.05-3.45 m past the right edge line and 0-0.35 m past the left one)
-SHOULDER = {'motorway': (.25, 3.3), 'trunk': (1., 1.), 'primary': (.5, .5), 'secondary': (.25, .25)}
+# motorway: 0.75 m on the median side, 2.5 m on the right; with the fork's road rules (set_road_rules, the
+# EARTHNG_ROAD_RULES switch) 0.25 m and 3.3 m, as measured on German motorways (official data against aerials)
+SHOULDER = {'motorway': (.75, 2.5), 'trunk': (1., 1.), 'primary': (.5, .5), 'secondary': (.25, .25)}
+SHOULDER_MOTORWAY = {False: (.75, 2.5), True: (.25, 3.3)}
+
+
+def set_road_rules(on):
+    """The fork's road rules (fast_profile.set_road_rules) and the motorway shoulders that go with them."""
+    SHOULDER['motorway'] = SHOULDER_MOTORWAY[bool(fast_profile.set_road_rules(on))]
+    return bool(on)
+
+
+set_road_rules(fast_profile.ROAD_RULES)
+
+
 SHOULDER_ONEWAY = {'trunk': (.5, 1.5), 'primary': (.25, .75)}
 SHOULDER_LINK = (.25, 1.)                             # motorway and trunk ramps
 

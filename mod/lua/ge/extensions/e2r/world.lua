@@ -8,7 +8,7 @@ local im = ui_imgui
 local imguiUtils = require('ui/imguiUtils')
 local ffi = require('ffi')
 local logTag = 'e2r_world'
-local LANG = 'en'   -- build_mod.py --lang en rewrites this line (the English packages: UK, California, New York)
+local LANG = 'uk'   -- build_mod.py --lang en rewrites this line (the English packages: UK, California, New York)
 local NATIVE = true   -- fixed for releases; protocol stubs remain for isolated widget tests
 local native = NATIVE and require('ge/extensions/e2r/native') or nil
 -- On M, not a chunk local: this file is already at LuaJIT's 200-local limit.
@@ -164,14 +164,15 @@ end
 
 -- Fork additions that change what an existing pack draws, all off (generator.lua ROADS.extras): static
 -- traffic signals and speed cameras (signals), bay lines and bus stop paint (lots), the runtime vertical
--- alignment of roads (roadProfiles). Set them before the landing. Console:
---   extensions.e2r_world.extras({signals = true, lots = true, roadProfiles = true})
+-- alignment of roads (roadProfiles), German practice for inferred lamps (lampRows), polder land kept dry under the sea plane (openSea). Set them before the landing. Console:
+--   extensions.e2r_world.extras({signals = true, lots = true, roadProfiles = true, lampRows = true, openSea = true})
 function M.extras(set)
   local x = require('ge/extensions/e2r/generator').EXTRAS
   for name, on in pairs(type(set) == 'table' and set or {}) do
     if x[name] ~= nil then x[name] = on == true end
   end
-  return {signals = x.signals, lots = x.lots, roadProfiles = x.roadProfiles}
+  require('ge/extensions/e2r/generator').applyExtras()
+  return {signals = x.signals, lots = x.lots, roadProfiles = x.roadProfiles, lampRows = x.lampRows, openSea = x.openSea}
 end
 
 -- Packs whose road and ground heights come from the exporter's new pipeline (a national DTM or the DEM
@@ -589,6 +590,11 @@ local function forestCommit()
   local m, euler, at = MatrixF(true), vec3(0, 0, 0), vec3(0, 0, 0)
   for index = 1, count do
     local entry = M.fifo.pop(adds)
+    if type(entry[1]) == 'table' then
+      -- {item, tile, generation}: the layout before the transform-only entries (also what the unit tests push)
+      local it = entry[1]
+      entry = {it.pos[1], it.pos[2], it.pos[3], yawOf(it.rot), it.scale or 1, entry[2], entry[3], it.shape == LAMP_SHAPE}
+    end
     local tile = entry[6]
     if kind and not tile.dropped and not tile.vegetationDropped and (tile.forestGen or 0) == entry[7] then
       euler.z = entry[4]
@@ -1249,7 +1255,7 @@ local function navBuild(force)
     return
   end
   S.navSig = sig
-  if count == 0 then log('I', 'e2r', 'nav: graph rebuilt with no roads in range') end
+  if count == 0 and log then log('I', 'e2r', 'nav: graph rebuilt with no roads in range') end
   -- junction radii grew after their first links were made
   for _, n in pairs(nodes) do
     for lid, data in pairs(n.links) do
@@ -1291,7 +1297,7 @@ local function navStep()
     local serial = map.getMap().buildSerial
     if S.navForeignLogged ~= serial then
       S.navForeignLogged = serial
-      log('I', 'e2r', 'nav: graph rebuilt elsewhere (serial ' .. tostring(serial) .. '), restoring')
+      if log then log('I', 'e2r', 'nav: graph rebuilt elsewhere (serial ' .. tostring(serial) .. '), restoring') end
     end
     navBuild(true)
     return

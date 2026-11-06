@@ -1159,7 +1159,7 @@ local function heightPipeline(data)
 end
 
 local function loadRoads3(r, rect)
-  local section = generator.SWEPT and generator.SWEPT.on and roads3.section(r.data)
+  local section = generator.SWEPT and generator.SWEPT.on and type(roads3.section) == 'function' and roads3.section(r.data)
   if not section then return nil end
   local cache = active.roads3
   if not cache then cache = {blocks = {}, cells = {}, clock = 0}; active.roads3 = cache end
@@ -1918,6 +1918,38 @@ function M.horizonCover(key)
   end
   a.cover[key] = list
   return list
+end
+
+-- Which horizon meshes to show. A coarser tile stays until every finer tile that overlaps
+-- it is ready, then the swap is the whole set: no hole and no second surface on the same
+-- ground. rank 0 is the finest. Aligned rings give each fine tile one parent.
+function M.horizonShow(candidates, ready)
+  candidates, ready = candidates or {}, ready or {}
+  local hidden = {}
+  local function overlaps(a, b)
+    return a[1] < b[3] and b[1] < a[3] and a[2] < b[4] and b[2] < a[4]
+  end
+  for _, coarse in ipairs(candidates) do
+    local children = {}
+    for _, fine in ipairs(candidates) do
+      if fine.rank < coarse.rank and fine.rect and coarse.rect and overlaps(fine.rect, coarse.rect) then
+        children[#children + 1] = fine
+      end
+    end
+    if #children > 0 then
+      local allReady = true
+      for _, fine in ipairs(children) do
+        if not ready[fine.key] then allReady = false; break end
+      end
+      if allReady then hidden[coarse.key] = true
+      else for _, fine in ipairs(children) do hidden[fine.key] = true end end
+    end
+  end
+  local show = {}
+  for _, candidate in ipairs(candidates) do
+    if ready[candidate.key] and not hidden[candidate.key] then show[#show + 1] = candidate.key end
+  end
+  return show
 end
 
 -- Jump buttons for a country: county zips only. Grid regions stay in the catalog (coverage,
