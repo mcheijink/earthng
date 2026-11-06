@@ -1314,6 +1314,7 @@ end
 -- mapped as underpasses); a way further down passes under and stays.
 -- Cut: on-surface runs between the way's ends, and an on-surface end unless the swept plan built a
 -- junction plate at that node. Pieces get end nodes of their own where they were cut (no junction there).
+ROADS.sweptJoin = 15      -- m: the longest cut end of a way that still joins the swept road's node
 function ROADS.sweptCrossing(SW, road)
   local t, pts = road.tags or NONE, road.points or NONE
   if #pts < 2 or (t.bridge and t.bridge ~= 'no') or (tonumber(t.layer) or 0) > 0 then return {road} end
@@ -1380,6 +1381,19 @@ function ROADS.sweptCrossing(SW, road)
     any = any or S[i].cut
   end
   if not any then return {road} end
+  -- A piece that starts (ends) where the way's own end lay on the swept surface keeps the way's end node:
+  -- the way went on from the swept road there (a slip road's end), and a new node id cut the AI's graph in
+  -- two there (nav_check: a dead end at the slip road's end, the town cut off from the motorway). Only for a
+  -- short cut (an end over the swept edge), not a way that ran along the swept road.
+  -- (the way's end node itself may lie just off the swept surface, a slip road ending a few m short of it:
+  -- at most one sample kept before the cut, a run of one point that makes no piece)
+  local along, kept = {0}, {S[1].cut and 0 or 1}
+  for i = 2, #S do
+    along[i] = along[i - 1] + math.sqrt((S[i].p[1] - S[i - 1].p[1]) ^ 2 + (S[i].p[2] - S[i - 1].p[2]) ^ 2)
+    kept[i] = kept[i - 1] + (S[i].cut and 0 or 1)
+  end
+  local function joinsStart(i) return i == 1 or (kept[i - 1] <= 1 and along[i] <= ROADS.sweptJoin) end
+  local function joinsEnd(i) return kept[#S] - kept[i] <= 1 and along[#S] - along[i] <= ROADS.sweptJoin end
   local out, run = {}, nil
   local function close(endsWay)
     if run and #run.points >= 2 then
@@ -1396,10 +1410,10 @@ function ROADS.sweptCrossing(SW, road)
   for i = 1, #S do
     local s = S[i]
     if s.cut then
-      close(false)
+      close(i > 1 and joinsEnd(i - 1))
     else
       local fresh = run == nil
-      if fresh then run = {points = {}, startsWay = i == 1} end
+      if fresh then run = {points = {}, startsWay = joinsStart(i)} end
       -- the way's own points, and the last sample before / first after a cut (each up to 2 m off the surface)
       if fresh or s.orig or i == #S or (S[i + 1] and S[i + 1].cut) then run.points[#run.points + 1] = s.p end
     end
