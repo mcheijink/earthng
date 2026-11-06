@@ -1083,7 +1083,8 @@ local function collector(rect, key, layer, pause, mixed)
       if swap == false then return end
       if swap then kind, plain = swap, true end
     end
-    local material = 'e2rf_' .. kind
+    -- a kind '=name' is the game's own material by name (ROADS.railLook: the stock guard rail)
+    local material = kind:byte(1) == 61 and kind:sub(2) or 'e2rf_' .. kind
     if mixed and total >= mixed then flush() end
     local mesh = groups[material]
     if not mixed and mesh and mesh.tris >= PIECE_TRIS then flushMaterial(material); mesh = nil end
@@ -1215,7 +1216,14 @@ end
 -- profile: its folds ({off the centre line, up from the beam's foot}), `thick` m deep in all.
 ROADS.rail = {height = .75, beam = .32, thick = .1, post = .14, step = 2, posts = 4, sink = .3,
   round = 6, ease = 2, profile = {{0, 0}, {.05, .04}, {.05, .09}, {.015, .155}, {.05, .22}, {.05, .27}, {0, .32}},
-  approach = 40, offset = .5, rank = 4.5, material = 'clad_metal'}
+  approach = 40, offset = .5, rank = 4.5,
+  -- the look of beam and posts: a stock game material by name, else our own kind (sweep.lua M.RAIL, M.railLook)
+  material = 'italy_guardrails', fallback = 'clad_metal'}
+function ROADS.railLook()
+  local sweep = ROADS.sweep
+  if sweep and sweep.railLook then return sweep.railLook(ROADS.rail) end
+  return {tier = 3, stock = false, kind = ROADS.rail.fallback, name = 'e2rf_' .. ROADS.rail.fallback}
+end
 -- A far tile draws the surface of every road of this class (ROADS.rankOf) or above, decoration
 -- only: the far ring is ~130 tiles of the triangle budget, so service streets stay out. `clear`:
 -- how far over the coarse far ground a road's surface is kept where that ground would hide it.
@@ -1402,15 +1410,25 @@ end
 
 -- A box's four sides round (x, y): `across` half width along the normal of (tx, ty), `along`
 -- half length along it, from zb up to zt. Its top and bottom are never seen.
-function ROADS.box(face, material, x, y, tx, ty, across, along, zb, zt, repeatU)
+-- window {u0, v at the top, u1, v at the bottom}: a box side covers that patch of the texture instead of its metres
+function ROADS.window(poly, w, h, window)
+  for _, q in ipairs(poly) do
+    q[4], q[5] = window[1] + q[4] / w * (window[3] - window[1]), window[2] + q[5] / h * (window[4] - window[2])
+  end
+end
+function ROADS.box(face, material, x, y, tx, ty, across, along, zb, zt, repeatU, window)
   local nx, ny = -ty, tx
   local function c(sa, sb, z, u, v)
     return {x + nx * across * sa + tx * along * sb, y + ny * across * sa + ty * along * sb, z, u, v}
   end
   local h, wa, wb = (zt - zb) / repeatU, 2 * across / repeatU, 2 * along / repeatU
   for _, s in ipairs(SIDES) do
-    face({c(-1, s, zt, 0, 0), c(1, s, zt, wa, 0), c(1, s, zb, wa, h), c(-1, s, zb, 0, h)}, tx * s, ty * s, 0, material)
-    face({c(s, -1, zt, 0, 0), c(s, 1, zt, wb, 0), c(s, 1, zb, wb, h), c(s, -1, zb, 0, h)}, nx * s, ny * s, 0, material)
+    local side = {c(-1, s, zt, 0, 0), c(1, s, zt, wa, 0), c(1, s, zb, wa, h), c(-1, s, zb, 0, h)}
+    if window then ROADS.window(side, wa, h, window) end
+    face(side, tx * s, ty * s, 0, material)
+    side = {c(s, -1, zt, 0, 0), c(s, 1, zt, wb, 0), c(s, 1, zb, wb, h), c(s, -1, zb, 0, h)}
+    if window then ROADS.window(side, wb, h, window) end
+    face(side, nx * s, ny * s, 0, material)
   end
 end
 
@@ -1808,6 +1826,10 @@ function ROADS.guardRail(ctx, path)
   end
   local rail, rect, face = ROADS.rail, ctx.rect, ctx.face
   local behind = ctx.behind or 1
+  -- the look: the stock sheet's UVs (a panel of u every look.panel m, the beam's strip of v) or our own (4 m, a quarter of v)
+  local look = ROADS.railLook()
+  local kind, panel = look.kind, look.stock and look.panel or 4
+  local v0, dv = look.stock and look.v0 or 0, look.stock and look.dv or .25
   path = ROADS.roundPath(path, rail.round)
   local pts, along = {}, {}
   for k = 1, #path - 1 do
@@ -1871,17 +1893,17 @@ function ROADS.guardRail(ctx, path)
     local nx, ny = -f[2], f[1]
     local off = (q[1] + gap) * side * f[3]
     local n = pn[i]
-    return {p[1] + nx * off, p[2] + ny * off, p[3] + low + q[2], u, q[2] / rail.beam * .25,
+    return {p[1] + nx * off, p[2] + ny * off, p[3] + low + q[2], u, v0 + q[2] / rail.beam * dv,
       nx * n[1] * side, ny * n[1] * side, n[2]}
   end
-  -- a skin vertex (k, i, side) stands in four quads (two folds, two segments) with the same u, along[k] / 4:
+  -- a skin vertex (k, i, side) stands in four quads (two folds, two segments) with the same u, along[k] / panel:
   -- made once instead of four times (the rail's vertex tables were ~3 MB of a near tile's garbage,
   -- generator_budget.py --garbage). The faces only read their corners.
   local skin = {}
   local function skinVertex(k, i, side)
     local key = (k * (#profile + 1) + i) * 2 + (side > 0 and 1 or 0)
     local v = skin[key]
-    if not v then v = vertex(k, i, side, along[k] / 4); skin[key] = v end
+    if not v then v = vertex(k, i, side, along[k] / panel); skin[key] = v end
     return v
   end
   local post = 0
@@ -1898,7 +1920,7 @@ function ROADS.guardRail(ctx, path)
           local fn = pn[i][1] + pn[i + 1][1]
           local fz = pn[i][2] + pn[i + 1][2]
           face({skinVertex(k, i, side), skinVertex(k + 1, i, side), skinVertex(k + 1, i + 1, side), skinVertex(k, i + 1, side)},
-            -ty * fn * side, tx * fn * side, fz, rail.material)
+            -ty * fn * side, tx * fn * side, fz, kind)
         end
       end
       -- the beam's ends: its two skins closed by the fold
@@ -1907,7 +1929,7 @@ function ROADS.guardRail(ctx, path)
         for i = 1, #profile - 1 do
           local c = {vertex(e, i, 1, 0), vertex(e, i + 1, 1, 0), vertex(e, i + 1, -1, 0), vertex(e, i, -1, 0)}
           for _, v in ipairs(c) do v[6], v[7], v[8] = nil, nil, nil end
-          face(c, tx * s, ty * s, 0, rail.material)
+          face(c, tx * s, ty * s, 0, kind)
         end
       end
     end
@@ -1916,8 +1938,9 @@ function ROADS.guardRail(ctx, path)
       if mine then
         local t = math.max(0, math.min(1, (post - along[k]) / math.max(EPS, along[k + 1] - along[k])))
         local off = (rail.thick / 2 + rail.post / 2) * behind
-        ROADS.box(face, rail.material, a[1] + dx * t - ty * off, a[2] + dy * t + tx * off, tx, ty,
-          rail.post / 2, rail.post / 2, a[3] + (b[3] - a[3]) * t - rail.sink, a[3] + (b[3] - a[3]) * t + rail.height - .02, 1)
+        ROADS.box(face, kind, a[1] + dx * t - ty * off, a[2] + dy * t + tx * off, tx, ty,
+          rail.post / 2, rail.post / 2, a[3] + (b[3] - a[3]) * t - rail.sink, a[3] + (b[3] - a[3]) * t + rail.height - .02, 1,
+          look.stock and look.post or nil)
       end
       post = post + rail.posts
     end
@@ -12312,6 +12335,7 @@ local function build(cells, i, j, options)
     for material in pairs(roadDecor.used) do roads.used[material] = true end
     if SW and visualRoads then
       local items, used = ROADS.sweep.items(SW, {tileKey = key, markKind = markKind, pause = pause, roadScale = ROADS.swept.scale,
+        railLook = ROADS.railLook(),
         material = function(tags) return (roadMaterial(tags)) end, deckDepth = ROADS.deckDepth, deckMaterial = ROADS.deckMaterial,
         dem = #terrain > 0 and demAt or nil})
       for _, item in ipairs(items) do roads.items[#roads.items + 1] = item end

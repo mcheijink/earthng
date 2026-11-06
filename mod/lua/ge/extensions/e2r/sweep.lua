@@ -142,10 +142,76 @@ M.MARKS = {
   taperRows = 8,
 }
 
+-- material: the look of the beam and the posts, a stock game material by name. The game loads the common art
+-- (art/shapes/objects/main.materials.json among it) for every level, a level's own materials only with that level.
+-- M.railLook picks what the game can draw: 1 the stock material by name; 2 our own e2rf_guardrail, defined at runtime
+-- from the stock sheet's texture paths, if only the stock definition is missing; 3 `fallback`, our own kind
+-- (e2rf_<kind>). material = nil, or = fallback: always 3. jerseyMaterial: our own kind for the concrete barriers
+-- (the stock material is a W-beam sheet).
+-- stock: the layout of that sheet (t_italy_guardrails_b: 1024 x 1024 px, 341 px a metre, v down the image as the engine
+-- reads it): a beam panel is `panel` m of u, its bolts at the panel's start: the post spacing, so a joint sits on every
+-- post (the stock mesh stretches it over 3 m; 4 m stretches the sheet by a third, which its bolt rows take); its W strip is image
+-- rows 350-451, v0 at the beam's foot and v0 + dv at its top; the posts sample the plain patch post = {u0, v top, u1, v bottom}.
 M.RAIL = {height = .75, beam = .32, thick = .10, depth = .06, post = .14, posts = 4, sink = .3,
-  material = 'clad_metal', kinds = {guard_rail = 'beam', cable_barrier = 'beam', jersey_barrier = 'jersey'},
+  material = 'italy_guardrails', fallback = 'clad_metal', jerseyMaterial = 'clad_metal',
+  stock = {panel = 4, v0 = .441, dv = -.099, post = {.39, .285, .63, .332},
+    define = {name = 'e2rf_guardrail', dir = '/assets/materials/trim/metal/m_italy_guardrails/', metallicFactor = .75,
+      maps = {baseColorMap = 't_italy_guardrails_b.color.png', normalMap = 't_italy_guardrails_nm.normal.png',
+        metallicMap = 't_italy_guardrails_m.data.png', roughnessMap = 't_italy_guardrails_r.data.png'}}},
+  kinds = {guard_rail = 'beam', cable_barrier = 'beam', jersey_barrier = 'jersey'},
   jersey = {height = .81, base = .61, top = .15}, postSource = 'memory (Pfostenabstand 4 m einfache Schutzplanke)'}
 M.DECK = {parapet = .9, thick = .3, material = 'fence_wall', piece = 2, clear = .3}
+
+-- What the game can draw for a rail (see M.RAIL). Asks the engine through guarded globals (scenetree, FS, log,
+-- jsonWriteFile, loadJsonMaterialsFile); without them (offline) the stock material is taken. Once per setting, logged once.
+-- Returns {tier, stock, name (the engine's material), kind (the generator's: '=' .. name for a stock material, else the
+-- e2rf_ kind) and, with stock, panel, v0, dv, post}.
+local railLooks = {}
+local function inGame(name)
+  if not scenetree or not scenetree.findObject then return true end
+  return scenetree.findObject(name) ~= nil
+end
+local function defineRail(d)
+  if not (FS and scenetree and jsonWriteFile and loadJsonMaterialsFile) then return false end
+  local stage = {metallicFactor = d.metallicFactor}
+  for field, file in pairs(d.maps) do
+    local path = d.dir .. file
+    if not (FS:fileExists(path) or FS:fileExists(path:sub(1, -5) .. '.dds')) then return false end
+    stage[field] = path
+  end
+  if not scenetree.findObject(d.name) then
+    jsonWriteFile('e2r_world/rail_material.json', {[d.name] = {name = d.name, mapTo = d.name, class = 'Material',
+      Stages = {stage, {}, {}, {}}, annotation = 'GUARD_RAIL', groundType = 'METAL', dynamicCubemap = true,
+      translucentBlendOp = 'None', version = 1.5}}, false)
+    loadJsonMaterialsFile('/e2r_world/rail_material.json')
+  end
+  return true
+end
+function M.railLook(R)
+  R = R or M.RAIL
+  local key = tostring(R.material) .. '>' .. tostring(R.fallback)
+  local look = railLooks[key]
+  if look then return look end
+  local S = R.stock or M.RAIL.stock
+  look = {tier = 3, stock = false, kind = R.fallback, name = 'e2rf_' .. R.fallback}
+  if R.material and R.material ~= R.fallback and S then
+    local function stockLook(tier, name, kind)
+      return {tier = tier, stock = true, kind = kind, name = name, panel = S.panel, v0 = S.v0, dv = S.dv, post = S.post}
+    end
+    local def = S.define
+    if inGame(R.material) then
+      look = stockLook(1, R.material, '=' .. R.material)
+      if log then log('I', 'e2r', 'guard rails: stock material ' .. R.material) end
+    elseif def and defineRail(def) then
+      look = stockLook(2, def.name, (def.name:gsub('^e2rf_', '')))
+      if log then log('W', 'e2r', 'guard rails: stock material ' .. R.material .. ' is not loaded, ' .. def.name .. ' made from its texture paths') end
+    elseif log then
+      log('W', 'e2r', 'guard rails: stock material ' .. R.material .. ' is not in the game, using ' .. R.fallback)
+    end
+  end
+  railLooks[key] = look
+  return look
+end
 local SPEED = {motorway = 110, trunk = 90, primary = 60, secondary = 60, tertiary = 50, unclassified = 50,
   residential = 40, living_street = 20, service = 20}
 local DRIVE = {motorway = 1, trunk = 1, primary = 1, secondary = 1, tertiary = .9, unclassified = .7,
@@ -2431,8 +2497,10 @@ end
 -- a W-beam (two folds on the road side, a flat back, a top) and posts, or a concrete barrier profile; a median rail
 -- (path.double) mirrors the beam about the posts and centres them on the rail's line
 local ONE, BOTH = {1}, {1, -1}
-function M.railMesh(plan, S, c, path, mesh, o, lift)
+function M.railMesh(plan, S, c, path, mesh, o, lift, look)
   local R = M.RAIL
+  -- the stock sheet's UVs (M.RAIL.stock) for a beam and its posts; a concrete barrier keeps ours
+  local K = look and look.stock and path.kind ~= 'jersey' and look
   local pts = path.points
   local side = path.side
   local c0, c1 = c.s[1], c.s[c.n]
@@ -2465,6 +2533,10 @@ function M.railMesh(plan, S, c, path, mesh, o, lift)
     local rx, ry = ty * side, -tx * side
     local q = prof[i]
     local u = m * (q[1] + shift)
+    if K then
+      return {p[1] + rx * u, p[2] + ry * u, p[3] + lift + q[2], (p[4] or 0) / K.panel,
+        K.v0 + (q[2] - (R.height - R.beam)) / R.beam * K.dv}
+    end
     return {p[1] + rx * u, p[2] + ry * u, p[3] + lift + q[2], (p[4] or 0) / 3, q[2] / 3}
   end
   local closed = path.kind == 'jersey'
@@ -2517,13 +2589,16 @@ function M.railMesh(plan, S, c, path, mesh, o, lift)
       local cx, cy = x - rx * back, y - ry * back
       local h = R.post / 2
       local z0, z1 = z + lift - R.sink, z + lift + R.height - .02
+      -- (u0, v0) the post's foot corner, (u1, v1) its top corner: its own metres, or the stock sheet's plain patch
+      local u0, v0, u1, v1 = 0, 0, R.post, R.height
+      if K then u0, v1, u1, v0 = K.post[1], K.post[2], K.post[3], K.post[4] end
       local corners = {{cx + tx * h + rx * h, cy + ty * h + ry * h}, {cx - tx * h + rx * h, cy - ty * h + ry * h},
         {cx - tx * h - rx * h, cy - ty * h - ry * h}, {cx + tx * h - rx * h, cy + ty * h - ry * h}}
       for i = 1, 4 do
         local a, b = corners[i], corners[i % 4 + 1]
         local mx, my = (a[1] + b[1]) / 2 - cx, (a[2] + b[2]) / 2 - cy
-        local A, B = {a[1], a[2], z0, 0, 0}, {b[1], b[2], z0, R.post, 0}
-        local C, D = {b[1], b[2], z1, R.post, R.height}, {a[1], a[2], z1, 0, R.height}
+        local A, B = {a[1], a[2], z0, u0, v0}, {b[1], b[2], z0, u1, v0}
+        local C, D = {b[1], b[2], z1, u1, v1}, {a[1], a[2], z1, u0, v1}
         tri(mesh, o, A, B, C, uv, {mx, my, 0}); tri(mesh, o, A, C, D, uv, {mx, my, 0})
       end
     end
@@ -2873,6 +2948,7 @@ function M.items(plan, opts)
   local pause = opts.pause or function() end
   local scale = opts.roadScale or 30
   local uv = planUV(scale)
+  local look = opts.railLook or M.railLook(M.RAIL)
   local materials = {}
   local stats = {tris = 0, markTris = 0, railTris = 0, items = 0}
   local function item(meshes, name, decor, stroke)
@@ -2920,17 +2996,19 @@ function M.items(plan, opts)
             stats.markTris = stats.markTris + item({marks}, n .. 'm', true)
             pause()
           end
-          local rail = newMesh('e2rf_' .. M.RAIL.material)
+          local rail = newMesh(look.name)
+          -- a stock look is a W-beam sheet: a concrete barrier gets a mesh of its own kind (else the same mesh)
+          local jersey = look.stock and newMesh('e2rf_' .. M.RAIL.jerseyMaterial) or rail
           local paths = M.railPaths(plan, S, c)
           -- and the rule rails at a drop (opts.dem: the generator's raw DEM)
           for _, path in ipairs(M.dropRails(plan, S, c, opts.dem)) do paths[#paths + 1] = path end
-          for _, path in ipairs(paths) do M.railMesh(plan, S, c, path, rail, o, lift) end
+          for _, path in ipairs(paths) do M.railMesh(plan, S, c, path, path.kind == 'jersey' and jersey or rail, o, lift, look) end
           c.railPaths = paths
           pause()
           -- the deck's material by its tags (generator ROADS.deckMaterial: material=*, bridge:structure=*)
           local deck = newMesh('e2rf_' .. (opts.deckMaterial and opts.deckMaterial(M.deckTags(S, c)) or M.DECK.material))
           M.deckMesh(plan, S, c, deck, o, lift, opts.deckDepth and opts.deckDepth(S.tags) or 1.5)
-          stats.railTris = stats.railTris + item({rail, deck}, n .. 'f', nil, S.id)
+          stats.railTris = stats.railTris + item(jersey ~= rail and {rail, deck, jersey} or {rail, deck}, n .. 'f', nil, S.id)
           pause()
         end
       end
