@@ -256,7 +256,7 @@ def compile_cell(store, rect, include=None):
             continue
         seen.add((kind, fid))
         tags = data.get('tags', {})
-        if kind == 'water' and tags.get('water') == 'harbour' and _at_sea_level(store, geometry):
+        if TIDAL and kind == 'water' and tags.get('water') == 'harbour' and _at_sea_level(store, geometry):
             tidal.append(geometry)
         # power lines keep whole spans and their towers' facts (power.py); a tower is no point of its own
         if kind == 'power_line':
@@ -435,6 +435,9 @@ def _coast(store, rect, xs, ys, heights):
     return out
 
 
+# EARTHNG_TIDAL=0: harbour water is left at the DEM's height (the fork's result; EARTHNG_PROFILE=fork); on by default (upstream)
+region_profile.apply_env()
+TIDAL = region_profile.switch('EARTHNG_TIDAL', True)
 HARBOUR_RISE = 12.  # a water=harbour is the sea's when the DEM keeps it this close to sea level
 HARBOUR_FLOOR = 2.  # metres its ground lies under the sea plane
 

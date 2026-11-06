@@ -757,7 +757,7 @@ def _prepare(source, output, dem, emit=print, point=None, cancelled=None, box=No
             else:
                 emit('dtm: no national DTM tiles under this window: the coarse DEM with the rules')
         # decks over navigable water: water level + clearance + structure as a lower bound (ROAD-OBJECTS.md 4.7)
-        floors, floor_report = fast_roads.bridge_floors(segments, extras, floor_sample, emit=emit)
+        floors, floor_report = fast_roads.bridge_floors(segments, extras, floor_sample, emit=emit) if fast_roads.FLOORS else ([], [])
         profiles, node_h = fast_profile.solve(segments, sample, emit=emit, floors=floors, cover=cover,
                                               rules=rules, reference=reference)
         for seg, (ps, ph) in zip(segments, profiles):
@@ -921,7 +921,7 @@ class Store:
             import fast_signals
             import retail
             import venues
-            tracker=fast_signals.Tracker()
+            tracker=fast_signals.Tracker() if fast_style.CAMERAS else None     # headings and relation cameras: EARTHNG_CAMERAS
             class Reader(osmium.SimpleHandler):
                 def area(self,a):
                     tags = retail.enriched(a.tags)
@@ -950,10 +950,10 @@ class Store:
                     kind=fast_style.point_kind(n.tags)
                     if kind and n.location.valid():
                         lines[-(10**12+n.id)]=(kind,retail.enriched(n.tags),Point(n.location.lon,n.location.lat))
-                        tracker.node(n.id,n.tags,kind)
+                        if tracker: tracker.node(n.id,n.tags,kind)
                 def way(self,w):
                     # a signal's or camera's forward/backward is its way's direction (fast_signals)
-                    if tracker.pending:
+                    if tracker and tracker.pending:
                         tracker.way(w.tags,[(n.ref,(n.lon,n.lat) if n.location.valid() else None) for n in w.nodes])
                     # footpaths, fences, tree rows: lines, not areas (an area id is 2 x way id,
                     # so a line keys as -way id to stay apart)
@@ -966,12 +966,12 @@ class Store:
                         if len(coords)>=2:
                             lines[-w.id]=(kind,dict(w.tags),LineString(coords))
                 def relation(self,r):
-                    tracker.relation(r.tags,[(m.type,m.ref,m.role) for m in r.members])
+                    if tracker: tracker.relation(r.tags,[(m.type,m.ref,m.role) for m in r.members])
             # Only nodes that can be points reach Python (Kyiv tile: 21 k of 218 k, 0.57 -> 0.25 s);
             # the location index still sees every node, so ways and areas keep their geometry.
             Reader().apply_file(str(Path(self.meta['source'])/entry['file']),locations=True,
                                 filters=[osmium.filter.KeyFilter(*fast_style.point_keys()).enable_for(osmium.osm.NODE)])
-            fast_signals.finish(tracker,lines,str(Path(self.meta['source'])/entry['file']))
+            if tracker: fast_signals.finish(tracker,lines,str(Path(self.meta['source'])/entry['file']))
             # OSM often maps a business both as a node and a containing site/building.
             # Keep the surveyed node when category and known brand match; unknown names
             # or neighbouring businesses are never guessed to be duplicates.

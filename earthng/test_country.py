@@ -478,6 +478,16 @@ class CountryTests(unittest.TestCase):
         self.assertLess(heights[12, 12], sources.LIFT)                   # (300, 300): the harbour
         self.assertEqual(heights[30, 30], sources.LIFT + 6.0)            # (750, 750): the shore
 
+    def test_tidal_flood_can_be_switched_off(self):
+        from unittest.mock import patch
+        harbour = shapely.box(100, 100, 500, 500)
+        water = (-9, 'water', {'tags': {'natural': 'water', 'water': 'harbour'}}, harbour)
+        self.store.scenery = lambda rect: [water]
+        self.store.terrain = Mock(sample=lambda xy: np.full(len(xy), sources.LIFT + 6.0))
+        with patch.object(country, 'TIDAL', False):
+            heights = np.array(country.compile_cell(self.store, [0, 0, 1000, 1000])['terrain']['heights']).reshape(41, 41)
+        self.assertEqual(heights[12, 12], sources.LIFT + 6.0)            # the DEM's own height
+
     def test_an_inland_port_keeps_its_level(self):
         water = (-9, 'water', {'tags': {'natural': 'water', 'water': 'harbour'}}, shapely.box(100, 100, 500, 500))
         self.store.scenery = lambda rect: [water]

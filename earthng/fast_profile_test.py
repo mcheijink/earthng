@@ -133,6 +133,48 @@ class Rules(unittest.TestCase):
         self.assertGreater(low, 0.)
 
 
+class Switches(unittest.TestCase):
+    """EARTHNG_PCG and EARTHNG_SPANS (the fork's solver, upstream's deck of a bridge cut in pieces)."""
+
+    def setUp(self):
+        self.saved = fp.PCG, fp.SPANS
+        self.addCleanup(lambda: (setattr(fp, 'PCG', self.saved[0]), setattr(fp, 'SPANS', self.saved[1])))
+        dem = lambda xy: 10. + 3. * np.exp(-((np.asarray(xy).reshape(-1, 2)[:, 0] - 1000) / 80.) ** 2)
+        self.segs, self.dem = line((0, 0), (1000, 0), (2000, 0)), dem
+
+    def test_off_the_solver_is_upstreams_jacobi_cg(self):
+        from unittest.mock import patch
+        fp.PCG = False
+        with patch.object(fp, 'Chains', side_effect=AssertionError('the preconditioner is built')):
+            profiles, _ = fp.solve(self.segs, self.dem, rules=False)
+        self.assertTrue(np.isfinite(np.concatenate([h for _, h in profiles])).all())
+
+    def test_on_the_chains_precondition_and_the_answers_stay_close(self):
+        from unittest.mock import patch
+        fp.PCG = False
+        a, _ = fp.solve(self.segs, self.dem, rules=False)
+        fp.PCG = True
+        with patch.object(fp, 'Chains', wraps=fp.Chains) as chains:
+            b, _ = fp.solve(self.segs, self.dem, rules=False)
+        self.assertTrue(chains.called)
+        for (_, h1), (_, h2) in zip(a, b):
+            self.assertLess(np.max(np.abs(h1 - h2)), .05)         # the same system, upstream's stops at 1e-3
+
+    def test_spans_only_act_when_on_and_the_signature_names_the_switches(self):
+        from unittest.mock import patch
+        bridge = [seg((1, 2), [(0, 0), (300, 0)], 'motorway', bridge='yes', layer='1'),
+                  seg((2, 3), [(300, 0), (600, 0)], 'motorway', bridge='yes', layer='1')]
+        for on in (True, False):
+            fp.SPANS = on
+            with patch.object(fp, 'spans', return_value={}) as spans:
+                fp.solve(bridge, self.dem, rules=False)
+            self.assertEqual(spans.called, on)
+        fp.SPANS, fp.PCG = True, False
+        plain = fp._signature()
+        fp.SPANS, fp.PCG = False, True
+        self.assertNotEqual(fp._signature(), plain)
+
+
 class Helpers(unittest.TestCase):
     def test_near_distance_matches_brute_force(self):
         rng = np.random.default_rng(3)

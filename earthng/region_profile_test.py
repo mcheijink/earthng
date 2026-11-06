@@ -46,6 +46,30 @@ class ProfileTests(unittest.TestCase):
             region_profile.apply_env()
             self.assertEqual(os.environ['EARTHNG_NOISE'], '0')        # a variable set by hand wins
             self.assertEqual([os.environ[k] for k in ('EARTHNG_ROAD_RULES', 'EARTHNG_POWER', 'EARTHNG_CAMERAS')], ['1'] * 3)
+            self.assertEqual([os.environ[k] for k in ('EARTHNG_BRIDGE_FLOORS', 'EARTHNG_PCG')], ['1'] * 2)
+            self.assertEqual([os.environ[k] for k in ('EARTHNG_SPANS', 'EARTHNG_TIDAL')], ['0'] * 2)
+
+    def test_switch_reads_the_environment_with_a_default(self):
+        with without_profile(), patch.dict(os.environ, {'EARTHNG_X': '0', 'EARTHNG_Y': 'yes', 'EARTHNG_Z': ''}):
+            self.assertFalse(region_profile.switch('EARTHNG_X', True))
+            self.assertTrue(region_profile.switch('EARTHNG_Y', False))
+            self.assertTrue(region_profile.switch('EARTHNG_Z', True))
+            self.assertFalse(region_profile.switch('EARTHNG_UNSET', False))
+
+    def test_exporter_modules_default_to_upstream_and_the_fork_profile_flips_four(self):
+        import subprocess
+        import sys
+        code = ('import fast_profile as p, fast_roads as r, build_country as c, fast_style as s;'
+                'print(int(p.PCG), int(p.SPANS), int(r.FLOORS), int(c.TIDAL), int(s.CAMERAS))')
+        here = os.path.dirname(os.path.abspath(__file__))
+        base = {k: v for k, v in os.environ.items() if not k.startswith('EARTHNG_')}
+        def run(extra):
+            out = subprocess.run([sys.executable, '-c', code], cwd=here, env=dict(base, **extra), capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return out.stdout.split()[-5:]
+        self.assertEqual(run({}), ['0', '1', '0', '1', '0'])
+        self.assertEqual(run({'EARTHNG_PROFILE': 'fork'}), ['1', '0', '1', '0', '1'])
+        self.assertEqual(run({'EARTHNG_PROFILE': 'fork', 'EARTHNG_SPANS': '1'}), ['1', '1', '1', '0', '1'])
 
 
 class ManifestTests(unittest.TestCase):

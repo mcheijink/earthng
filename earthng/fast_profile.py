@@ -100,8 +100,14 @@ def set_road_rules(on):
     GRADE_MAX['motorway'] = _FORK_RULES['GRADE_MOTORWAY'] if on else .05
     GRADE_PASSES = _FORK_RULES['GRADE_PASSES'] if on else 4
     CURVE_MIN = dict(_FORK_RULES['CURVE_MIN']) if on else {}
-    SIGNATURE = f'profile-rules:{"on" if RULES else "off"}:roads:{"on" if on else "off"}'
+    SIGNATURE = _signature()
     return ROAD_RULES
+
+
+def _signature():
+    """Goes into the source index's identity: every switch that changes a profile."""
+    return (f'profile-rules:{"on" if RULES else "off"}:roads:{"on" if ROAD_RULES else "off"}'
+            f'{":pcg" if PCG else ""}{"" if SPANS else ":nospans"}')
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -119,7 +125,12 @@ def set_road_rules(on):
 #    its data weight is lowered to RAMP_W so the decks' clearance and grade rules shape the ramps.
 region_profile.apply_env()      # EARTHNG_PROFILE=fork: the road rules default to on
 RULES = os.environ.get('EARTHNG_DEM_RULES', '0').strip() not in ('', '0', 'off', 'no', 'false')
-SIGNATURE = f'profile-rules:{"on" if RULES else "off"}'
+# EARTHNG_PCG=1: CG runs preconditioned by each road's chain (Chains) and warm started from the last pass, to the
+# solution; off, upstream's solver (Jacobi preconditioner, cold start) stops early at its 1e-3 tolerance.
+# EARTHNG_SPANS=0: no deck for a bridge mapped in pieces (spans(), upstream's; on by default).
+PCG = region_profile.switch('EARTHNG_PCG', False)
+SPANS = region_profile.switch('EARTHNG_SPANS', True)
+SIGNATURE = _signature()
 set_road_rules(os.environ.get('EARTHNG_ROAD_RULES', '0').strip().lower() not in ('', '0', 'off', 'no', 'false'))
 STRUCT_NEAR, STRUCT_FAR, STRUCT_W = 80., 250., .05
 FOREST_BIAS, FOREST_SIGMA, COVER_CELL = 10., 100., 20.
@@ -987,7 +998,7 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
     # deck sags into the valley. Flat overpasses still want BRIDGE_CLEAR above the ground.
     # (With the rules the abutments are the ground line's, the clearance is over the raw DEM.)
     bounds = np.r_[run, len(s)]
-    deck = spans(segments, node_index, kinds, dem) if (kinds > 0).any() else {}
+    deck = spans(segments, node_index, kinds, dem) if SPANS and (kinds > 0).any() else {}
     for k in np.flatnonzero(kinds > 0):
         sl = slice(int(bounds[k]), int(bounds[k + 1]))
         sid = ids[sl]
@@ -1159,8 +1170,9 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
             col == np.repeat(np.arange(nvar), np.diff(ptr)), data, 0.), nvar)
         return ptr, col, data, diag0
     ptr, col, data, diag0 = assemble()
-    chains = Chains(ids, run, len(s), nvar, links)
-    chains.bands(ptr, col, data)
+    chains = Chains(ids, run, len(s), nvar, links) if PCG else None
+    if PCG:
+        chains.bands(ptr, col, data)
 
     # the clearance springs act only where a deck would be too low (a lower bound): on a
     # crossing in an active set, outside the CSR matrix
@@ -1191,12 +1203,16 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
         if factive.any():
             diag = diag.copy()
             diag[fv] += FLOOR_WEIGHT * factive
-        # warm start from the last pass: a clearance or grade pass changes the answer only locally
-        x = np.zeros(nvar) if x0 is None else x0.copy()
-        r = b.copy() if x0 is None else b - matvec(x)
-        if chains.factored is None or not np.array_equal(chains.factored, diag):
-            chains.factor(diag)
-        z = chains.apply(r); p = z.copy(); rz = r @ z
+        if PCG:
+            # warm start from the last pass: a clearance or grade pass changes the answer only locally
+            x = np.zeros(nvar) if x0 is None else x0.copy()
+            r = b.copy() if x0 is None else b - matvec(x)
+            if chains.factored is None or not np.array_equal(chains.factored, diag):
+                chains.factor(diag)
+            z = chains.apply(r)
+        else:
+            x = np.zeros(nvar); r = b.copy(); z = r / diag      # upstream's solver: Jacobi, cold start
+        p = z.copy(); rz = r @ z
         norm0 = math.sqrt(b @ b) or 1.
         it = 0
         for it in range(iterations):
@@ -1207,7 +1223,7 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
             x += alpha * p; r -= alpha * ap
             if math.sqrt(r @ r) < tol * norm0:
                 break
-            z = chains.apply(r); rz2 = r @ z
+            z = chains.apply(r) if PCG else r / diag; rz2 = r @ z
             p = z + (rz2 / rz) * p; rz = rz2
         return x, it + 1, math.sqrt(r @ r) / norm0
 
@@ -1271,7 +1287,8 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
         ratio = np.abs(bend[sharp]) / limit[sharp]
         cstiff[sharp] = np.minimum(cstiff[sharp] * np.clip(3 * ratio ** 2, 2, 100), CURVE_STIFF_MAX)
         ptr, col, data, diag0 = assemble()
-        chains.bands(ptr, col, data)
+        if PCG:
+            chains.bands(ptr, col, data)
         adem = None
     h = dem + x
     if not np.isfinite(h).all():
