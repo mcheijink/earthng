@@ -255,6 +255,8 @@ TEXTURES['boards'] = _maps(f'{_T}/wood/weatherboards', 't_weatherboards', 'b', '
 KINDS['roof_sheet'] = ('sheet', [.62, .62, .60, 1], 'ROCK', 1.75, 'roof')
 for _c, _rgb in (('red', [.44, .15, .13]), ('brown', [.29, .20, .18]), ('green', [.13, .28, .21])):
     KINDS['roof_mtile_' + _c] = ('metal_tile', [*_rgb, 1], 'METAL', 1.4, 'roof')
+# anthracite concrete tiles and slate, the north German roof beside red clay: the same slate sheet
+KINDS['roof_slate_dark'] = ('metal_tile', [.20, .21, .22, 1], 'ROCK', 1.4, 'roof')
 KINDS['door_garage'] = ('rollup', [.42, .42, .41, 1], 'METAL', 3.0, 'wall')
 KINDS['door_rust'] = ('rust_door', [.30, .26, .22, 1], 'METAL', 3.0, 'wall')
 KINDS['clad_metal'] = ('cladding', [.69, .71, .74, 1], 'METAL', 3.0, 'wall')
@@ -264,11 +266,11 @@ KINDS['plinth'] = ('plinth', [.46, .45, .42, 1], 'ROCK', 3.0, 'wall')
 KINDS['gable'] = ('boards', [.58, .52, .44, 1], 'ROCK', 1.5, 'wall')
 # What the building kinds fall back to in a game without one of their maps (world.lua)
 BUILDING_FALLBACK = {'roof_sheet': 'roof_metal', 'roof_mtile_red': 'roof_tile', 'roof_mtile_brown': 'roof_tile',
-                     'roof_mtile_green': 'roof_tile', 'door_garage': 'block', 'door_rust': 'block',
+                     'roof_mtile_green': 'roof_tile', 'roof_slate_dark': 'roof_metal', 'door_garage': 'block', 'door_rust': 'block',
                      'clad_metal': 'block', 'clad_tin': 'block', 'plinth': 'concrete', 'gable': None}
 FALLBACK = {**DECAL_FALLBACK, **BUILDING_FALLBACK}
 # Pitched roofs are seen from below under their eaves (generator.lua pitchedRoof)
-ROOFS = ('roof_tile', 'roof_metal', 'roof_sheet', 'roof_mtile_red', 'roof_mtile_brown', 'roof_mtile_green')
+ROOFS = ('roof_tile', 'roof_metal', 'roof_sheet', 'roof_mtile_red', 'roof_mtile_brown', 'roof_mtile_green', 'roof_slate_dark')
 for _k in ROOFS:
     EXTRA[_k] = {'doubleSided': True}
 # Houses of one or two floors (generator.lua BLD.house): plain walls from the game's tileable set
@@ -415,6 +417,7 @@ def _factor(srgb, mean):
 # 188), a grey plinth (130 127 120), brown-grey stained boards (150 140 125).
 TINT.update({'roof_sheet': _factor((158, 158, 150), .677), 'roof_mtile_red': _factor((112, 38, 32), .355),
              'roof_mtile_brown': _factor((74, 52, 46), .355), 'roof_mtile_green': _factor((32, 72, 54), .355),
+             'roof_slate_dark': _factor((54, 56, 60), .355),
              'clad_metal': _factor((176, 182, 188), .677), 'plinth': _factor((130, 127, 120), .862),
              'ac_unit': _factor((214, 214, 208), .677), 'dish': _factor((222, 222, 218), .677),
              'gable': _factor((150, 140, 125), .641)})

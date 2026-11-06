@@ -4268,9 +4268,34 @@ BLD.colour = {red = 'roof_mtile_red', darkred = 'roof_mtile_red', maroon = 'roof
   brown = 'roof_mtile_brown', saddlebrown = 'roof_mtile_brown', green = 'roof_mtile_green',
   darkgreen = 'roof_mtile_green', grey = 'roof_sheet', gray = 'roof_sheet', lightgrey = 'roof_sheet',
   white = 'roof_sheet', silver = 'roof_metal'}
+-- dark roofs: anthracite concrete tiles and slate (fast_style roof_slate_dark), the commonest
+-- colour after red clay on north German houses
+for _, name in ipairs({'black', 'anthracite', 'darkgrey', 'darkgray', 'dimgray', 'dimgrey', 'charcoal', 'darkslategray',
+    'darkslategrey', 'slategray', 'slategrey'}) do
+  BLD.colour[name] = 'roof_slate_dark'
+end
 -- metres per texture repeat on a pitched roof (u along the ridge, v down the slope)
 BLD.repeats = {roof_tile = 2, roof_metal = 2, roof_sheet = 1.75, roof_mtile_red = 1.4,
-  roof_mtile_brown = 1.4, roof_mtile_green = 1.4, roof_slate = 3, roof_shingle = 8, roof_zinc = 1.8}
+  roof_mtile_brown = 1.4, roof_mtile_green = 1.4, roof_slate_dark = 1.4, roof_slate = 3, roof_shingle = 8, roof_zinc = 1.8}
+
+-- roof:colour as a kind: a name, or '#rrggbb' / '#rgb' read as grey (dark or light), red or brown
+function BLD.roofColour(value)
+  value = tostring(value or ''):lower():gsub('[%s_]', '')
+  if BLD.colour[value] then return BLD.colour[value] end
+  local hex = value:match('^#(%x+)$')
+  if not hex or (#hex ~= 3 and #hex ~= 6) then return nil end
+  local function channel(k)
+    if #hex == 3 then return tonumber(hex:sub(k, k), 16) * 17 end
+    return tonumber(hex:sub(2 * k - 1, 2 * k), 16)
+  end
+  local r, g, b = channel(1), channel(2), channel(3)
+  local hi, lo = math.max(r, g, b), math.min(r, g, b)
+  if hi - lo < 40 then return (r + g + b) / 3 < 110 and 'roof_slate_dark' or 'roof_sheet' end
+  if r >= g and r >= b then return g > r * .55 and 'roof_mtile_brown' or 'roof_tile' end
+  if g >= r and g >= b then return 'roof_mtile_green' end
+  return 'roof_slate_dark'
+end
+
 
 -- A region's own buildings by look.block (looks.py), for a planet whose art has them: what stands
 -- in for each family of wallMaterial, the walls of its houses and the roofs over them, as
@@ -4429,7 +4454,7 @@ function BLD.region(look)
   BLD.regions = BLD.regions or {}
   local r = BLD.regions[block]
   if not r then
-    r = {}
+    r = {block = block}
     for _, key in ipairs({'panel', 'brick', 'plaster', 'new', 'roofs', 'fences'}) do
       if spec[key] then r[key] = BLD.words(spec[key]) end
     end
@@ -4441,7 +4466,7 @@ function BLD.region(look)
 end
 
 function BLD.roof(tags, h, postsoviet, region)
-  local m, colour = tags['roof:material'], BLD.colour[tostring(tags['roof:colour'] or ''):lower()]
+  local m, colour = tags['roof:material'], BLD.roofColour(tags['roof:colour'])
   local r = region or NONE
   if m == 'metal' or m == 'tin' or m == 'metal_sheet' then
     return colour and colour:find('mtile', 1, true) and colour or 'roof_metal'
@@ -4457,12 +4482,49 @@ function BLD.roof(tags, h, postsoviet, region)
       end
     end
   end
-  if m == 'roof_tiles' or m == 'tile' or m == 'clay' then return 'roof_tile' end
+  if m == 'roof_tiles' or m == 'tile' or m == 'clay' or m == 'concrete' then
+    return colour == 'roof_slate_dark' and colour or 'roof_tile'
+  end
+  if m == 'slate' and not postsoviet then return 'roof_slate_dark' end
   if m == 'eternit' or m == 'asbestos' or (m == 'slate' and postsoviet) then return 'roof_sheet' end
   if colour then return colour end
+  -- north: a little over half red clay, a third anthracite, some brown glazed tile (the brick
+  -- belt's own mix, over the western art's but not over the Nordic art's)
+  if BLD.north and not postsoviet and r.block ~= 'nordic' then
+    local n = math.floor(h / 7) % 20
+    return n < 11 and 'roof_tile' or n < 18 and 'roof_slate_dark' or 'roof_mtile_brown'
+  end
   if r.roofs then return r.roofs[math.floor(h / 13) % #r.roofs + 1] end
   if postsoviet then return BLD.mix[math.floor(h / 13) % #BLD.mix + 1] end
   return 'roof_tile'
+end
+
+-- The brick belt of the North Sea and Baltic plain: a western or Nordic look north of 51.3
+-- degrees (the latitude of the line where red-brick villages give way to render and timber). Its
+-- houses are mostly red clinker under steep red or anthracite tiles; 3-5 floor blocks brick or
+-- render under a gabled roof. Set per tile in build(), read by the building functions.
+BLD.northBlocks = {western = true, nordic = true}
+BLD.northCountries = {germany = true, netherlands = true, denmark = true, belgium = true}
+function BLD.isNorth(look, latitude, country)
+  if type(latitude) ~= 'number' or latitude < 51.3 or latitude > 60 then return false end
+  local block = type(look) == 'table' and look.block or nil
+  if block then return BLD.northBlocks[block] or false end
+  return BLD.northCountries[tostring(country or '')] or false
+end
+-- Uses that keep a pitched roof in the north when OSM gives no roof:shape, up to 16 m tall
+BLD.pitchable = {yes = true, residential = true, apartments = true, house = true, detached = true,
+  semidetached_house = true, terrace = true, farm = true, farm_auxiliary = true, barn = true, stable = true,
+  cowshed = true, dormitory = true, shed = true}
+-- the gable of a photo facade in the plain wall of its kind: brick under brick, render under render
+BLD.gableOf = {wall_brk_red = 'hw_brick_red', wall_brk_white = 'hw_silicate', wall_pls_yellow = 'hw_yellow',
+  wall_pls_cream = 'hw_aged', wall_pls_peach = 'hw_pink', wall_pls_green = 'hw_green', wall_pls_blue = 'hw_blue',
+  wall_pls_grey = 'hw_white'}
+-- The roof guess of a building that is not a house (BLD.dress has the houses'): north only
+function BLD.guess(kind, h, tags, height)
+  if not BLD.north or tags['roof:shape'] or height > 16 or not BLD.pitchable[tags.building or 'yes'] then return nil end
+  local n = math.floor(h / 23) % 20
+  return {pitched = true, shape = n < 13 and 'gabled' or n < 16 and 'half-hipped' or 'hipped',
+    pitch = height >= 8 and 30 + h % 9 or 38 + h % 11, gable = BLD.gableOf[kind] or (kind:find('hw_', 1, true) == 1 and kind) or nil}
 end
 
 -- A fence's look: (kind, a wall's thickness and height, metres a repeat). By OSM's tags where it
@@ -4494,6 +4556,10 @@ BLD.homes = {yes = true, house = true, detached = true, semidetached_house = tru
 BLD.walls = {{10, 'hw_white'}, {17, 'hw_yellow'}, {23, 'hw_blue'}, {28, 'hw_green'}, {31, 'hw_pink'},
   {38, 'hw_aged'}, {48, 'hw_brick_red'}, {56, 'hw_oldbrick'}, {64, 'hw_flatbrick'}, {72, 'hw_stone'},
   {80, 'hw_silicate'}, {90, 'hw_siding'}, {100, 'hw_boards'}}
+-- the north's houses (BLD.north), by h % 100: brick over half, render, some silicate and boards
+BLD.wallsNorth = {{30, 'hw_brick_red'}, {45, 'hw_oldbrick'}, {55, 'hw_flatbrick'}, {72, 'hw_white'}, {80, 'hw_aged'},
+  {87, 'hw_silicate'}, {92, 'hw_yellow'}, {96, 'hw_siding'}, {100, 'hw_boards'}}
+BLD.renderNorth = {'hw_white', 'hw_white', 'hw_aged', 'hw_yellow'}
 BLD.wallColour = {white = 'hw_white', ivory = 'hw_white', cream = 'hw_aged', beige = 'hw_aged', yellow = 'hw_yellow',
   orange = 'hw_yellow', blue = 'hw_blue', lightblue = 'hw_blue', green = 'hw_green', lightgreen = 'hw_green',
   pink = 'hw_pink', red = 'hw_brick_red', brown = 'hw_brick_red', grey = 'hw_silicate', gray = 'hw_silicate'}
@@ -4538,6 +4604,13 @@ function BLD.house(tags, height, h, region)
   end
   if colour and (m == 'plaster' or m == 'stucco' or m == '') then return colour end
   local plaster = m == 'plaster' or m == 'stucco'
+  local north = BLD.north and r.block ~= 'nordic'   -- the brick belt's own mix, but not over the Nordic art
+  if north then
+    if plaster then return BLD.renderNorth[h % #BLD.renderNorth + 1] end
+    for _, w in ipairs(BLD.wallsNorth) do
+      if h % 100 < w[1] then return w[2] end
+    end
+  end
   for _, w in ipairs(r.houses or BLD.walls) do
     if h % 100 < w[1] then
       if plaster and w[1] > 38 then return 'hw_white' end   -- tagged plaster: not brick, stone or wood
@@ -4560,7 +4633,9 @@ function BLD.dress(kind, h)
     plinth = (h % 20 < 7) and 'plinth_brown' or 'plinth',
     gable = (kind == 'hw_siding' or kind == 'hw_wood' or kind == 'hw_boards' or kind == 'hw_falu' or kind:find('hw_clapboard', 1, true)
       or kind:find('hw_vinyl', 1, true) or math.floor(h / 3) % 3 ~= 0) and kind or 'gable',
-    shape = math.floor(h / 23) % 20 < 9 and 'hipped' or 'gabled', pitch = 26 + math.floor(h / 29) % 13}
+    shape = BLD.north and (math.floor(h / 23) % 20 < 12 and 'gabled' or math.floor(h / 23) % 20 < 15 and 'half-hipped' or 'hipped')
+      or (math.floor(h / 23) % 20 < 9 and 'hipped' or 'gabled'),
+    pitch = BLD.north and 38 + math.floor(h / 29) % 13 or 26 + math.floor(h / 29) % 13}
 end
 
 -- Bays along a wall. Balanced and above keep a window about every 2.9 m (at most 8).
@@ -4664,7 +4739,7 @@ local function wallMaterial(building, look, height, footprint)
   end
   local panel = region.panel or {'pnl_grey', 'pnl_beige', 'pnl_pink', 'pnl_blue', 'pnl_white'}
   local loggia = {'lgg_cream', 'lgg_grey', 'lgg_pink'}
-  local brick = region.brick or {'brk_red', 'brk_white'}
+  local brick = region.brick or (BLD.north and {'brk_red', 'brk_red', 'brk_red', 'brk_white'} or {'brk_red', 'brk_white'})
   local plaster = region.plaster or {'pls_yellow', 'pls_cream', 'pls_peach', 'pls_green', 'pls_blue', 'pls_grey'}
   local family
   -- a tower of this century, unless its tags say what it is built of
@@ -4672,6 +4747,11 @@ local function wallMaterial(building, look, height, footprint)
   elseif material == 'brick' then family = brick
   elseif material == 'panel' or material == 'concrete' or material == 'reinforced_concrete' then family = height >= 26 and h % 3 ~= 0 and loggia or panel
   elseif material == 'plaster' or material == 'stucco' then family = plaster
+  elseif BLD.north and height < 26 and look.buildings ~= 'panel' and look.buildings ~= 'plaster' then
+    -- the north: brick for most low blocks, render for the rest, a few panels among the taller
+    local n = h % 10
+    if height < 14 then family = n < 7 and brick or plaster
+    else family = n < 5 and brick or n < 8 and plaster or panel end
   elseif height < 8 then family = h % 5 < 3 and plaster or brick   -- a house is not a panel block
   elseif look.buildings == 'panel' and not region.byHeight then family = height >= 26 and (h % 3 ~= 0 and loggia or panel) or panel
   elseif look.buildings == 'brick' then family = brick
@@ -4778,11 +4858,14 @@ function BLD.chimney(scene, ring, top, dress, h, tags)
   local frame = footprintFrame(cleanRing(ring))
   local length, width = frame.u1 - frame.u0, frame.v1 - frame.v0
   if width < 3 or length < 4 then return end
-  local pitch = dress.pitch or 32
+  -- the roof as drawn: OSM's shape first, the house's guess else; a lean-to has no ridge for one
+  local shape = BLD.shapes[tags['roof:shape'] or ''] or dress.shape
+  if shape == 'skillion' then return end
+  local pitch = (tags['roof:shape'] and BLD.steep[tags['roof:shape']]) or dress.pitch or 32
   local rise = math.max(.5, math.min(10, number(tags['roof:height'], math.min(6, width / 2 * math.tan(math.rad(pitch))))))
   local inset = 0
-  local shape = dress.shape
-  if shape == 'hipped' or shape == 'half-hipped' or shape == 'pyramidal' then inset = math.min(width / 2, length / 2) end
+  if shape == 'hipped' or shape == 'pyramidal' then inset = math.min(width / 2, length / 2) end
+  if shape == 'half-hipped' then inset = (1 - BLD.halfHip) * width / 2 end
   if shape == 'pyramidal' then inset = length / 2 end
   local r0, r1 = frame.u0 + inset, frame.u1 - inset
   if r1 - r0 < .9 then return end
@@ -6177,6 +6260,55 @@ function BLD.gableWin(scene, frame, top, rise, dress)
 end
 
 -- guess: a house's dress (BLD.dress) for its roof shape, pitch and gables where OSM has none
+-- OSM roof:shape as drawn: a gambrel as a steep gable, a mansard as a steep hip, a saltbox as a
+-- gable; round, dome, onion and flat stay flat
+BLD.shapes = {gabled = 'gabled', hipped = 'hipped', pyramidal = 'pyramidal', ['half-hipped'] = 'half-hipped',
+  skillion = 'skillion', gambrel = 'gabled', saltbox = 'gabled', mansard = 'hipped', ['side_hipped'] = 'hipped'}
+BLD.steep = {gambrel = 52, mansard = 58}
+-- Half-hipped (Krüppelwalm): the gable runs up this share of the rise, a small hip takes the rest
+BLD.halfHip = .6
+-- a wall face turned to show towards (ox, oy): single-sided wall kinds show the side the
+-- collector's winding faces ((b - a) x (c - a))
+function BLD.facing(poly, ox, oy)
+  local a, b, c = poly[1], poly[2], poly[3]
+  local nx = (b[2] - a[2]) * (c[3] - a[3]) - (b[3] - a[3]) * (c[2] - a[2])
+  local ny = (b[3] - a[3]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[3] - a[3])
+  if nx * ox + ny * oy >= 0 then return poly end
+  local out = {}
+  for k = #poly, 1, -1 do out[#out + 1] = poly[k] end
+  return out
+end
+function BLD.halfHipped(scene, frame, top, base, rise, eave, material, gable)
+  local half = (frame.v1 - frame.v0) / 2
+  local mid, slope = (frame.v0 + frame.v1) / 2, rise / math.max(EPS, half)
+  local q = (1 - BLD.halfHip) * half        -- the hip's half width at its foot and its depth (45 degrees in plan)
+  local zk, ridge, low = top + BLD.halfHip * rise, top + rise, top - eave * slope
+  local u0, u1 = frame.u0 - eave, frame.u1 + eave
+  local scale, stretch = BLD.repeats[material] or 2, math.sqrt(1 + slope * slope)
+  local function P(u, v, z, uu, vv) return {u * frame.ax + v * frame.bx, u * frame.ay + v * frame.by, z, uu, vv} end
+  -- roof UVs: u along the ridge, v down the slope from the ridge
+  local function R(u, v, z) return P(u, v, z, (u - u0) / scale, math.abs(v - mid) * stretch / scale) end
+  for _, side in ipairs({-1, 1}) do
+    local ve, vk = mid + side * (half + eave), mid + side * q
+    scene.polygon(material, {R(u0, ve, low), R(u1, ve, low), R(u1, vk, zk), R(u1 - q, mid, ridge), R(u0 + q, mid, ridge),
+      R(u0, vk, zk)}, true)
+  end
+  -- the hips: u across the end, v down from the ridge's end
+  for _, e in ipairs({{u1, u1 - q}, {u0, u0 + q}}) do
+    scene.polygon(material, {P(e[1], mid - q, zk, 0, q * stretch / scale), P(e[1], mid + q, zk, 2 * q / scale, q * stretch / scale),
+      P(e[2], mid, ridge, q / scale, 0)}, true)
+  end
+  -- the gables under the hips, in the wall planes: up the slopes to the hip's underside
+  local gq, gz = math.max(0, q - eave), zk + math.min(q, eave) * slope
+  local gs = facadeScale(gable)
+  for _, u in ipairs({frame.u1, frame.u0}) do
+    local face = {P(u, frame.v0, top, 0, (top - base) / gs), P(u, frame.v1, top, 2 * half / gs, (top - base) / gs),
+      P(u, mid + gq, gz, (half + gq) / gs, (gz - base) / gs), P(u, mid - gq, gz, (half - gq) / gs, (gz - base) / gs)}
+    local sign = u == frame.u0 and -1 or 1
+    scene.polygon(gable, BLD.facing(face, frame.ax * sign, frame.ay * sign), false)
+  end
+  return true
+end
 -- Domes and onions: a surface of revolution over the ring's middle, `rise` tall by roof:height or
 -- by the radius (BLD.domes: rise per radius, and the profile's radius at each step up).
 BLD.domes = {dome = {rise = 1, profile = {1, .97, .87, .71, .5, .26, 0}},
@@ -6273,19 +6405,23 @@ local function pitchedRoof(scene, rings, tags, top, base, kind, height, material
   local frame = footprintFrame(ring)
   local length, width = frame.u1 - frame.u0, frame.v1 - frame.v0
   local explicit, house = tags['roof:shape'], tags.building == 'house' or tags.building == 'detached' or tags.building == 'bungalow'
-  if explicit and explicit ~= 'gabled' and explicit ~= 'hipped' and explicit ~= 'pyramidal' and explicit ~= 'half-hipped' then return false end
-  if not explicit and not (house or (height < 8 and frame.area < 260)) then return false end
+  local drawn = explicit and BLD.shapes[explicit]
+  if explicit and not drawn then return false end
+  if not explicit and not (house or (height < 8 and frame.area < 260) or (guess and guess.pitched)) then return false end
   if width < 3 or length < 3 or frame.area / math.max(EPS, length * width) < .82 then return false end
   if not explicit and width > 18 then return false end
   guess = guess or NONE
-  local shape = explicit or guess.shape
-  local pitch = guess.pitch or (house and 35 or 28)
-  local rise = math.max(.5, math.min(10, number(tags['roof:height'], math.min(6, width / 2 * math.tan(math.rad(pitch))))))
+  local shape = drawn or guess.shape
+  local pitch = (explicit and BLD.steep[explicit]) or guess.pitch or (house and 35 or 28)
   material = material or 'roof_tile'
+  local gable = guess.gable or (kind:find('wall_', 1, true) == 1 and 'gable' or kind)
+  if shape == 'skillion' then return false end   -- one plane over the walls (BLD.skillion), drawn with the flat roof
+  local rise = math.max(.5, math.min(10, number(tags['roof:height'], math.min(6, width / 2 * math.tan(math.rad(pitch))))))
   -- Eaves: the roof runs on past the walls (a box under a lid read as a toy, bld-hatne-01) and
   -- drops by the pitch; the material is double sided, so the overhang shows from below.
   local slope = rise / math.max(EPS, width / 2)
   local eave = width < 5 and .25 or .5
+  if shape == 'half-hipped' then return BLD.halfHipped(scene, frame, top, base, rise, eave, material, gable) end
   local mid = (frame.v0 + frame.v1) / 2
   local u0, u1, v0, v1 = frame.u0 - eave, frame.u1 + eave, frame.v0 - eave, frame.v1 + eave
   local low = top - eave * slope
@@ -6318,7 +6454,6 @@ local function pitchedRoof(scene, rings, tags, top, base, kind, height, material
     c, d = point(frame.u1, frame.v1, top, 0, 0), point(frame.u0, frame.v1, top, 0, 0)
     r0, r1 = point(frame.u0, mid, top + rise, 0, 0), point(frame.u1, mid, top + rise, 0, 0)
     -- a facade's gables are boards: its windows ran on into the gable askew (bld-hatne-03)
-    local gable = guess.gable or (kind:find('wall_', 1, true) == 1 and 'gable' or kind)
     local scale = facadeScale(gable)
     for _, face in ipairs({{b, c, r1}, {d, a, r0}}) do
       face[1] = {face[1][1], face[1][2], top, 0, (top - base) / scale}
@@ -7431,6 +7566,111 @@ local function segmentSegment2(ax, ay, bx, by, cx, cy, dx, dy)
   if (d1 > 0) ~= (d2 > 0) and (d3 > 0) ~= (d4 > 0) and d1 ~= 0 and d2 ~= 0 and d3 ~= 0 and d4 ~= 0 then return 0 end
   return math.min(pointSegment2(ax, ay, cx, cy, dx, dy), pointSegment2(bx, by, cx, cy, dx, dy),
     pointSegment2(cx, cy, ax, ay, bx, by), pointSegment2(dx, dy, ax, ay, bx, by))
+end
+-- Passages: a road whose centreline runs through a building's footprint at the building's foot (an
+-- arch, OSM tunnel=building_passage, a block over a street) keeps its lanes free. The walls stand
+-- on the ground beside the carriageway and start at the road plus its clearance over it. A road
+-- that only grazes a wall (OSM widths and building outlines overlap by a metre in town) is not
+-- one; nor a deck high over a low building. BLD.roads = {bins, ground, lift} is set per tile.
+BLD.clear = 4.5         -- m over the road: the German standard clearance where OSM has no maxheight
+BLD.liftedClear = 2.5   -- m: the least room under a building whose min_height OSM gives
+function BLD.roadsThrough(rings, base)
+  local ctx, ring = BLD.roads, rings[1]
+  if not ctx or not ring or #ring < 3 then return nil end
+  local box = ringBounds({ring})
+  local seen, out = {}, nil
+  for by = math.floor(box[2] / 50), math.floor(box[4] / 50) do
+    for bx = math.floor(box[1] / 50), math.floor(box[3] / 50) do
+      for _, s in ipairs(ctx.bins[(bx + 32768) * 65536 + by + 32768] or NONE) do
+        local a, b = s.a, s.b
+        if not seen[s] and not ROADS.tunnel(s.tags or NONE) and math.max(a[1], b[1]) >= box[1] and math.min(a[1], b[1]) <= box[3]
+            and math.max(a[2], b[2]) >= box[2] and math.min(a[2], b[2]) <= box[4] then
+          seen[s] = true
+          local through = inside(rings, a[1], a[2]) or inside(rings, b[1], b[2])
+          for k = 1, #ring - 1 do
+            if through then break end
+            local p, q = ring[k], ring[k + 1]
+            through = segmentSegment2(a[1], a[2], b[1], b[2], p[1], p[2], q[1], q[2]) == 0
+          end
+          local za = a[3] or ctx.ground(a[1], a[2])
+          local zb = b[3] or ctx.ground(b[1], b[2])
+          if through and (math.min(za, zb) <= base + 3 or (s.tags or NONE).tunnel == 'building_passage') then
+            out = out or {}
+            out[#out + 1] = {s = s, za = za + ctx.lift, zb = zb + ctx.lift,
+              clear = number((s.tags or NONE).maxheight, BLD.clear - .2) + .2}
+          end
+        end
+      end
+    end
+  end
+  return out
+end
+-- The stretches {s0, s1, bottom} of wall a -> b over a carriageway of BLD.through (within its half
+-- width and .3 m), worked out exactly per straight road segment, or nil.
+function BLD.gapsOf(through, a, b, length, bottom, lifted)
+  if not through or length < .1 then return nil end
+  local wx, wy = (b[1] - a[1]) / length, (b[2] - a[2]) / length
+  local gaps
+  for _, c in ipairs(through) do
+    local s = c.s
+    local L = math.sqrt(s.len2)
+    local ux, uy = s.dx / L, s.dy / L
+    local w = s.width / 2 + .3
+    -- across the road d(t) = d0 + d1 t and along it e(t) = e0 + e1 t, t metres along the wall
+    local d0, d1 = (a[1] - s.a[1]) * -uy + (a[2] - s.a[2]) * ux, wx * -uy + wy * ux
+    local e0, e1 = (a[1] - s.a[1]) * ux + (a[2] - s.a[2]) * uy, wx * ux + wy * uy
+    local t0, t1 = 0, length
+    for _, lim in ipairs({{d0, d1, -w, w}, {e0, e1, -w, L + w}}) do
+      local v0, v1, lo, hi = lim[1], lim[2], lim[3], lim[4]
+      if math.abs(v1) < 1e-9 then
+        if v0 < lo or v0 > hi then t0, t1 = 1, 0 end
+      else
+        local ta, tb = (lo - v0) / v1, (hi - v0) / v1
+        t0, t1 = math.max(t0, math.min(ta, tb)), math.min(t1, math.max(ta, tb))
+      end
+    end
+    if t1 - t0 > .05 then
+      -- the road's height where the stretch meets it, the higher end
+      local f0 = math.max(0, math.min(1, (e0 + e1 * t0) / L))
+      local f1 = math.max(0, math.min(1, (e0 + e1 * t1) / L))
+      local z = math.max(c.za + (c.zb - c.za) * f0, c.za + (c.zb - c.za) * f1)
+      gaps = gaps or {}
+      gaps[#gaps + 1] = {t0, t1, math.max(bottom, z + (lifted and BLD.liftedClear or c.clear))}
+    end
+  end
+  if not gaps then return nil end
+  table.sort(gaps, function(p, q) return p[1] < q[1] end)
+  -- overlapping stretches (one road's consecutive segments) join, the higher bottom wins
+  local out = {gaps[1]}
+  for k = 2, #gaps do
+    local g, last = gaps[k], out[#out]
+    if g[1] <= last[2] then last[2], last[3] = math.max(last[2], g[2]), math.max(last[3], g[3])
+    else out[#out + 1] = g end
+  end
+  return out
+end
+-- A wall with passages: plinth and wall beside the road, the wall alone over it from the gap's
+-- bottom (none where that is within .3 m of the eaves). UVs run on as on a whole wall.
+function BLD.wallPieces(scene, kind, plinthKind, a, b, length, along, bottom, seam, top, base, scale, gaps)
+  local function piece(s0, s1, z0, z1, material, sc)
+    if s1 - s0 < .05 or z1 - z0 < .05 then return end
+    local f0, f1 = s0 / length, s1 / length
+    local x0, y0 = a[1] + (b[1] - a[1]) * f0, a[2] + (b[2] - a[2]) * f0
+    local x1, y1 = a[1] + (b[1] - a[1]) * f1, a[2] + (b[2] - a[2]) * f1
+    scene.polygon(material, {{x0, y0, z0, (along + s0) / sc, (z0 - base) / sc}, {x1, y1, z0, (along + s1) / sc, (z0 - base) / sc},
+      {x1, y1, z1, (along + s1) / sc, (z1 - base) / sc}, {x0, y0, z1, (along + s0) / sc, (z1 - base) / sc}}, false)
+  end
+  local s = 0
+  for _, g in ipairs(gaps) do
+    if g[1] > s then
+      piece(s, g[1], bottom, seam, plinthKind, 3)
+      piece(s, g[1], seam, top, kind, scale)
+    end
+    if g[3] < top - .3 then piece(math.max(s, g[1]), g[2], g[3], top, kind, scale) end
+    s = math.max(s, g[2])
+  end
+  piece(s, length, bottom, seam, plinthKind, 3)
+  piece(s, length, seam, top, kind, scale)
 end
 -- Whether the capsule a-b (half length hl, midpoint mx, my) comes nearer than m to the segment
 -- c-d: the midpoint first, the exact test only within reach of it
@@ -12810,6 +13050,8 @@ local function build(cells, i, j, options)
     end
   end
   mark('areas')
+  -- the carriageways for passages, and the regional look of walls and roofs (BLD.north)
+  BLD.roads, BLD.north = {bins = segmentBins, ground = ground, lift = lift}, BLD.isNorth(look, options.latitude, options.country)
   -- Shops and fuel stations (BLD.SHOP): the mapped points by bin, the buildings their sites
   -- hold, the roofs over pumps, the pylons
   local shops = {points = {}, own = {}, info = {}, roofs = {}, venue = {}, stands = {}}
@@ -12839,6 +13081,7 @@ local function build(cells, i, j, options)
       local lifted = (building.minHeight or number(tags.min_height, 0)) > 0
       local bottom = lifted and base + (building.minHeight or number(tags.min_height, 0)) or low - .3
       local top, kind = base + height, BLD.wallMaterial(building, look, height, footprint)
+      BLD.through = BLD.roadsThrough(rings, base)
       -- building=roof stands open on columns (BLD.shopCanopy); a canopy over pumps clears a
       -- lorry unless OSM gives its height
       local open = BLD.withShops and tags.building == 'roof' and not options.far
@@ -12922,45 +13165,53 @@ local function build(cells, i, j, options)
           local door = doors and ((use == 'garages' and length >= 8) or (use == 'garage' and length <= 4.5))
           local scale = BLD.facadeScale(wallKind)
           local seam = plinth and math.min(top, math.max(bottom, base + BLD.plinth)) or bottom
-          if seam > bottom then
-            scene.polygon(plinthKind, {{a[1], a[2], bottom, along / 3, (bottom - base) / 3},
-              {b[1], b[2], bottom, (along + length) / 3, (bottom - base) / 3},
-              {b[1], b[2], seam, (along + length) / 3, (seam - base) / 3},
-              {a[1], a[2], seam, along / 3, (seam - base) / 3}}, false)
-          end
-          -- a storefront splits the wall's lower band along the wall: shop spans, the wall
-          -- between them, one wall above (the same UV as unsplit)
-          local spans = shopWalls and raw == rings[1] and length > EPS and shopWalls[BLD.wallKey(a, b)]
-          local upper = spans and base + shopBand > seam and base + shopBand or seam
-          if upper > seam then
-            -- the shop texture's street level is v = 0 and its design 4.2 m high: below the datum
-            -- it stretches a little, under a lower band it is squeezed to fit
-            local function piece(material, s0, s1, sc, shop)
-              local p0 = {a[1] + (b[1] - a[1]) * s0 / length, a[2] + (b[2] - a[2]) * s0 / length}
-              local p1 = {a[1] + (b[1] - a[1]) * s1 / length, a[2] + (b[2] - a[2]) * s1 / length}
-              local squeeze = shop and BLD.STORE.band / shopBand or 1
-              local v0 = shop and math.max(0, seam - base) * squeeze / sc or (seam - base) / sc
-              local v1 = (upper - base) * squeeze / sc
-              scene.polygon(material, {{p0[1], p0[2], seam, (along + s0) / sc, v0},
-                {p1[1], p1[2], seam, (along + s1) / sc, v0},
-                {p1[1], p1[2], upper, (along + s1) / sc, v1},
-                {p0[1], p0[2], upper, (along + s0) / sc, v1}}, false)
+          -- a wall over a road's lanes starts at its clearance (BLD.gapsOf); doors, socle,
+          -- storefronts and openings stay off such a wall
+          BLD.gaps = BLD.gapsOf(BLD.through, a, b, length, bottom, lifted)
+          local spans, upper
+          if BLD.gaps then
+            BLD.wallPieces(scene, wallKind, plinthKind, a, b, length, along, bottom, seam, top, base, scale, BLD.gaps)
+          else
+            if seam > bottom then
+              scene.polygon(plinthKind, {{a[1], a[2], bottom, along / 3, (bottom - base) / 3},
+                {b[1], b[2], bottom, (along + length) / 3, (bottom - base) / 3},
+                {b[1], b[2], seam, (along + length) / 3, (seam - base) / 3},
+                {a[1], a[2], seam, along / 3, (seam - base) / 3}}, false)
             end
-            local at = 0
-            for _, span in ipairs(spans) do
-              if span[1] > at then piece(wallKind, at, span[1], scale) end
-              piece(span[3], span[1], span[2], 6, true)
-              if detailed then BLD.storeFront(scene, a, b, length, span, upper, top, base, segmentBins) end
-              at = span[2]
+            -- a storefront splits the wall's lower band along the wall: shop spans, the wall
+            -- between them, one wall above (the same UV as unsplit)
+            spans = shopWalls and raw == rings[1] and length > EPS and shopWalls[BLD.wallKey(a, b)]
+            upper = spans and base + shopBand > seam and base + shopBand or seam
+            if upper > seam then
+              -- the shop texture's street level is v = 0 and its design 4.2 m high: below the datum
+              -- it stretches a little, under a lower band it is squeezed to fit
+              local function piece(material, s0, s1, sc, shop)
+                local p0 = {a[1] + (b[1] - a[1]) * s0 / length, a[2] + (b[2] - a[2]) * s0 / length}
+                local p1 = {a[1] + (b[1] - a[1]) * s1 / length, a[2] + (b[2] - a[2]) * s1 / length}
+                local squeeze = shop and BLD.STORE.band / shopBand or 1
+                local v0 = shop and math.max(0, seam - base) * squeeze / sc or (seam - base) / sc
+                local v1 = (upper - base) * squeeze / sc
+                scene.polygon(material, {{p0[1], p0[2], seam, (along + s0) / sc, v0},
+                  {p1[1], p1[2], seam, (along + s1) / sc, v0},
+                  {p1[1], p1[2], upper, (along + s1) / sc, v1},
+                  {p0[1], p0[2], upper, (along + s0) / sc, v1}}, false)
+              end
+              local at = 0
+              for _, span in ipairs(spans) do
+                if span[1] > at then piece(wallKind, at, span[1], scale) end
+                piece(span[3], span[1], span[2], 6, true)
+                if detailed then BLD.storeFront(scene, a, b, length, span, upper, top, base, segmentBins) end
+                at = span[2]
+              end
+              if at < length then piece(wallKind, at, length, scale) end
             end
-            if at < length then piece(wallKind, at, length, scale) end
+            scene.polygon(wallKind, {{a[1], a[2], upper, along / scale, (upper - base) / scale},
+              {b[1], b[2], upper, (along + length) / scale, (upper - base) / scale},
+              {b[1], b[2], top, (along + length) / scale, height / scale},
+              {a[1], a[2], top, along / scale, height / scale}}, false)
           end
-          scene.polygon(wallKind, {{a[1], a[2], upper, along / scale, (upper - base) / scale},
-            {b[1], b[2], upper, (along + length) / scale, (upper - base) / scale},
-            {b[1], b[2], top, (along + length) / scale, height / scale},
-            {a[1], a[2], top, along / scale, height / scale}}, false)
           if BLD.plane then BLD.skillionWall(scene, wallKind, a, b, top, along, length, base, scale) end
-          if door and length > EPS then
+          if door and length > EPS and not BLD.gaps then
             -- one door a bay, 2 cm out from the cement: a row of doors between piers, not one
             -- shutter along the whole row (bld-garages-03)
             local d = BLD.door
@@ -12978,19 +13229,19 @@ local function build(cells, i, j, options)
                 {a[1] + dx * s0 + ox, a[2] + dy * s0 + oy, z1, 0, 1}}, false)
             end
           end
-          if detailed and raw == rings[1] then
+          if detailed and raw == rings[1] and not BLD.gaps then
             acRoom = acRoom - BLD.acUnits(scene, a, b, length, along, base, height, wallKind, h, spans, acRoom)
             BLD.windowExtras(scene, a, b, length, along, base, height, wallKind, h, spans)
             BLD.balconies(scene, a, b, length, along, base, height, wallKind, h, spans)
           end
           if dress and dress.mass and length > .4 then BLD.cornice(scene, a, b, length, top) end
-          if BLD.city and raw == rings[1] and length > 6 and not plinth then BLD.socle(scene, a, b, length, bottom, base) end
+          if BLD.city and raw == rings[1] and length > 6 and not plinth and not BLD.gaps then BLD.socle(scene, a, b, length, bottom, base) end
           if BLD.city and raw == rings[1] and length >= 6 then
             BLD.probe = BLD.wallPoint(a, b, length, length * .5, 8, 0, 0, 0)
             BLD.onroad = BLD.street(segmentBins, BLD.probe[1], BLD.probe[2], 18)
             BLD.faces[#BLD.faces + 1] = {a, b, len = length, z = base, road = BLD.onroad and true or false}
           end
-          if doorWall > 0 then
+          if doorWall > 0 and not BLD.gaps then
             local isDoor = length * length >= doorWall - 1e-6
             BLD.openings(scene, a, b, length, base, height, dress, isDoor, options.detail)
             if dress.mass and isDoor then BLD.porch(scene, a, b, length, base, dress, options.detail) end
@@ -13005,7 +13256,7 @@ local function build(cells, i, j, options)
       if BLD.withShops and options.experimentalDetail and not options.far and not lifted then
         BLD.addressPlate(scene, rings, tags, base, height, lists.roads)
       end
-      if options.far or open or not BLD.pitchedRoof(scene, rings, tags, top, base, kind, height, BLD.roof(tags, h, postsoviet, BLD.region(look)), dress) then
+      if options.far or open or not BLD.pitchedRoof(scene, rings, tags, top, base, kind, height, BLD.roof(tags, h, postsoviet, BLD.region(look)), dress or BLD.guess(kind, h, tags, height)) then
         for _, tri in ipairs(triangulate(rings, pause, rect)) do
           for _, p in ipairs(tri) do p[3] = BLD.plane and BLD.plane(p[1], p[2]) or top end
           scene.polygon('roof', tri, true)
@@ -13024,6 +13275,7 @@ local function build(cells, i, j, options)
     end
     pause()
   end
+  BLD.roads, BLD.through, BLD.gaps = nil, nil, nil
   mark('buildings')
   -- A fence or wall as a thin box that follows the drawn ground: a knot every fenceStep metres
   -- (one quad per OSM segment, its ends alone on the ground, sank metres into a hump between
