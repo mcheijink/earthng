@@ -20,7 +20,7 @@ import shapely
 from shapely.geometry import LineString, MultiPoint, Point, shape
 from shapely.ops import transform
 
-VERSION = 'fast-18'         # source index cache; 14: full clearance and abutments; 15: widths, shoulders, rails, raceways; 16: both, clearance matches a 1.5 m deck; 17: deck and road share the clearance (no runaway hills); 18: only crossing centre lines are overpasses
+VERSION = 'fast-20'         # source index cache; 14: full clearance and abutments; 15: widths, shoulders, rails, raceways; 16: both, clearance matches a 1.5 m deck; 17: deck and road share the clearance (no runaway hills); 18: only crossing centre lines are overpasses; 19: profile by class (fast_profile), plan-view curves (fast_curves, its SIGNATURE in the identity); 20: decks over navigable water (fast_roads.bridge_floors), pack v3 roads behind EARTHNG_PACK=3, the index-stage code in the identity (INDEX_CODE)
 GEOMETRY = 'fast-33'         # mesh/material semantics; bump to reject tiles built by older code
 TILE = 500.0
 ROAD_LIFT = 0.12            # road surface over its profile (the ground mesh sits 0.25 under the DEM)
@@ -56,7 +56,9 @@ DRIVEWAY = 3.0                                        # service=driveway / alley
 # Paved shoulder (m) outside the edge line, (left, right) of the direction, where a way has no
 # width tag. The generator's ROADS.shoulder holds the same rule and paints the edge lines
 # inside it.
-SHOULDER = {'motorway': (.75, 2.5), 'trunk': (1., 1.), 'primary': (.5, .5), 'secondary': (.25, .25)}
+# motorway: 0.25 m on the median side, 3.3 m on the right (ALKIS against a motorway aerial: the paved edge lies
+# 3.05-3.45 m past the right edge line and 0-0.35 m past the left one)
+SHOULDER = {'motorway': (.25, 3.3), 'trunk': (1., 1.), 'primary': (.5, .5), 'secondary': (.25, .25)}
 SHOULDER_ONEWAY = {'trunk': (.5, 1.5), 'primary': (.25, .75)}
 SHOULDER_LINK = (.25, 1.)                             # motorway and trunk ramps
 
@@ -233,10 +235,43 @@ SCENES = 9
 PARSE_WORKERS = min(6, os.cpu_count() or 2)     # tile parsers of one index (fewer when regions run side by side)
 
 
+# The modules whose code decides what an index holds. Their source goes into the index identity, so any
+# change to them builds a new index: after a fast_profile.py change the builder kept reusing
+# out/world/fast-index/fast-18-... with the old profiles (README-generator-fixes.md, section 10).
+INDEX_CODE = ('fast_sources', 'fast_profile', 'fast_curves', 'fast_roads', 'fast_junctions')
+OFFICIAL_CODE = 'official'       # only in the identity while EARTHNG_OFFICIAL is on: indexes without it keep their identity
+
+
+def code_identity():
+    """sha256 of the index-stage modules (line endings normalised) and their switches"""
+    import importlib.util
+    import fast_curves
+    import fast_profile
+    import fast_roads
+    h = hashlib.sha256()
+    for name in INDEX_CODE:
+        spec = importlib.util.find_spec(name)
+        origin = Path(spec.origin) if spec is not None and spec.origin else None
+        code = origin.read_bytes().replace(b'\r\n', b'\n') if origin is not None and origin.is_file() else VERSION.encode()
+        h.update(name.encode() + b'\0' + code + b'\0')
+    h.update(fast_curves.SIGNATURE.encode() + b'\0' + fast_roads.SIGNATURE.encode())
+    if fast_profile.RULES:              # the DEM rules switch (EARTHNG_DEM_RULES); off keeps today's identities
+        h.update(b'\0' + fast_profile.SIGNATURE.encode())
+    import dtm
+    if dtm.ENABLED:                     # the national DTM switch (EARTHNG_DTM, implies the rules) and its code
+        spec = importlib.util.find_spec('dtm')
+        h.update(b'\0' + dtm.SIGNATURE.encode() + b'\0' + Path(spec.origin).read_bytes().replace(b'\r\n', b'\n'))
+    import official
+    if official.ENABLED:                # the official road data (ALKIS / ATKIS widths, DGM1 medians): code and data files
+        spec = importlib.util.find_spec(OFFICIAL_CODE)
+        h.update(b'\0' + official.identity().encode() + b'\0' + Path(spec.origin).read_bytes().replace(b'\r\n', b'\n'))
+    return h.hexdigest()
+
+
 def source_identity(source, dem, point=None, box=None):
-    """Index checksum (of the window's tiles) plus the DEM files under it (name, size, mtime):
-    old geometry cannot survive source replacement. Contents were hashed before: 200 MB of
-    PNG per landing for the oblast."""
+    """Index checksum (of the window's tiles) plus the DEM files under it (name, size, mtime) plus
+    the index-stage code (code_identity): old geometry cannot survive source replacement or an
+    exporter change. Contents were hashed before: 200 MB of PNG per landing for the oblast."""
     source, dem = Path(source), Path(dem)
     index = json.loads((source / 'index.json').read_bytes())
     index, window = window_box(index, box) if box is not None else window_of(index, point)
@@ -246,7 +281,7 @@ def source_identity(source, dem, point=None, box=None):
         w, s, e, n = index['package_box']
         index = dict(index, centre=[round((w + e) / 2, 6), round((s + n) / 2, 6)])
     index = dict(index, frame=Frame.at(*index['centre']).spec())
-    h = hashlib.sha256(VERSION.encode() + json.dumps(index, sort_keys=True).encode())
+    h = hashlib.sha256(VERSION.encode() + code_identity().encode() + json.dumps(index, sort_keys=True).encode())
     for x, y in dem_tiles(index['package_box']):
         # the z12 tile and its z13 children (a local DEM burnt finer, est_dem)
         for zoom, a, b in [(12, x, y)] + [(13, 2 * x + i, 2 * y + j) for i in (0, 1) for j in (0, 1)]:
@@ -254,6 +289,9 @@ def source_identity(source, dem, point=None, box=None):
             if p.exists():
                 st = p.stat()
                 h.update(f'{zoom}/{a}/{b}:{st.st_size}:{st.st_mtime_ns}'.encode())
+    import dtm
+    if dtm.ENABLED:                     # the national DTM tiles under the window (name, size, mtime)
+        h.update(b'dtm:' + dtm.Dtm.identity(index['package_box']).encode())
     return VERSION + '-' + h.hexdigest()[:16], index
 
 
@@ -564,18 +602,25 @@ def _prepare(source, output, dem, emit=print, point=None, cancelled=None, box=No
 
     files = [Path(source) / entry['file'] for entry in index['tiles'].values()]
     shas = [entry['sha256'] for entry in index['tiles'].values()]
+    import fast_roads
+    import official
     if len(files) > 24:
         # tiles parse in parallel; merged in tile order, first copy of a way wins (as before)
         from concurrent.futures import ProcessPoolExecutor
         with ProcessPoolExecutor(PARSE_WORKERS) as pool:
             parts = list(pool.map(read_roads, files, shas, chunksize=4))
+            # waterways, clearance marks and barriers (fast_roads): bridges over water, pack v3 furniture
+            extra_parts = list(pool.map(fast_roads.read_extras, files, shas, chunksize=4))
     else:
         parts = [read_roads(f, h) for f, h in zip(files, shas)]
+        extra_parts = [fast_roads.read_extras(f, h) for f, h in zip(files, shas)]
     roads = {}
     for part in parts:
         for wid, road in part.items():
             roads.setdefault(wid, road)
     del parts
+    extras = fast_roads.localise(fast_roads.merge_extras(extra_parts), frame)
+    del extra_parts
     emit(f'roads parsed in {time.perf_counter()-started:.1f}s')
     check()
     refs = Counter(n[0] for _, nodes in roads.values() for n in nodes)
@@ -584,7 +629,22 @@ def _prepare(source, output, dem, emit=print, point=None, cancelled=None, box=No
     lon = [n[1] for w in order for n in roads[w][1]]; lat = [n[2] for w in order for n in roads[w][1]]
     X, Y = frame.local(lon, lat)            # one transform for every node (was one per way)
     X, Y = X.tolist(), Y.tolist(); del lon, lat
+    # plan-view curves (fast_curves): arcs and transitions for the main classes; shared nodes stay
+    import fast_curves
+    curved = {}
+    if fast_curves.ENABLED:
+        at = 0
+        chosen = {}
+        for wid, count in zip(order, lens):
+            tags, nodes = roads[wid]
+            if tags.get('highway') in fast_curves.CLASSES:
+                chosen[wid] = (tags, [(n[0], x, y) for n, x, y in zip(nodes, X[at:at + count], Y[at:at + count])])
+            at += count
+        curved = fast_curves.fit(chosen, refs)
+        del chosen
+        emit(f'curves: {len(curved)} ways in {time.perf_counter()-started:.1f}s')
     segments, arcs, mouths = [], [], defaultdict(list)
+    drafts = []                      # one per stretch between shared nodes: the official width (official.py) cuts these
     at = 0
     hypot = math.hypot
     for wid, count in zip(order, lens):
@@ -592,10 +652,15 @@ def _prepare(source, output, dem, emit=print, point=None, cancelled=None, box=No
         xy = list(zip(X[at:at + count], Y[at:at + count])); at += count
         cuts = [0] + [k for k in range(1,len(nodes)-1) if refs[nodes[k][0]] > 1] + [len(nodes)-1]
         width = None
-        for a, b in zip(cuts, cuts[1:]):
-            # points closer than 1 cm to the previous raw point dropped; arc length after that
-            pts = [xy[a]] + [xy[k] for k in range(a + 1, b + 1)
-                             if hypot(xy[k][0] - xy[k-1][0], xy[k][1] - xy[k-1][1]) > 0.01]
+        fitted = curved.get(wid)
+        for ordinal, (a, b) in enumerate(zip(cuts, cuts[1:])):
+            if fitted is not None:
+                # the curve between the two shared nodes (both exactly on it)
+                pts = fitted[0][fitted[1][a]:fitted[1][b] + 1]
+            else:
+                # points closer than 1 cm to the previous raw point dropped; arc length after that
+                pts = [xy[a]] + [xy[k] for k in range(a + 1, b + 1)
+                                 if hypot(xy[k][0] - xy[k-1][0], xy[k][1] - xy[k-1][1]) > 0.01]
             if len(pts)<2:
                 continue
             cum = [0.]
@@ -605,35 +670,128 @@ def _prepare(source, output, dem, emit=print, point=None, cancelled=None, box=No
                 continue
             if width is None:
                 width = road_width(tags)
-            # millimetres are enough (seams <= 1 cm) and keep the JSON a third the size
-            seg = {'id': len(segments)+1, 'way': wid, 'tags': tags, 'xy': [[round(q[0], 3), round(q[1], 3)] for q in pts],
-                   'nodes': [nodes[a][0],nodes[b][0]], 'width': width}
-            segments.append(seg); arcs.append((np.array(pts), np.array(cum)))
-            mouths[seg['nodes'][0]].append((seg['id'],0,list(pts[0]),None,width,cum[-1]))
-            mouths[seg['nodes'][1]].append((seg['id'],1,list(pts[-1]),None,width,cum[-1]))
+            drafts.append({'way': wid, 'ord': ordinal, 'tags': tags, 'pts': pts, 'nodes': (nodes[a][0], nodes[b][0]), 'width': width})
     del roads, refs
+    islands, official_meta = [], None
+    if official.ENABLED and drafts:
+        # the real pavement width (ALKIS) and the medians (DGM1), official.py: cut the drafts into pieces of equal section
+        import dtm as _dtm
+        region_dtm = _dtm.Dtm.region(frame, index['package_box']) if _dtm.ENABLED else None
+        drafts, islands, ostats = official.refine(drafts, frame, fast_roads.travel, shoulder, oneway,
+                                                  height=region_dtm.point if region_dtm is not None else None, emit=emit)
+        official_meta = {'version': official.VERSION, 'stats': ostats, 'credits': official.credits(),
+                         'medians': region_dtm is not None}
+    for draft in drafts:
+        pts, width = draft['pts'], draft['width']
+        pts = [(float(q[0]), float(q[1])) for q in pts]
+        cum = [0.]
+        for k in range(1, len(pts)):
+            cum.append(cum[-1] + hypot(pts[k][0] - pts[k-1][0], pts[k][1] - pts[k-1][1]))
+        if cum[-1] < .1:
+            continue
+        # millimetres are enough (seams <= 1 cm) and keep the JSON a third the size
+        seg = {'id': len(segments)+1, 'way': draft['way'], 'tags': draft['tags'], 'xy': [[round(q[0], 3), round(q[1], 3)] for q in pts],
+               'nodes': list(draft['nodes']), 'width': width}
+        if draft.get('edges') is not None:       # the official pavement's extents left / right of the OSM line (node order), lane width
+            seg['edges'] = list(draft['edges'])
+            if draft.get('lane') is not None:
+                seg['lane'] = draft['lane']
+        segments.append(seg); arcs.append((np.array(pts), np.array(cum)))
+        mouths[seg['nodes'][0]].append((seg['id'],0,list(pts[0]),None,width,cum[-1]))
+        mouths[seg['nodes'][1]].append((seg['id'],1,list(pts[-1]),None,width,cum[-1]))
+    del drafts
     # one height solve for the whole graph: shared nodes, smooth grades, soft bridges/tunnels
     import fast_profile
     zoom = dem_zoom(dem, index['package_box'])
     terrain = Terrain(dem, frame, zoom)
     # a wilderness region (Everest's Tibetan side) has no road at all: nothing to solve
+    floor_report = []
+    import dtm
+    reference, dtm_meta = None, None
+    cover = None
     if segments:
         mosaic = fast_profile.Mosaic(terrain, np.concatenate([np.asarray(seg['xy']) for seg in segments]))
-        profiles, node_h = fast_profile.solve(segments, lambda q: mosaic.sample(q, missing=True), emit=emit)
+        sample = lambda q: mosaic.sample(q, missing=True)
+        floor_sample = sample
+        cover = None
+        rules = fast_profile.RULES or dtm.ENABLED
+        if rules:
+            # DEM rules: forest and non-road structures from the same source tiles (fast_profile.read_cover)
+            cover = fast_profile.cover_of([fast_profile.read_cover(f, h) for f, h in zip(files, shas)], frame)
+            # one forest share for the whole region: the profile solve's forest bias, and the export's ground
+            # grid from the same field (forest.npz, region.json 'ground'), so roads and ground agree
+            rects = np.asarray([v['coverage'] for v in index['tiles'].values()], float).reshape(-1, 4)  # lon/lat
+            corners = np.concatenate([np.column_stack(frame.local(rects[:, a], rects[:, b])) for a in (0, 2) for b in (1, 3)])
+            seg_xy = np.concatenate([np.asarray(seg['xy']) for seg in segments])
+            lo = np.minimum(corners.min(0), seg_xy.min(0)) if len(rects) else seg_xy.min(0)
+            hi = np.maximum(corners.max(0), seg_xy.max(0)) if len(rects) else seg_xy.max(0)
+            cover.grid = cover.share_grid((lo[0] - 200., lo[1] - 200., hi[0] + 200., hi[1] + 200.))
+        if dtm.ENABLED:
+            # a national 1 m DTM under the window (dtm.py): the coarse DEM takes its datum near it (calibrated
+            # on open land: in forest it reads the canopy), the floors' water levels and the profile's data
+            # term take the DTM where it covers
+            reference = dtm.Dtm.region(frame, index['package_box'])
+            if reference is not None:
+                coarse = sample
+                offset, n_cal = reference.calibrate(coarse, keep=lambda q: cover.forest_share(q) < dtm.OPEN_LAND)
+                sample = lambda q: reference.corrected(coarse(q), q)
+                floor_sample = lambda q: reference.blend(coarse(q), q)
+                dtm_meta = reference.meta(index['package_box'], calibration=n_cal)
+                emit(f'dtm: {", ".join(f"{p.id} {e["tiles"]} tiles" for (p, _), e in zip(reference.sets, dtm_meta["providers"]))}, '
+                     f'datum offset {offset:+.2f} m from {n_cal} points')
+            else:
+                emit('dtm: no national DTM tiles under this window: the coarse DEM with the rules')
+        # decks over navigable water: water level + clearance + structure as a lower bound (ROAD-OBJECTS.md 4.7)
+        floors, floor_report = fast_roads.bridge_floors(segments, extras, floor_sample, emit=emit)
+        profiles, node_h = fast_profile.solve(segments, sample, emit=emit, floors=floors, cover=cover,
+                                              rules=rules, reference=reference)
         for seg, (ps, ph) in zip(segments, profiles):
             seg['prof'] = [np.round(ps, 2).tolist(), np.round(ph, 3).tolist()]
+        if reference is not None and reference.surfaces:
+            n_deck, med, p95 = reference.deck_check(segments, profiles)
+            dtm_meta['deckCheck'] = {'stations': n_deck, 'median': round(med, 2) if n_deck else None,
+                                     'p95': round(p95, 2) if n_deck else None}
+            if n_deck:
+                emit(f'dtm: decks against the surface model: {n_deck} smooth deck stations, median {med:+.2f} m, '
+                     f'p95 |spread| {p95:.2f} m (a check only)')
         del mosaic, profiles
     else:
         node_h = {}
     emit(f'profile ready: {time.perf_counter()-started:.1f}s')
     check()
+    roads3 = None
+    if fast_roads.ENABLED and segments:
+        # pack v3 road geometry for the whole graph at once (strokes, fitted lines, sections, lanes, furniture)
+        roads3 = fast_roads.build(segments, extras, floor_report, cell_size=1000., emit=emit)
+        emit(f'roads v3 ready: {time.perf_counter()-started:.1f}s')
+        check()
     tmp = target / f'sources.{os.getpid()}.tmp'
     tmp.unlink(missing_ok=True)         # left by an earlier run of this process
     write_index(segments, arcs, mouths, node_h, tmp, emit)
+    if roads3 is not None:
+        fast_roads.write_rows(tmp, roads3[0], roads3[1], roads3[3])
+    rules = Counter(r['rule'] for r in floor_report)
     meta = {'id':identity,'generator':VERSION,'bbox':index['package_box'],'center':index['centre'],'frame':index['frame'],
             'dem':str(Path(dem).resolve()), 'demZoom':zoom, 'source':str(Path(source).resolve()),
             'coverage':[v['coverage'] for v in index['tiles'].values()],
-            'seconds':time.perf_counter()-started,'roads':len(segments),'scenery':'lazy from raw OSM'}
+            'seconds':time.perf_counter()-started,'roads':len(segments),'scenery':'lazy from raw OSM',
+            'bridgeFloors': dict(rules), 'roadsFormat': fast_roads.FORMAT if roads3 is not None else None}
+    if roads3 is not None:
+        meta['roadsStats'] = {k: v for k, v in roads3[2].items() if k != 'seconds'}
+    if dtm_meta is not None:
+        meta['dtm'] = dtm_meta          # the export's ground grid follows the profiles (build_country, dtm.Ground)
+    if official_meta is not None:
+        meta['official'] = official_meta
+        (target / 'official-ways.json').write_text(json.dumps(official.REPORT, separators=(',', ':')), encoding='utf8')
+        if islands:
+            # the medians the DGM1 showed: synthetic scenery islands (Store.scenery), rings in the frame
+            (target / 'official-islands.json').write_text(json.dumps([[[round(float(x), 3), round(float(y), 3)] for x, y in ring]
+                                                                    for ring in islands], separators=(',', ':')), encoding='utf8')
+    if cover is not None and cover.grid is not None:
+        # the DEM rules' forest bias for the export's ground grid (build_country._forest_lower)
+        cover.grid.save(target / 'forest.npz')
+        meta['ground'] = {'version': 1, 'forest': 'forest.npz', 'bias': fast_profile.FOREST_BIAS,
+                          'sigma': fast_profile.FOREST_SIGMA, 'cell': fast_profile.COVER_CELL}
     (target/'region.json').write_text(json.dumps(meta),encoding='utf8')
     os.replace(tmp,final)
     emit(f'index ready: {meta["seconds"]:.1f}s, {len(segments)} segments')
@@ -652,6 +810,19 @@ class Store:
         self.heights = OrderedDict()
         self.scenes = OrderedDict()
         self.source_index = json.loads((Path(self.meta['source'])/'index.json').read_text())
+        self.islands = None             # the official medians (official.py), loaded on first use
+
+    def official_islands(self, rect):
+        """Synthetic scenery islands (kind 'island') of the DGM1 medians under rect: (id, 'island', {'tags'}, polygon)"""
+        if self.islands is None:
+            import official
+            path = self.directory/'official-islands.json'
+            rings = json.loads(path.read_text(encoding='utf8')) if path.is_file() else []
+            self.islands = [(official.ISLAND_ID - k, 'island', {'tags': dict(official.ISLAND_TAGS)}, shapely.Polygon(r))
+                            for k, r in enumerate(rings)]
+        x0, y0, x1, y1 = rect
+        return [rec for rec in self.islands if rec[3].bounds[2] >= x0 and rec[3].bounds[0] <= x1
+                and rec[3].bounds[3] >= y0 and rec[3].bounds[1] <= y1]
 
     def query(self, rect, kinds=None):
         x0,y0,x1,y1=rect
@@ -678,6 +849,12 @@ class Store:
         return self.coverage.covers(box(*self.frame.geo_bbox(rect)))
 
     def scenery(self, rect):
+        records = self._scenery(rect)
+        if self.meta.get('official', {}).get('medians'):
+            records = records + self.official_islands(rect)
+        return records
+
+    def _scenery(self, rect):
         """Load only the raw OSM block needed now, including multipolygon holes.
 
         This work is timed in scene jobs, never hidden in a prebuilt city asset.
@@ -702,7 +879,7 @@ class Store:
                         try:
                             geometry=factory.create_multipolygon(a)
                         except RuntimeError:
-                            return      # broken OSM ring (e.g. area 29961653): skip that area alone
+                            return      # broken OSM ring (e.g. one area): skip that area alone
                         found[a.id]=(kind,dict(a.tags),shape(json.loads(geometry)))
                 def node(self,n):
                     # bus stops and traffic signals where OSM has them (way nodes keep their tags

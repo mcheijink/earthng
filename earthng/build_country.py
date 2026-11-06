@@ -28,6 +28,9 @@ import numpy as np
 import shapely
 
 import country_format as binary
+import dtm
+import fast_roads
+import fast_junctions
 import fast_sources as sources
 import looks
 import nature
@@ -174,6 +177,39 @@ class Despiked:
         return np.where(np.abs(centre - median) > self.SPIKE, median, centre).ravel()
 
 
+class Lowered(Despiked):
+    """A despiked DEM less a correction at each point (the DEM rules' forest bias, _forest_lower): the ground
+    grid of an index solved with the rules but without a DTM."""
+
+    def __init__(self, despiked, lower):
+        super().__init__(despiked.terrain)
+        self.lower = lower
+
+    def sample(self, xy):
+        xy = np.asarray(xy, dtype=float).reshape(-1, 2)
+        if not len(xy):
+            return np.array([])
+        return super().sample(xy) - self.lower(xy)
+
+    def grid(self, xs, ys):
+        gx, gy = np.meshgrid(xs, ys)
+        return super().grid(xs, ys) - self.lower(np.column_stack([gx.ravel(), gy.ravel()]))
+
+
+def _forest_lower(store):
+    """lower(xy): the DEM rules' forest bias (bias x the index's forest share, forest.npz) when the index was
+    solved with the rules (region.json 'ground'), else None. The ground grid then takes the same corrected
+    coarse DEM as the road profiles (ALTITUDE-REFERENCE.md "Road against ground")."""
+    spec = (getattr(store, 'meta', None) or {}).get('ground')
+    directory = getattr(store, 'directory', None)
+    if not spec or not spec.get('forest') or directory is None:
+        return None
+    import fast_profile
+    grid = fast_profile.ShareGrid.load(Path(directory) / spec['forest'])
+    bias = float(spec.get('bias', fast_profile.FOREST_BIAS))
+    return lambda xy: bias * grid.at(xy)
+
+
 def _scenery(store, rect, depth=0):
     """Scenery under rect. A padded cell at a package's ragged edge (coast, border) may lie in
     no single OSM tile; its quarters are read from whichever tiles hold them, and a quarter
@@ -262,7 +298,11 @@ def compile_cell(store, rect, include=None):
     step = grid_step(store)
     xs = np.arange(rect[0], rect[2]+step, step, dtype=float)
     ys = np.arange(rect[1], rect[3]+step, step, dtype=float)
-    if isinstance(store.terrain, Despiked):
+    if isinstance(store.terrain, dtm.Ground):
+        # a national DTM under the index's profiles: its block means where it covers, the coarse DEM (pulled
+        # to the roads, as the generator does on a 25 m grid) elsewhere, blended at the coverage edge
+        heights = store.terrain.cell_grid(xs, ys, cell['roads'])
+    elif isinstance(store.terrain, Despiked):
         heights = store.terrain.grid(xs, ys)
     else:
         heights = np.asarray(store.terrain.sample(np.array([(x, y) for y in ys for x in xs])), dtype=float)
@@ -274,7 +314,9 @@ def compile_cell(store, rect, include=None):
 
 
 def grid_step(store):
-    """GRID, or GRID_FINE when the store reads a finer local DEM."""
+    """GRID, or GRID_FINE when the store reads a finer local DEM (est_dem's z13 or a national DTM)."""
+    if isinstance(store.terrain, dtm.Ground):
+        return GRID_FINE
     terrain = getattr(store.terrain, 'terrain', store.terrain)
     zoom = getattr(terrain, 'zoom', 12)
     return GRID_FINE if isinstance(zoom, int) and zoom > 12 else GRID
@@ -288,7 +330,11 @@ def _coastlines(store, box):
     if not tiles or not hasattr(store, 'meta'):
         return [geometry for _fid, kind, _data, geometry in _scenery(store, box) if kind == 'coastline']
     import osmium
+    # Every tile of an island holds the island's whole coastline, and a worker visits hundreds of
+    # tiles: each way is kept once, as an array (16 bytes a vertex, not ~110 in a list of tuples),
+    # and a tile only remembers which ways it holds.
     cache = store.__dict__.setdefault('_coast_tiles', {})
+    shore = store.__dict__.setdefault('_coast_ways', {})
     w, s, e, n = store.frame.geo_bbox(box)
     ways = {}
     for key, entry in tiles.items():
@@ -296,16 +342,19 @@ def _coastlines(store, box):
         if ce < w or cw > e or cn < s or cs > n:
             continue
         if key not in cache:
-            found = {}
+            held = []
             for obj in osmium.FileProcessor(str(Path(store.meta['source']) / entry['file'])).with_locations()                     .with_filter(osmium.filter.EntityFilter(osmium.osm.WAY)).with_filter(osmium.filter.TagFilter(('natural', 'coastline'))):
                 try:
                     coords = [(nd.lon, nd.lat) for nd in obj.nodes]
                 except osmium.InvalidLocationError:
                     continue
                 if len(coords) >= 2:
-                    found[obj.id] = coords
-            cache[key] = found
-        ways.update(cache[key])
+                    held.append(obj.id)
+                    if obj.id not in shore:
+                        shore[obj.id] = np.array(coords, dtype=float)
+            cache[key] = held
+        for way in cache[key]:
+            ways[way] = shore[way]
     if not ways:
         return []
     lines = [shapely.LineString(ways[k]) for k in sorted(ways)]
@@ -449,8 +498,19 @@ def _credits_text(title, credits):
     return ('\n'.join(lines) + '\n').encode('utf-8')
 
 
-def compile_block(store, cells, include=None):
-    """Encoded payloads {slot: bytes} and road counts {slot: n} of the given (i, j) cells."""
+def _roads3(store):
+    """True when this export writes the pack v3 road section (EARTHNG_PACK >= 3 and the index has it)"""
+    if not fast_roads.ENABLED:
+        return False
+    flag = getattr(store, '_roads3', None)
+    if flag is None:
+        flag = store._roads3 = fast_roads.has_rows(store.db)
+    return flag
+
+
+def compile_block(store, cells, include=None, roads3=None):
+    """Encoded payloads {slot: bytes} and road counts {slot: n} of the given (i, j) cells; with roads3 (a
+    dict) also each cell's pack v3 road payload (fast_roads.encode_cell) by slot."""
     payloads, roads = {}, {}
     for i, j in cells:
         rect = [i*CELL, j*CELL, (i+1)*CELL, (j+1)*CELL]
@@ -463,26 +523,54 @@ def compile_block(store, cells, include=None):
         slot = binary.slot(i, j)
         payloads[slot] = binary.encode_cell(cell, rect[:2])
         roads[slot] = len(cell['roads'])
+        if roads3 is not None:
+            chunks, nodes = fast_roads.read_cell(store.db, i, j)
+            if chunks or nodes:
+                roads3[slot] = fast_roads.encode_cell(chunks, nodes, rect[:2])
+            # phase 3: the junction surfaces (fast_junctions), their own block files
+            junctions = fast_roads.read_junctions(store.db, i, j)
+            if junctions:
+                roads3.setdefault('junctions', {})[slot] = fast_junctions.encode_cell(junctions, rect[:2])
     return payloads, roads
 
 
 def _finish_block(store, cells, include):
     """A block ready for the zip: deflated bytes and the presence mask, or None when every
-    cell lacked elevation. Deflate runs here so each worker compresses its own blocks."""
-    payloads, counts = compile_block(store, cells, include)
+    cell lacked elevation. Deflate runs here so each worker compresses its own blocks. The third
+    value is the block's pack v3 road file the same way (None without it)."""
+    roads3 = {} if _roads3(store) else None
+    payloads, counts = compile_block(store, cells, include, roads3)
     if not payloads:
-        return None, counts
+        return None, counts, None
     data, mask = binary.encode_block(payloads)
     crc, size, blob = _deflate(data)
-    return (crc, size, blob, mask), counts
+    packed3 = None
+    if roads3:
+        junctions = roads3.pop('junctions', None)
+        packedJ = None
+        if junctions:
+            dataJ, maskJ = fast_junctions.encode_block(junctions)
+            packedJ = (*_deflate(dataJ), maskJ)
+        if roads3:
+            data3, mask3 = fast_roads.encode_block(roads3)
+            packed3 = (*_deflate(data3), mask3, packedJ)
+    return (crc, size, blob, mask), counts, packed3
 
 
 _WORKER = {}
 
 
 def _despike(store):
-    if not isinstance(store.terrain, Despiked):
+    if not isinstance(store.terrain, (Despiked, dtm.Ground)):
         store.terrain = Despiked(store.terrain)
+        spec = getattr(store, 'meta', {}).get('dtm')
+        lower = _forest_lower(store)
+        if spec:
+            # the index's profiles came from a national DTM (EARTHNG_DTM at index time): so does the ground
+            store.terrain = dtm.Ground(store.terrain, dtm.Dtm.from_meta(spec, store.frame), lower)
+        elif lower is not None:
+            # the index's profiles came from the DEM rules: the ground takes their forest bias
+            store.terrain = Lowered(store.terrain, lower)
     return store
 
 
@@ -655,7 +743,8 @@ def _region_end(archive, ctx, emit, cover_meta=None, vegetation=None, look=None,
         else:
             results = ((key, _finish_block(store, cells, ctx['include'])) for key, cells in ctx['tasks'])
         manifest_blocks, present, roads, done = {}, set(), {}, 0
-        for (bi, bj), (packed, counts) in results:
+        road_blocks, junction_blocks = {}, {}
+        for (bi, bj), (packed, counts, packed3) in results:
             done += len(blocks[(bi, bj)])
             if _stopped(cancel):
                 raise InterruptedError('build stopped')
@@ -667,6 +756,22 @@ def _region_end(archive, ctx, emit, cover_meta=None, vegetation=None, look=None,
             if record is not None:
                 record.append((path, crc, size, blob))
             manifest_blocks[f'{bi}_{bj}'] = {'path': '/' + path, 'mask': mask}
+            if packed3:
+                # pack v3 road section (fast_roads, ROAD-OBJECTS.md section 7): the same blocks, its own files
+                crc3, size3, blob3, mask3, packedJ = packed3
+                path3 = f'{base}/roads/{bi}_{bj}.bin'
+                _write_deflated(archive, path3, crc3, size3, blob3)
+                if record is not None:
+                    record.append((path3, crc3, size3, blob3))
+                road_blocks[f'{bi}_{bj}'] = {'path': '/' + path3, 'mask': mask3}
+                if packedJ:
+                    # phase 3 junction surfaces: own files, a reader without them ignores roads.junctions
+                    crcJ, sizeJ, blobJ, maskJ = packedJ
+                    pathJ = f'{base}/junctions/{bi}_{bj}.bin'
+                    _write_deflated(archive, pathJ, crcJ, sizeJ, blobJ)
+                    if record is not None:
+                        record.append((pathJ, crcJ, sizeJ, blobJ))
+                    junction_blocks[f'{bi}_{bj}'] = {'path': '/' + pathJ, 'mask': maskJ}
             for slot, n in counts.items():
                 cell = (bi*binary.BLOCK + slot % binary.BLOCK, bj*binary.BLOCK + slot // binary.BLOCK)
                 present.add(cell)
@@ -705,6 +810,13 @@ def _region_end(archive, ctx, emit, cover_meta=None, vegetation=None, look=None,
         if landing is not None:
             manifest['landing'] = landing
         manifest['natureVersion'] = nature.VERSION
+        if road_blocks:
+            # additive: a v2 reader ignores it; sourceFormat stays earthng-features-v2
+            manifest['roads'] = {'format': fast_roads.FORMAT, 'version': fast_roads.VERSION, 'chunk': fast_roads.CHUNK,
+                                 'cellSize': CELL, 'blockCells': binary.BLOCK, 'blocks': road_blocks}
+            if junction_blocks:
+                manifest['roads']['junctions'] = {'format': fast_junctions.FORMAT, 'version': fast_junctions.VERSION,
+                                                  'blocks': junction_blocks}
         if vegetation:
             manifest['nature'] = vegetation
         if cover_meta:
@@ -713,11 +825,25 @@ def _region_end(archive, ctx, emit, cover_meta=None, vegetation=None, look=None,
             manifest['look'] = look
         if include:
             manifest['include'] = include
+        heights = store.terrain.dtm.credits() if isinstance(store.terrain, dtm.Ground) else []
+        if heights:
+            manifest['heightSources'] = [c['credit'] for c in heights]
+        pipeline = _height_pipeline(store)
+        if pipeline:
+            # the generator keeps these profiles as exported and fits the ground to them by cross-section
+            # (generator.lua ROADS.section); without it, its runtime height passes and generic pull as before
+            manifest['heights'] = pipeline
         path = f'{base}/manifest.json'
         _write_json(archive, path, manifest)
         if record is not None:
             record.append((path, manifest))
-        return {'id': region_id, 'manifest': '/' + path, 'coverage': coverage, **provenance}
+        result = {'id': region_id, 'manifest': '/' + path, 'coverage': coverage, **provenance}
+        official = (getattr(store, 'meta', None) or {}).get('official')
+        if official:
+            heights = [*heights, *official.get('credits', ())]      # ALKIS / ATKIS widths and DGM1 medians (official.py)
+        if heights:
+            result['credits'] = heights         # build_country adds them to the pack's credits
+        return result
     finally:
         if getattr(store, 'landcover', None) is not None:
             store.landcover.close()
@@ -725,7 +851,19 @@ def _region_end(archive, ctx, emit, cover_meta=None, vegetation=None, look=None,
 
 
 # What a finished region of an export depends on besides its source index: the exporter's own code.
-_PART_CODE = ('build_country', 'country_format', 'fast_sources', 'fast_style', 'nature', 'looks', 'landcover')
+_PART_CODE = ('build_country', 'country_format', 'fast_sources', 'fast_roads', 'fast_junctions', 'fast_style', 'nature', 'looks', 'landcover', 'dtm',
+              'fast_profile')
+HEIGHTS_FORMAT = 'earthng-heights-1'
+
+
+def _height_pipeline(store):
+    """The region manifest's 'heights' when the index's road profiles and ground come from the new pipeline (a
+    national DTM, or the DEM rules with their forest share): {format, dtm, rules}; None for older indexes."""
+    meta = getattr(store, 'meta', None) or {}
+    has_dtm, rules = bool(meta.get('dtm')), bool(meta.get('ground'))
+    if not (has_dtm or rules):
+        return None
+    return {'format': HEIGHTS_FORMAT, 'dtm': has_dtm, 'rules': rules or has_dtm}
 
 
 def _part_key(region, *settings):
@@ -739,7 +877,7 @@ def _part_key(region, *settings):
         if spec is not None and spec.origin:
             digest.update(Path(spec.origin).read_bytes())
     directory, core, region_id = _region_spec(region)
-    digest.update(json.dumps([directory.name, core, region_id, FORMAT, nature.VERSION, *settings],
+    digest.update(json.dumps([directory.name, core, region_id, FORMAT, nature.VERSION, fast_roads.SIGNATURE, *settings],
                              sort_keys=True, default=str).encode())
     label = re.sub(r'[^A-Za-z0-9-]+', '-', region_id or directory.name)
     return f'{label}-{digest.hexdigest()[:16]}.part'
@@ -900,6 +1038,12 @@ def build_country(country_id, title, version, regions, out, bbox=None, emit=prin
                     executor.shutdown(wait=True, cancel_futures=True)
             if not entries:
                 raise ValueError('no region has landable cells')
+            # the national DTMs the regions' heights came from (dtm.py): credited like the optional sources
+            region_credits = []
+            for entry in entries:
+                for c in entry.pop('credits', ()):
+                    if c not in region_credits and c not in (credits or ()):
+                        region_credits.append(c)
             provenance = {'source': 'OpenStreetMap contributors', 'license': 'ODbL-1.0'}
             snapshots = {entry['sourceId']: {key: entry[key] for key in ('sourceId', 'sourceDate') if key in entry}
                          for entry in entries}
@@ -920,7 +1064,7 @@ def build_country(country_id, title, version, regions, out, bbox=None, emit=prin
                 manifest['look'] = look
             if include:
                 manifest['include'] = include
-            manifest['credits'] = [*CREDITS, *(credits or ())]
+            manifest['credits'] = [*CREDITS, *(credits or ()), *region_credits]
             if section is None:
                 folder = f'earthng/countries/{country_id}'
                 _write_json(archive, f'{folder}/manifest.json', manifest)
