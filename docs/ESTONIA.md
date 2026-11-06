@@ -1,15 +1,18 @@
 # Estonia
 
-Estonia support is maintained by [Mitz Racing](https://github.com/mitzracing), who added
-the Estonian LiDAR terrain, the road register import and county sections, and keeps
-fixing Estonian roads, bridges and junctions found in game. Bug reports and help from
-other Estonian players are welcome.
+[Mitz Racing](https://github.com/mitzracing) contributes to EarthNG's Estonia support: the
+Estonian LiDAR terrain, the road register import and county sections, and fixes for the
+roads, bridges and junctions found in game. The project is Alex's (Alezx311) and his
+releases carry it; we help develop it, with LiDAR. Bug reports and help from other
+Estonian players are welcome.
 
 ## What the Estonia pack adds over a plain OSM build
 
 - **LiDAR terrain** (`--local-dem`): the Land Board's (Maa- ja Ruumiamet) 10 m bare-earth
   DTM replaces the SRTM-based Terrarium heights, which stand 3–10 m too high under forest
-  and towns. 578 sheets cover the country (about 1.8 GB cache in `out/world/cache/est`).
+  and towns. 578 sheets cover the country (about 1.8 GB cache in `out/world/cache/est`),
+  fetched from the Land Board's coverage service (WCS, `teenus.maaamet.ee/ows/wcs-dtm`):
+  the geoportal itself blocks scripted downloads from some countries.
   The sheets are burnt into z13 tiles and the region carries a 10 m elevation grid, so
   ditches, embankments and small rises survive; the ground is pulled to the roads only
   within 15 m of their edge.
@@ -22,7 +25,7 @@ other Estonian players are welcome.
 ## Build
 
 ```powershell
-# the whole country (about 1 h on a desktop, ~330 MB)
+# the whole country at 10 m (about 1 h on a desktop, ~530 MB, under 1 GB of RAM)
 .venv\Scripts\python.exe earthng/country_fetch.py build --place estonia --mods "<BeamNG user folder>" --local-dem
 # one county, after a fix there (10–15 min)
 .venv\Scripts\python.exe earthng/country_fetch.py sections --place estonia

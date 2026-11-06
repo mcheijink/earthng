@@ -230,12 +230,19 @@ def keep_scenery(kind, include):
         return bool(include.get('barriers', True))
     if kind == 'tree_row':
         return bool(include.get('treeRows', True))
+    if kind in ('fuel', 'grocery', 'fast_food', 'post', 'service', 'fuel_site', 'grocery_site', 'fast_food_site', 'post_site',
+                'service_site', 'venue'):
+        return bool(include.get('buildings', True))
     if kind == 'stop':
         return bool(include.get('stops', True))
+    if kind in ('poi', 'bench', 'waste_basket', 'gate', 'lift_gate'):
+        return bool(include.get('pois', True))
+    if kind == 'power':
+        return bool(include.get('barriers', True))
     if kind in ('power_line', 'power_tower', 'wind_turbine'):
         return bool(include.get('power', True))
     # road details (fast_style.ROAD_DETAILS) belong to the road
-    if kind in ('path', 'signal', 'speed_camera', 'road', 'junction', 'crossing', 'give_way', 'stop_sign',
+    if kind in ('path', 'signal', 'speed_camera', 'traffic_sign', 'road', 'junction', 'crossing', 'give_way', 'stop_sign',
                 'mini_roundabout', 'turning_circle', 'island', 'gantry'):
         return True
     return bool(include.get('cover', True))

@@ -22,6 +22,11 @@ local detail = require('ge/extensions/e2r/detail')
 local collision = require('ge/extensions/e2r/collision')
 local parking = require('ge/extensions/e2r/parking')
 M.fifo = require('ge/extensions/e2r/fifo') -- keep below LuaJIT's 200 chunk locals
+M.brandStyles = NATIVE and require('ge/extensions/e2r/generator').BRANDS or {}
+-- the route to a point picked on the map (docs/NAVIGATION.md); on M for the same reason
+M.navigator = NATIVE and require('ge/extensions/e2r/navigator') or nil
+if M.navigator then M.navigator.source = native end
+M.gc = require('ge/extensions/e2r/gc')   -- the collector's step while in the level (gc.lua)
 local detailStream
 -- the UI language: the package's LANG until the player switches it (settings/earthng.json)
 local LANG_FILE = 'settings/earthng.json'
@@ -157,6 +162,18 @@ function M.sweptRoads(on, mode)
   return {on = sw.on, mode = sw.mode}
 end
 
+-- Fork additions that change what an existing pack draws, all off (generator.lua ROADS.extras): static
+-- traffic signals and speed cameras (signals), bay lines and bus stop paint (lots), the runtime vertical
+-- alignment of roads (roadProfiles). Set them before the landing. Console:
+--   extensions.e2r_world.extras({signals = true, lots = true, roadProfiles = true})
+function M.extras(set)
+  local x = require('ge/extensions/e2r/generator').EXTRAS
+  for name, on in pairs(type(set) == 'table' and set or {}) do
+    if x[name] ~= nil then x[name] = on == true end
+  end
+  return {signals = x.signals, lots = x.lots, roadProfiles = x.roadProfiles}
+end
+
 -- Packs whose road and ground heights come from the exporter's new pipeline (a national DTM or the DEM
 -- rules; the region manifest's heights or heightSources) keep the exported road profiles and get the
 -- cross-section ground (generator.lua ROADS.section). Set it before the landing. Console:
@@ -278,6 +295,7 @@ end
 local function land()
   if not S.marker then return end
   if NATIVE and not native.at(S.marker.lat, S.marker.lon) then return end
+  if M.navigator then M.navigator.clear() end   -- the old route is in the old region's frame
   S.landSeq = request({type = 'land', lat = S.marker.lat, lon = S.marker.lon})
   S.landAt = S.now
   S.landTimer = hptimer()
@@ -1122,6 +1140,8 @@ local function startScene(key, tile)
   loadNewMaterials(manifest.materials, manifest.stockMaterials)
   tile.sceneStarted = true
   tile.parking = manifest.parking
+  -- Small POI records survive release of the scene's mesh tables and leave with the tile.
+  tile.brandPOIs = manifest.brandPOIs
   tile.sceneGroup = tileGroup('E2RS_' .. key)
   tile.sceneLeft = queueItems(manifest.items, tile, key, 'scene')
   tile.sceneComplete = tile.sceneLeft == 0
@@ -2836,6 +2856,36 @@ local function drawMap(width, height, view, pick)
       end
     end
   end
+  -- Mark only loaded scenes, so the map and the generated world use the same OSM facts.
+  -- Bound both the draw count and crowding in dense streets; no per-frame world scan.
+  if NATIVE and S.stream and z >= 15 then
+    local occupied, count = {}, 0
+    for _, tile in pairs(S.tiles) do
+      for _, poi in ipairs(tile.brandPOIs or {}) do
+        local lat, lon = worldToGeo(poi.x, poi.y)
+        if lat and lat <= north and lat >= south and lon >= west and lon <= east and count < 80 then
+          local x, y = screen(lat, lon)
+          local key = math.floor(x / 20) .. ':' .. math.floor(y / 20)
+          if not occupied[key] then
+            occupied[key], count = true, count + 1
+            local brand = M.brandStyles[poi.brand]
+            local rgb = poi.rgb or (brand and brand[3])
+            local c = rgb and col(rgb[1] / 255, rgb[2] / 255, rgb[3] / 255)
+              or (poi.kind == 'fuel' and col(0.10, 0.43, 0.70) or col(0.16, 0.55, 0.27))
+            im.ImDrawList_AddCircleFilled(dl, im.ImVec2(x, y), 7, col(1, 1, 1))
+            im.ImDrawList_AddCircleFilled(dl, im.ImVec2(x, y), 5.5, c)
+            if z >= 17 and (poi.brand or poi.label) then
+              im.ImDrawList_AddText1(dl, im.ImVec2(x + 8, y - 7), col(0.12, 0.12, 0.12), poi.label or (brand and brand[2] or poi.brand))
+            end
+          end
+        end
+      end
+    end
+  end
+  -- the route and its flag, over the streets and under the labels
+  if M.navigator and S.state == 'driving' then
+    M.navigator.draw(im, dl, z, r0.x - x0, r0.y - y0, merc, col, north, west, south, east)
+  end
   -- the controls' corners and the pins keep the labels off
   if NATIVE then
     planetMap.beginLabels()
@@ -2983,6 +3033,8 @@ local function drawMap(width, height, view, pick)
         if pinHit then flyToPack(pinHit, width, height)
         elseif placeHit then setMarker(placeHit.lat, placeHit.lon)
         else setMarker(unmerc(x0 + px, y0 + py, z)) end
+      elseif view.onClick and view.dragMoved < 4 and hovered then
+        view.onClick(unmerc(x0 + px, y0 + py, z))
       end
       view.dragging = false
     end
@@ -3272,6 +3324,15 @@ local function drawLandingBar()
       if im.Button(L('Висадитися тут', 'Land here'), im.ImVec2(200, 30)) then land() end
       im.PopStyleColor(3)
       im.SameLine()
+      -- while driving: the route to the point instead of a new landing (the driven region only)
+      if M.navigator and S.state == 'driving' then
+        local car, x, y = focus(), native.localPoint(S.marker.lat, S.marker.lon)
+        if car and x and im.Button(L('Вести сюди', 'Navigate here'), im.ImVec2(140, 30)) then
+          M.navigator.setDestination(x, y, S.marker.lat, S.marker.lon, car, lang)
+          S.pickerOpen = false
+        end
+        im.SameLine()
+      end
       im.Text(string.format('%s%.5f, %.5f', country and (country.title .. '  ') or '', S.marker.lat, S.marker.lon))
     elseif M.live then
       if im.Button(L('Завантажити й висадитися', 'Download and land'), im.ImVec2(240, 30)) then
@@ -3612,15 +3673,28 @@ local function drawWindow()
     if im.Button(L('Обрати інше місце', 'Pick another place')) then S.pickerOpen = true; S.viewDirty = true end
     drawLangButton()
     -- the mini map follows the car (an arrow along the heading); a drag frees it
-    -- square, 1 km across at the latitude (a km by km map)
-    S.mini = S.mini or {center = {lat = S.center.lat, lon = S.center.lon}, follow = true,
-      zoom = math.log(40075016.7 * math.cos(math.rad(S.center.lat or 0)) * 360 / 256000) / math.log(2)}
-    drawMap(360, 360, S.mini)
+    S.mini = S.mini or {center = {lat = S.center.lat, lon = S.center.lon}, zoom = 15, follow = true}
+    -- a click (no drag) on the minimap: the route there
+    if M.navigator and not S.mini.onClick then
+      S.mini.onClick = function(lat, lon)
+        local car, x, y = focus(), native.localPoint(lat, lon)
+        if car and x then M.navigator.setDestination(x, y, lat, lon, car, lang) end
+      end
+    end
+    drawMap(360, 180, S.mini)
+    local routeLines = M.navigator and M.navigator.lines(L)
+    if routeLines then
+      im.TextColored(theme.green, routeLines[1])
+      if routeLines[2] then im.Text(routeLines[2]) end
+      if im.Button(L('Скасувати маршрут', 'Cancel the route')) then M.navigator.clear() end
+      im.SameLine()
+    end
     if not S.mini.follow then
       if im.Button(L('До авто', 'To the car')) then S.mini.follow = true end
       im.SameLine()
     end
-    im.TextColored(theme.muted, L('Колесо - масштаб, перетягування - огляд', 'Wheel - zoom, drag - look around'))
+    im.TextColored(theme.muted, M.navigator and L('Колесо - масштаб, перетягування - огляд, клік - маршрут',
+      'Wheel - zoom, drag - look around, click - route') or L('Колесо - масштаб, перетягування - огляд', 'Wheel - zoom, drag - look around'))
     local st = S.status and S.status.stream
     local p, v = focus()
     if st and st.edgeKm and st.edgeKm < 3 then
@@ -3754,6 +3828,7 @@ local function restorePackState()
 end
 
 function M.onExtensionUnloaded()
+  M.gc.step(false)
   restorePackState()
   if S.park then pcall(parking.clear, S.park) end
   if S.navSerial and map.getMap().buildSerial == S.navSerial then
@@ -4357,7 +4432,9 @@ local function profAdd(part, ms, kb)
 end
 
 function M.onUpdate(dtReal)
-  if not inOurLevel() then
+  local ours = inOurLevel()
+  M.gc.step(ours, dtReal)
+  if not ours then
     S.state = 'off'
     return
   end
@@ -4496,7 +4573,10 @@ function M.tick(dt)
     end
     local tQueue = timer:stopAndReset()
     local kb3 = collectgarbage('count')
-    if S.state == 'driving' then navStep() end
+    if S.state == 'driving' then
+      navStep()
+      if M.navigator then M.navigator.step(focus, S.now, lang) end
+    end
     updateParking()
     local tNav = timer:stopAndReset()
     if tNav > (result.navStepMs or 0) then result.navStepMs = tNav end

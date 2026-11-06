@@ -88,7 +88,8 @@ class NativeTests(unittest.TestCase):
             return {read=function() return data end, close=function() end}
           end
           jsonWriteFile=function() error('native provider must not write files') end
-          hptimer=function() local elapsed=0; return {stop=function() elapsed=elapsed+0.7; return elapsed end} end
+          -- every read moves the clock: the generator's pause reads it at every pause point
+          hptimer=function() local elapsed=0; return {stop=function() elapsed=elapsed+0.2; return elapsed end} end
           buildCalls=0; fakeTriangles=0; fakeFarTriangles=0
           stubGenerator={build=function(cells,i,j,options)
             buildCalls=buildCalls+1
@@ -96,8 +97,12 @@ class NativeTests(unittest.TestCase):
             local t=options.tileSize
             local road={items=fakeTriangles>0 and {{triangles=fakeTriangles,meshes={}}} or {},mats={'earthng_ground'},drivable=true,
               spawn={pos={(i+0.5)*t,(j+0.5)*t,5},dir={0,1,0}}}
+            local nav={segments={{'segment'}}}
+            -- the road goes out before the scene, as generator.lua does
+            if options.roadReady then options.roadReady(road, nav) end
+            for n=1,5 do options.pause() end
             local far=options.far and {items=fakeFarTriangles>0 and {{triangles=fakeFarTriangles,meshes={}}} or {},mats={}} or nil
-            return road,{items={},mats={}},far,{segments={{'segment'}}}
+            return road,{items={},mats={}},far,nav
           end}
         ''')
         if real_generator:
@@ -259,7 +264,7 @@ class NativeTests(unittest.TestCase):
         _, mod, cv = self.make(files, real_generator=True)
         lat, lon = geographic(1750, 1750)
         mod.land(cv(dict(seq=3, lat=lat, lon=lon)))
-        job = self.pump(mod, count=4000)
+        job = self.pump(mod, count=8000)
         self.assertEqual(job.state, 'ready')
         self.assertGreater(job.manifest.triangles, 0)
         self.assertIsNotNone(job.manifest['items'][1].meshes)
@@ -271,7 +276,7 @@ class NativeTests(unittest.TestCase):
         _, mod, cv = self.make(real_generator=True)
         lat, lon = geographic(1750, 1750)
         mod.land(cv(dict(seq=4, lat=lat, lon=lon)))
-        job = self.pump(mod, count=4000)
+        job = self.pump(mod, count=8000)
         self.assertEqual(job.state, 'ready')
         self.assertTrue(job.manifest.offRoad)
         self.assertFalse(job.manifest.drivable)
@@ -535,11 +540,65 @@ class NativeV2Tests(NativeTests.__base__):
         terrain = lua.globals().lastCells[1].terrain
         self.assertEqual((terrain.nx, terrain.ny, terrain.heights[3]), (2, 2, -2.2))  # decimetres
 
+    def test_drive_goes_on_into_a_neighbour_region(self):
+        """Past the landing region's east edge the cells come from the region beside it, whose
+        grid is 3700 x 250 m off: moved into this frame, the copy of a road this region has dropped."""
+        files = fixture_v2(roads=True)
+        base = '/earthng/countries/demo/'
+        country = files[base + 'manifest.json']
+        lon0, lat0 = 20 + 3700e-5 + 250 * 4e-6, 40 - 3700 * 3e-6 + 250e-5     # geographic(3700, 250)
+        payloads = {}
+        for i in range(4):
+            for j in range(4):
+                bounds = [i * 1000, j * 1000, (i + 1) * 1000, (j + 1) * 1000]
+                cell = dict(roads=[dict(id='b1', nodes=['1', '2'], width=8, points=[[-3700, 1500, 0], [300, 1500, 20]],
+                                        tags={'highway': 'residential'}),
+                                   dict(id='b2', nodes=['2', '3'], width=8, points=[[300, 1500, 20], [4000, 1500, 20]],
+                                        tags={'highway': 'residential'})],
+                            junctions=[], buildings=[], areas=[], lines=[], points=[],
+                            terrain=dict(rect=bounds, nx=2, ny=2, heights=[7, 7, 7, 7]))
+                payloads[binary.slot(i, j)] = binary.encode_cell(cell, bounds[:2])
+        data, mask = binary.encode_block(payloads)
+        files[base + 'regions/east/blocks/0_0.bin'] = data
+        files[base + 'regions/east.json'] = dict(
+            schemaVersion=2, id='east', runtime='lua', sourceFormat='earthng-features-v2', tileSize=500, cellSize=1000,
+            blockCells=8, geo=[0, 0, lon0, lat0, .00001, .000004, -.000003, .00001], bounds=[20.03, 39.95, 20.09, 40.05],
+            coverage=[[20.03, 39.95, 20.09, 40.05]], landing=[1750, 1750],
+            blocks={'0_0': dict(path=base + 'regions/east/blocks/0_0.bin', mask=mask)})
+        country['regions'].append(dict(id='east', manifest=base + 'regions/east.json', coverage=[[20.03, 39.95, 20.09, 40.05]]))
+        lua, mod, cv = self.make(files)
+        lua.execute('''local build = stubGenerator.build
+          tileCells = {}
+          stubGenerator.build = function(cells, i, j, ...) tileCells[i .. '_' .. j] = cells; return build(cells, i, j, ...) end''')
+        lat, lon = geographic(1750, 1750)
+        mod.land(cv(dict(seq=1, lat=lat, lon=lon)))
+        self.assertEqual(self.pump(mod).state, 'ready')
+        mod.pose(cv(dict(x=3800, y=1750, vx=0, vy=0, state='driving')))
+        for _ in range(600):
+            mod.update(.016, 2)
+        stream = mod.status().stream
+        self.assertIn('8_3', dict(stream.ready.items()))         # 4000-4500 m: the neighbour's land
+        self.assertNotIn('8_1', dict(stream.wanted.items()))     # the neighbour lacks a cell under it
+        cells = lua.globals().tileCells['8_3']
+        cells = [cells[k] for k in range(1, len(cells) + 1)]
+        foreign = [c for c in cells if c.foreign == 'east']
+        own = [c for c in cells if not c.foreign]
+        self.assertTrue(foreign and own)                         # the seam: x 3960 is this region's
+        cell = foreign[0]
+        self.assertEqual([cell.terrain.rect[k] for k in range(1, 5)], [4000, 1000, 5000, 2000])
+        self.assertTrue(all(cell.terrain.heights[k] == 7 for k in range(1, 5)))
+        roads = {cell.roads[k].id: cell.roads[k] for k in range(1, len(cell.roads) + 1)}
+        self.assertEqual(set(roads), {'feast:b2'})                # b1 is this region's 'main' again
+        start = roads['feast:b2'].points[1]
+        self.assertAlmostEqual(start[1], 4000, places=3)
+        self.assertAlmostEqual(start[2], 1750, places=3)
+        self.assertEqual(stream.edgeKm, 99)        # the fixture's own bounds (19..21 E) reach far round it
+
     def test_v2_cells_generate_meshes_with_the_real_generator(self):
         _, mod, cv = self.make(fixture_v2(roads=True), real_generator=True)
         lat, lon = geographic(1750, 1750)
         mod.land(cv(dict(seq=3, lat=lat, lon=lon)))
-        job = self.pump(mod, count=4000)
+        job = self.pump(mod, count=8000)
         self.assertEqual(job.state, 'ready')
         self.assertGreater(job.manifest.triangles, 0)
         self.assertGreater(len(job.manifest.navSegments), 0)
@@ -621,6 +680,76 @@ class NativeV2Tests(NativeTests.__base__):
                 far += 1
         self.assertGreater(far, 0)
         self.assertGreater(horizon, 0)
+
+    def test_at_speed_the_road_ahead_comes_before_the_tiles_beside(self):
+        _, mod, cv = self.make(fixture(12))
+        lat, lon = geographic(2750, 5250)
+        mod.land(cv(dict(seq=12, lat=lat, lon=lon)))
+        self.assertEqual(self.pump(mod).state, 'ready')
+        mod.pose(cv(dict(x=2750, y=5250, vx=100, vy=0, state='driving')))
+        mod.update(.016, 2)
+        wanted = mod.status().stream.wanted
+        # a near priority is the seconds to reach the tile: 750 m ahead, 750 m beside counting 3x
+        self.assertAlmostEqual(wanted['7_10'], 7.5)
+        self.assertAlmostEqual(wanted['5_12'], 22.5)
+        self.assertLess(wanted['5_8'] - wanted['7_10'], 1e6)
+        # past the 1 km radius the 15 s corridor ahead is near, the tile past its end is far
+        self.assertAlmostEqual(wanted['8_10'], 12.5)
+        self.assertGreaterEqual(wanted['9_10'], 1_000_000)
+        # standing still it is the distance again, the same all round
+        mod.pose(cv(dict(x=2750, y=5250, vx=0, vy=0, state='driving')))
+        mod.update(.016, 2)
+        wanted = mod.status().stream.wanted
+        self.assertAlmostEqual(wanted['7_10'], wanted['5_12'])
+        self.assertGreaterEqual(wanted['8_10'], 1_000_000)
+
+    def test_arrival_time_is_refreshed_within_the_same_tile_at_high_speed(self):
+        _, mod, cv = self.make(fixture(12))
+        lat, lon = geographic(2700, 5250)
+        mod.land(cv(dict(seq=13, lat=lat, lon=lon)))
+        self.assertEqual(self.pump(mod).state, 'ready')
+        mod.pose(cv(dict(x=2700, y=5250, vx=60, vy=0, state='driving')))
+        mod.update(.016, 2)
+        before = mod.status().stream.wanted['7_10']
+        # Position, look-ahead point and corridor end all remain in the same 500 m
+        # tiles. The road becomes closer and must not retain the old ETA.
+        mod.pose(cv(dict(x=2810, y=5250, vx=60, vy=0, state='driving')))
+        mod.update(.016, 2)
+        after = mod.status().stream.wanted['7_10']
+        self.assertAlmostEqual(before - after, 110 / 60)
+
+    def test_while_driving_a_road_goes_out_before_its_scene(self):
+        lua, mod, cv = self.make(fixture(10))
+        lat, lon = geographic(1250, 4750)
+        mod.land(cv(dict(seq=13, lat=lat, lon=lon)))
+        self.assertEqual(self.pump(mod).state, 'ready')
+        x, early, parked = 1250.0, set(), 0
+        for frame in range(1500):
+            x += 60 / 60
+            mod.pose(cv(dict(x=x, y=4750, vx=60, vy=0, state='driving')))
+            mod.update(.016, 4)
+            stream = mod.status().stream
+            for key in stream.ready.keys():
+                if stream.scenes[key] is None:
+                    early.add(key)
+            parked = max(parked, stream.parked or 0)
+        self.assertTrue(early)
+        self.assertLessEqual(parked, 3)
+        self.assertLess(mod.status().stream.budgetMs, 6)
+        # the car where no road is built yet: a road due within 6 s raises the budget to 6 ms
+        mod.pose(cv(dict(x=7250, y=4750, vx=60, vy=0, state='driving')))
+        mod.update(.016, 4)
+        self.assertEqual(mod.status().stream.budgetMs, 6)
+        # stopped, every near tile gets its scene; none is built twice for it
+        built = mod.status().stream.built
+        for _ in range(3000):
+            mod.update(.016, 4)
+        stream = mod.status().stream
+        for key in stream.ready.keys():
+            self.assertTrue(stream.scenes[key], key)
+        self.assertEqual(stream.parked, 0)
+        self.assertEqual(len(list(stream.failed.keys())), 0)
+        self.assertGreater(stream.built, built)
 
     def test_terrain_only_decoder_reads_the_grid_of_a_full_cell(self):
         lua, _, _ = self.make()

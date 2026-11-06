@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 import zipfile
 
 import numpy as np
+import shapely
 from shapely.geometry import LineString, Point, Polygon
 
 import build_country as country
@@ -59,6 +60,10 @@ class CountryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        # the fixture's box is Kyiv: the registers' real places stay out of it
+        venues = patch.object(country.venues, 'catalogue', return_value=[])
+        self.venues = venues.start()
+        self.addCleanup(venues.stop)
         self.root = Path(self.temp.name)
         self.region = self.root / 'source'
         self.region.mkdir()
@@ -76,6 +81,14 @@ class CountryTests(unittest.TestCase):
         with patch.object(sources, 'Store', return_value=self.store):
             return country.build_country('ua', 'Україна', '0.1.0', [self.region],
                                          self.root / 'mods', bbox, emit=lambda _: None)
+
+    def test_a_pack_carries_its_routing_graph(self):
+        with zipfile.ZipFile(self.build()) as archive:
+            graphs = [n for n in archive.namelist() if '/routing/' in n]
+            manifests = [n for n in archive.namelist() if n.endswith('/manifest.json') and '/regions/' in n]
+            self.assertEqual(len(graphs), len(manifests))
+            region = manifests[0].split('/')[4]
+            self.assertTrue(archive.read(f'earthng/countries/ua/routing/{region}.bin'))
 
     def test_a_section_zip_holds_one_region_and_no_country_manifest(self):
         import shapely
@@ -114,7 +127,7 @@ class CountryTests(unittest.TestCase):
             self.assertTrue(all(name.startswith('earthng/countries/ua/') and name.endswith(('.json', '.bin'))
                                 for name in names if name != 'earthng/countries/ua/CREDITS.txt'))
             self.assertIn('earthng/countries/ua/CREDITS.txt', names)     # the data's credits travel along
-            self.assertEqual(len(names), 4)  # country, region, one block of two source cells and the credits
+            self.assertEqual(len(names), 5)  # country, region, one block of two source cells, the credits, the routing graph
             index = json.loads(archive.read('earthng/countries/ua/manifest.json'))
             self.assertEqual(index['runtime'], 'native')
             self.assertEqual(index['sourceFormat'], country.FORMAT)
@@ -146,6 +159,27 @@ class CountryTests(unittest.TestCase):
             self.assertEqual(cell['terrain']['rect'], [1000, 0, 2000, 1000])
             self.assertEqual(cell['roads'][0]['nodes'][0], '9007199254740993')
         self.store.db.close.assert_called_once()
+
+    def test_rich_export_does_not_resume_a_baseline_region(self):
+        import fast_style
+        output = self.root / 'mods'
+        opts = dict(bbox=(-1000, 0, 2000, 1000), emit=lambda _: None)
+        # Simulate an interrupted country with this completed part still on disk.
+        with patch.object(country.shutil, 'rmtree'), patch.object(sources, 'Store', return_value=self.store), \
+                patch.object(fast_style, 'POIS', False):
+            country.build_country('ua', 'Україна', '1', [self.region], output,
+                                  experiments={'detail': True, 'shopfront': True}, **opts)
+        parts = output / '.earthng_ua.parts'
+        self.assertEqual(len(list(parts.glob('*.part'))), 1)
+        calls_before = len(self.store.queries)
+        with patch.object(sources, 'Store', return_value=self.store), patch.object(fast_style, 'POIS', True):
+            path = country.build_country('ua', 'Україна', '1', [self.region], output,
+                                         experiments={'detail': True, 'shopfront': True}, **opts)
+        self.assertGreater(len(self.store.queries), calls_before)
+        with zipfile.ZipFile(path) as archive:
+            index = json.loads(archive.read('earthng/countries/ua/manifest.json'))
+            region = json.loads(archive.read(index['regions'][0]['manifest'].lstrip('/')))
+            self.assertEqual(region['experiments'], {'detail': True, 'shopfront': True})
 
     def test_deflated_block_reads_back(self):
         data = b'terrain-grid' * 80
@@ -305,6 +339,16 @@ class CountryTests(unittest.TestCase):
         fields = country._provenance(self.meta, {'source': 'area-261399.osm.pbf'})
         self.assertNotIn('sourceDate', fields)
 
+    def test_a_pack_lists_its_places_for_missions(self):
+        self.venues.return_value = [{'type': 'demo', 'ref': '12', 'lat': 50.44, 'lon': 30.63}]
+        credit = {'source': 'Оператор мережі', 'data': 'list of places', 'url': 'https://example.org/'}
+        with patch.dict(country.venues.TYPES, {'demo': {'credit': credit}}), zipfile.ZipFile(self.build()) as archive:
+            manifest = json.loads(archive.read('earthng/countries/ua/manifest.json'))
+            self.assertEqual(manifest['venues'], 1)
+            self.assertEqual(manifest['credits'][-1], credit)
+            self.assertEqual(json.loads(archive.read('earthng/countries/ua/venues.json')), self.venues.return_value)
+            self.assertIn('Оператор мережі', archive.read('earthng/countries/ua/CREDITS.txt').decode('utf-8'))
+
     def test_a_pack_carries_the_credits_of_its_data(self):
         # a pack shared without the repo still names its sources and their licences
         land = {'source': 'Republic of Estonia Land and Spatial Development Board (Maa- ja Ruumiamet)',
@@ -385,6 +429,34 @@ class CountryTests(unittest.TestCase):
         self.assertTrue((low[21:33] >= sources.LIFT + 0.6).all())
         self.assertTrue((low[33:] == sources.LIFT - 2.0).all())
 
+    def test_a_coastline_way_held_by_several_tiles_is_cached_once(self):
+        # Every source tile of an island carries the island's whole coastline; a worker visits
+        # hundreds of tiles, and each tile's copy (a list of tuples, ~110 bytes a vertex) kept in
+        # a cache that never shrank took gigabytes of an export worker (Saaremaa: 4.9 GB).
+        import types
+        folder = self.root / 'coast'
+        folder.mkdir()
+        osm = ('<?xml version="1.0"?><osm version="0.6">'
+               '<node id="1" lat="59.000" lon="24.000" version="1"/>'
+               '<node id="2" lat="59.000" lon="24.020" version="1"/>'
+               '<node id="3" lat="59.010" lon="24.040" version="1"/>'
+               '<way id="10" version="1"><nd ref="1"/><nd ref="2"/><nd ref="3"/>'
+               '<tag k="natural" v="coastline"/></way></osm>')
+        for name in ('a.osm', 'b.osm'):
+            (folder / name).write_text(osm, encoding='utf8')
+        frame = sources.Frame.at(24.02, 59.0)
+        store = types.SimpleNamespace(
+            frame=frame, meta={'source': str(folder)},
+            source_index={'tiles': {'a': {'file': 'a.osm', 'coverage': [23.95, 58.95, 24.025, 59.05]},
+                                    'b': {'file': 'b.osm', 'coverage': [24.015, 58.95, 24.1, 59.05]}}})
+        box = country._local_bbox(frame, [23.99, 58.99, 24.05, 59.02])
+        lines = country._coastlines(store, box)
+        self.assertEqual(len(lines), 1)
+        x, y = frame.local([24.000, 24.020, 24.040], [59.000, 59.000, 59.010])
+        self.assertTrue(np.allclose(np.asarray(lines[0].coords), np.column_stack([x, y])))
+        self.assertEqual(len(store._coast_ways), 1)          # one copy, though two tiles hold it
+        self.assertEqual(len(country._coastlines(store, box)), 1)       # and the cache answers again
+
     def test_coastline_nearest_shore_decides_beside_a_narrow_cape(self):
         # a cape 200 m wide pointing north (land inside, counter-clockwise outline): the sea 300 m
         # east of it is still sea although the cape's far shore is within the band
@@ -396,6 +468,22 @@ class CountryTests(unittest.TestCase):
         self.assertLess(heights[10, 36], sources.LIFT - 1)               # x = 900: sea east of the cape
         self.assertLess(heights[10, 4], sources.LIFT - 1)                # x = 100: sea west of it
         self.assertEqual(heights[10, 20], sources.LIFT + 3.0)            # x = 500: the cape itself
+
+    def test_a_harbour_at_sea_level_sinks_under_the_sea_plane(self):
+        harbour = shapely.box(100, 100, 500, 500)
+        water = (-9, 'water', {'tags': {'natural': 'water', 'water': 'harbour'}}, harbour)
+        self.store.scenery = lambda rect: [water]
+        self.store.terrain = Mock(sample=lambda xy: np.full(len(xy), sources.LIFT + 6.0))
+        heights = np.array(country.compile_cell(self.store, [0, 0, 1000, 1000])['terrain']['heights']).reshape(41, 41)
+        self.assertLess(heights[12, 12], sources.LIFT)                   # (300, 300): the harbour
+        self.assertEqual(heights[30, 30], sources.LIFT + 6.0)            # (750, 750): the shore
+
+    def test_an_inland_port_keeps_its_level(self):
+        water = (-9, 'water', {'tags': {'natural': 'water', 'water': 'harbour'}}, shapely.box(100, 100, 500, 500))
+        self.store.scenery = lambda rect: [water]
+        self.store.terrain = Mock(sample=lambda xy: np.full(len(xy), sources.LIFT + 90.0))
+        heights = np.array(country.compile_cell(self.store, [0, 0, 1000, 1000])['terrain']['heights']).reshape(41, 41)
+        self.assertEqual(heights[12, 12], sources.LIFT + 90.0)
 
     def test_nonfinite_geometry_and_terrain_are_rejected(self):
         data = copy.deepcopy(ROAD)
@@ -422,6 +510,14 @@ class ResumablePartTests(unittest.TestCase):
         self.assertNotEqual(key, build_country._part_key(region, None, {'block': 'nordic'}, None))
         self.assertNotEqual(key, build_country._part_key(dict(region, dir='C:/x/fast-index/fast-18-def'),
                                                          None, {'block': 'postsoviet'}, None))
+        import shapely
+        first = dict(region, shape=shapely.box(30, 50, 30.5, 50.5))
+        second = dict(region, shape=shapely.box(30, 50, 30.6, 50.5))
+        first_key = build_country._part_key(first, None, {'block': 'postsoviet'}, None)
+        self.assertNotEqual(key, first_key)
+        self.assertNotEqual(first_key, build_country._part_key(second, None, {'block': 'postsoviet'}, None))
+        self.assertEqual(first_key, build_country._part_key(
+            dict(region, shape=shapely.geometry.mapping(first['shape'])), None, {'block': 'postsoviet'}, None))
         self.assertTrue(key.startswith('e0300-n500-'))
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / key
