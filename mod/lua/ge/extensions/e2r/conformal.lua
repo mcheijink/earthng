@@ -27,8 +27,10 @@ M.TUNE = {
   merge = false,
   walls = true,      -- a wall closes the open end of a band at a bridge or a tunnel (the ground goes on there at its own height)
   wallPiece = 1,     -- m: an end wall is built in pieces this long, each down to what is drawn below it
+  wallMerge = .02,   -- m: two corners of an end wall nearer than this are one (a crossing of the ground's lattice lines beside a piece corner)
   stack = true,      -- faces between stacked footprints too (stackWalls): an embankment over the cut of the road under it. Needs walls
   wallMin = .5,      -- m: a face between stacked footprints lower than this is not built (two layers of one road a hand apart; no one sees through it)
+  groundMax = 60,    -- m: the ground is a floor for a stack wall only when it lies less than this under the edge (not where the lattice has no height)
   wallStep = .05,    -- m: a footprint this near in height is the same surface (the edge is joined to it)
   wallPast = .02,    -- m: that is read this far past the end line of the band
   dup = 1e-9,        -- m: corners nearer than this are one
@@ -190,15 +192,33 @@ function M.buildWalls(walls, index, ground, emit, pause)
       local ox, oy = w[3] / ol, w[4] / ol
       local len = sqrt((q[1] - p[1]) ^ 2 + (q[2] - p[2]) ^ 2)
       local n = max(1, math.ceil(len / piece))
+      -- the pieces' corners: evenly spaced, and where the line crosses an edge of the ground's triangles (the ground bends
+      -- there, so a piece across it would stand off the ground in the middle)
+      local ts = {}
+      for k = 0, n do ts[#ts + 1] = k / n end
+      if index.step and len > 1e-9 then
+        for _, c in ipairs(M.crossings(p, q, index.step)) do
+          ts[#ts + 1] = ((c[1] - p[1]) * (q[1] - p[1]) + (c[2] - p[2]) * (q[2] - p[2])) / (len * len)
+        end
+        table.sort(ts)
+        local kept = {0}
+        for k = 2, #ts - 1 do
+          if (ts[k] - kept[#kept]) * len > M.TUNE.wallMerge and (1 - ts[k]) * len > M.TUNE.wallMerge then kept[#kept + 1] = ts[k] end
+        end
+        kept[#kept + 1] = 1
+        ts = kept
+      end
       local pts = {}
-      for k = 0, n do
-        local t = k / n
+      for _, t in ipairs(ts) do
         local x, y, z = p[1] + (q[1] - p[1]) * t, p[2] + (q[2] - p[2]) * t, (p[3] or 0) + ((q[3] or 0) - (p[3] or 0)) * t
         -- below the band's edge there is what lies just past the end line: the highest footprint under the band's height
-        local below = index:surface(x + ox * past, y + oy * past)
-        if not (below and below < z - 1e-3) then below = ground(x, y) end
+        -- (a footprint above it that lies there as well has cut the ground away: the ground is no floor under that one), else
+        -- the ground's plane
+        local below = index:surface(x + ox * past, y + oy * past, z - 1e-3)
+        if not below then below = ground(x, y) end
         pts[#pts + 1] = {x, y, z, below}
       end
+      n = #pts - 1
       for k = 1, n do
         local a, b = pts[k], pts[k + 1]
         if abs(a[3] - a[4]) > 1e-3 or abs(b[3] - b[4]) > 1e-3 then
@@ -220,8 +240,11 @@ end
 -- apart: when a footprint other than its own lies at the edge's height just past it (within TUNE.wallStep), the edge is joined
 -- to it and there is nothing to close; else, when other footprints lie lower there (past the edge, or under it), a face runs
 -- from the edge down to the highest of them. A footprint's edge over the lattice ground is the end walls' (buildWalls).
+-- A point with nothing lower under or beside it (the edge runs on over the lattice ground there) goes down to the ground's plane
+-- (`ground(x, y)`, the lattice), not down to what a neighbouring point rests on: a face that took its neighbour's floor stood
+-- off the ground where the ground bends.
 -- emit(wall) takes the four corners {{x, y, z}...} with the face looking out of the footprint.
-function M.stackWalls(index, emit, decks, pause)
+function M.stackWalls(index, emit, decks, pause, ground)
   local T = M.TUNE
   index:fine(pause)
   local made = {}
@@ -262,6 +285,12 @@ function M.stackWalls(index, emit, decks, pause)
             end
           end
           if joined then closed = closed + 1 end
+          -- nothing is drawn in front of the edge but the lattice ground (the footprint it rests on lies under the edge, not before
+          -- it): the face goes on down to that ground, or it would hang over the gap
+          if ground and low and not joined and not covered and #zs == 0 then
+            local g = ground(x + ox * past, y + oy * past)
+            if g and g < low - tol and z - g < T.groundMax then low, lowRoad = g, false end
+          end
           -- a face that rests on a carriageway stands on its edge, not in it: not when the road lies under the edge's own side too
           if lowRoad and not joined then
             local zi, ri = index:levels(x - ox * past, y - oy * past, entry)
@@ -269,17 +298,22 @@ function M.stackWalls(index, emit, decks, pause)
               if ri[n] and abs(zo - low) < .3 then covered = true end
             end
           end
-          pts[#pts + 1] = {x, y, z, (not joined) and low or nil, covered = covered}
+          pts[#pts + 1] = {x, y, z, (not joined) and low or nil, covered = covered, joined = joined}
           if pts[#pts][4] then any = true end
         end
         if any then
           -- a point with nothing below it takes the nearest one that has (not one under a deck: no face there)
           for i = 1, #pts do
             if not pts[i][4] and not pts[i].covered then
-              for r = 1, #pts do
-                local lo, hi = pts[i - r], pts[i + r]
-                if lo and lo[4] then pts[i][4] = lo[4]; break end
-                if hi and hi[4] then pts[i][4] = hi[4]; break end
+              local g = ground and not pts[i].joined and ground(pts[i][1], pts[i][2])
+              if g and g < pts[i][3] - tol and pts[i][3] - g < T.groundMax then
+                pts[i][4] = g
+              else
+                for r = 1, #pts do
+                  local lo, hi = pts[i - r], pts[i + r]
+                  if lo and lo[4] then pts[i][4] = lo[4]; break end
+                  if hi and hi[4] then pts[i][4] = hi[4]; break end
+                end
               end
             end
           end

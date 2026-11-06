@@ -694,6 +694,61 @@ def upright_walls(tile, fences=False):
     return D[(area < 1e-8) & (zr > .01)]
 
 
+def walls_hanging(tile, tol=.06, probes=(.03, .2)):
+    """upright walls (end walls and wing walls) whose bottom corner hangs over a gap: a corner that has another corner of the
+    same wall straight above it (the bottom of the face), where the surface drawn in front of the face (a probe `probes` m out
+    along the face's normal, the side the face looks to) lies under it by more than `tol` and nothing there is at or above it.
+    A bottom that sinks into the surface in front (or into a higher one) is buried, not hanging: nothing shows under it.
+    -> {'corners': n bottom corners checked, 'hanging': n, 'worst': largest gap, 'found': [(x, y, z, gap)...]}"""
+    W = upright_walls(tile)
+    S = tile.D[np.isin(tile.cls, [CI[c] for c in ('gnd', 'sw_road', 'sw_plate', 'road', 'kerb', 'walk', 'island')])]
+    out = {'corners': 0, 'hanging': 0, 'worst': 0., 'found': []}
+    if len(W) == 0 or len(S) == 0:
+        return out
+    grid = Grid(S)
+    # the top corners of the faces: a face that stands on the top of another one (two stages of one wall) rests on it
+    tops = set()
+    for w in W:
+        P = w.reshape(3, 3)
+        for i in range(3):
+            if any(j != i and abs(P[j, 0] - P[i, 0]) < 1e-6 and abs(P[j, 1] - P[i, 1]) < 1e-6 and P[j, 2] < P[i, 2] - 1e-3 for j in range(3)):
+                tops.add((round(P[i, 0], 2), round(P[i, 1], 2), round(P[i, 2], 2)))
+    seen = set()
+    for w in W:
+        P = w.reshape(3, 3)
+        n = np.cross(P[1] - P[0], P[2] - P[0])
+        ln = math.hypot(n[0], n[1])
+        if ln < 1e-12:
+            continue
+        # the mesh winds a face the other way round than the generator's corner order (which looks out): the face looks along -n
+        nx, ny = -n[0] / ln, -n[1] / ln
+        for i in range(3):
+            above = [j for j in range(3) if j != i and abs(P[j, 0] - P[i, 0]) < 1e-6 and abs(P[j, 1] - P[i, 1]) < 1e-6 and P[j, 2] > P[i, 2] + 1e-3]
+            if not above:
+                continue
+            key = (round(P[i, 0], 4), round(P[i, 1], 4), round(P[i, 2], 4))
+            if key in seen or (round(P[i, 0], 2), round(P[i, 1], 2), round(P[i, 2], 2)) in tops:
+                continue
+            seen.add(key)
+            out['corners'] += 1
+            hs = []
+            for d in probes:
+                x, y = P[i, 0] + nx * d, P[i, 1] + ny * d
+                cand = list(grid.near(x, y))
+                if not cand:
+                    continue
+                t = S[cand]
+                l1, l2, l3 = bary(t, np.full(len(cand), x), np.full(len(cand), y))
+                ok = (l1 >= -1e-7) & (l2 >= -1e-7) & (l3 >= -1e-7)
+                hs += list((l1 * t[:, 2] + l2 * t[:, 5] + l3 * t[:, 8])[ok])
+            if hs and not any(h >= P[i, 2] - tol for h in hs):
+                gap = float(P[i, 2] - max(hs))
+                out['hanging'] += 1
+                out['worst'] = max(out['worst'], gap)
+                out['found'].append((float(P[i, 0]), float(P[i, 1]), float(P[i, 2]), gap))
+    return out
+
+
 def walls_in_road(tile, step=.25, slack=.02):
     """upright walls (end walls and wing walls) that stand inside a swept carriageway or plate: a sample of a wall's plan line
     (every `step` m) strictly inside a carriageway triangle (barycentric weights over 1e-4: a wall on the road's edge is

@@ -12399,7 +12399,7 @@ local function build(cells, i, j, options)
     ROADS.conformal.buildWalls(tune.endWalls, tune.cf, ground, function(wall) roads.polygon(ROADS.wing.material, ROADS.conformal.wallUV(wall, ROADS.deck.repeatU)) end, pause)
   end
   if tune.cf and ROADS.conformal.TUNE.walls and ROADS.conformal.TUNE.stack and not distant then
-    ROADS.conformal.stackWalls(tune.cf, function(wall) roads.polygon(ROADS.wing.material, ROADS.conformal.wallUV(wall, ROADS.deck.repeatU)) end, tune.cfDecks, pause)
+    ROADS.conformal.stackWalls(tune.cf, function(wall) roads.polygon(ROADS.wing.material, ROADS.conformal.wallUV(wall, ROADS.deck.repeatU)) end, tune.cfDecks, pause, ground)
   end
   if SW and tune.shoulder > 0 and not tune.section then
     ROADS.sweep.verges(SW, tune.shoulder, tune.vergeSink, function(quad, S, s)

@@ -302,6 +302,89 @@ class Ground(unittest.TestCase):
         got = [list(v.values()) for v in f(piece, a, b).values()]
         self.assertEqual(sorted([got[0][0], got[0][2]]), [1., 3.])
 
+    # the wall builders on a made-up index (conformal.lua alone): each returns its faces as "x,y,z;x,y,z;..." strings
+    WALLS_LUA = """
+        local CF = require('ge/extensions/e2r/conformal')
+        local function faces(list)
+          local out = {}
+          for _, w in ipairs(list) do
+            local s = {}
+            for _, c in ipairs(w) do s[#s + 1] = string.format('%.4f,%.4f,%.4f', c[1], c[2], c[3]) end
+            out[#out + 1] = table.concat(s, ';')
+          end
+          return out
+        end
+        local function sq(x0, y0, x1, y1, z) return {{x0, y0, z}, {x1, y0, z}, {x1, y1, z}, {x0, y1, z}} end
+        return {
+          -- an end wall on y = 0 looking out to -y; a band above its height and a road below it lie there: the floor is the road
+          endBelow = function()
+            local idx = CF.new(10, {-100, -100, 100, 100})
+            idx:add(sq(-1, -3, 5, -.001, 8))
+            idx:add(sq(-1, -3, 5, -.001, 3), true)
+            local out = {}
+            CF.buildWalls({{{0, 0, 5}, {4, 0, 5}, 0, -1}}, idx, function() return 4 end, function(w) out[#out + 1] = w end)
+            return faces(out)
+          end,
+          -- the same wall over a ground that bends at x = 10 (a lattice line): the bottom edge has a corner there
+          endCrease = function()
+            local idx = CF.new(10, {-100, -100, 100, 100})
+            local out = {}
+            CF.buildWalls({{{5.5, 0, 5}, {14.5, 0, 5}, 0, -1}}, idx, function(x) return math.abs(x - 10) * .5 end, function(w) out[#out + 1] = w end)
+            return faces(out)
+          end,
+          -- a platform at z 5 over a road at z 3 that ends under its west edge; the ground lies at z 0
+          stackGround = function()
+            local idx = CF.new(10, {-100, -100, 100, 100})
+            idx:add(sq(0, 0, 4, 4, 5))
+            idx:add(sq(0, 0, 2, 4, 3), true)
+            local out = {}
+            CF.stackWalls(idx, function(w) out[#out + 1] = w end, nil, nil, function() return 0 end)
+            return faces(out)
+          end,
+        }
+    """
+
+    def faces(self, name):
+        L = self.rt.L
+        fn = L.eval('(function() ' + self.WALLS_LUA + ' end)()')[name]
+        return [[tuple(float(v) for v in c.split(',')) for c in s.split(';')] for s in fn().values()]
+
+    def test_an_end_wall_rests_on_the_footprint_below_it_not_on_the_ground_that_footprint_cut(self):
+        walls = self.faces('endBelow')
+        self.assertGreater(len(walls), 0)
+        for w in walls:
+            self.assertAlmostEqual(min(c[2] for c in w), 3., 4, w)      # the road below, not the ground plane (z 4)
+
+    def test_an_end_wall_has_a_corner_where_the_ground_bends(self):
+        walls = self.faces('endCrease')
+        bottoms = sorted(c for w in walls for c in w if c[2] < 4.9)
+        at = [c for c in bottoms if abs(c[0] - 10.) < 1e-6]
+        self.assertTrue(at, 'a corner on the lattice line x = 10')
+        for x, y, z in bottoms:
+            self.assertAlmostEqual(z, abs(x - 10.) * .5, 4)             # every bottom corner on the ground
+
+    def test_a_stack_wall_goes_down_to_the_ground_where_nothing_else_is_below(self):
+        walls = self.faces('stackGround')
+        west = [w for w in walls if all(abs(c[0]) < 1e-6 for c in w)]
+        self.assertGreater(len(west), 0, 'a face on the west edge')
+        for w in west:
+            self.assertAlmostEqual(min(c[2] for c in w), 0., 4, w)      # not the z 3 road that ends under the edge: nothing is below the edge in front of it
+        # the south edge: the road lies under its west half only, the east half goes down to the ground as well
+        south = [w for w in walls if all(abs(c[1]) < 1e-6 for c in w) and max(c[0] for c in w) > 2.5]
+        self.assertGreater(len(south), 0)
+        for w in south:
+            self.assertAlmostEqual(min(c[2] for c in w), 0., 4, w)
+
+    def test_on_no_wall_hangs_over_a_gap(self):
+        for scene in ('bridge', self.OVERPASS):
+            if scene == 'bridge':
+                scene = ('bridge', [chunk('B1', line((-400, 300), (1400, 300)), 5.5, 6., 'trunk', structures=[bridge(800., 1000.)])])
+            with self.subTest(scene=scene[0]):
+                tile, _ = self.block(scene, True)
+                res = G.walls_hanging(tile)
+                self.assertGreater(res['corners'], 0)
+                self.assertEqual(res['hanging'], 0, res['found'][:5])
+
 
 @unittest.skipIf(G.lupa is None, 'lupa.luajit21 not installed')
 class BandUV(unittest.TestCase):
