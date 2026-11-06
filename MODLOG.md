@@ -1,5 +1,243 @@
 # EarthNG native mod migration
 
+## 2026-11-06: guard rails run on to a bridge deck, stock rail material
+
+- Guard rails use the game's own `italy_guardrails` material, UVs fitted to its sheet (one panel per 4 m post spacing, so a
+  joint sits on every post). Fallbacks, logged once: a runtime `e2rf_guardrail` from the game's own textures, then `clad_metal`.
+- A rail stopped short of a bridge deck. Upstream's generator keeps a mapped rail out of a deck's way on purpose (a rail under
+  a deck is wrong): 8 m off the edges and ends of a deck 3.5 m or more over the ground, and a 3 m circle round a deck's ends,
+  so the rail ends 4 to 12 m short. Its deck drawing also leaves out the parapet's first piece beside the approach's end.
+  The swept roads' rails (`sweep.lua`) stop where the exporter ended the run: a mapped run on its last 2 m sample, a rule
+  median rail one 10 m station short. New switch `extras.railsOffDecks` (default on = upstream; the fork profile turns it
+  off): off, a mapped rail runs on to the deck's end and draws in to the parapet over its last metres, ending inside it
+  (`ROADS.joinDecks`), the plain approach rail does the same, and the parapet starts at the end. The swept rails do the
+  same unconditionally (`TUNE.railJoin`, 0 = off), the rule rails at a drop too; a two-faced median rail runs on to the end
+  plane as it is.
+  Tests: `earthng/bridge_rail_test.py`.
+
+## 2026-11-02: release 0.7.0, landmark fixes from the stills
+
+- Stills of ten world landmarks showed what no bench had: the Eiffel Tower as floating plates (skillion
+  roofs were not drawn, `partWalls` took `roof:height` off the walls), the Colosseum as a curved block of
+  flats, window rows on the Golden Gate's towers, Tokyo Tower as an office (a stack of `building=yes`
+  with `min_height`). Now: `BLD.skillion`, `BLD.isMonument` (bare stone), metal towers, lead domes, and a
+  slim block hanging with nothing under it is a mast section.
+- Golden Gate deck: the way is split at the north tower, where the DEM is the sea, and `solve` took
+  every segment end for an abutment; the deck ran from 74 m down to the water and back. `fast_profile.spans`:
+  a node only bridges meet at is no abutment, heights run linearly along the deck between the ends on
+  the ground. Index version fast-19. In the rebuilt spot pack the deck stays at 55-75 over the strait.
+- Port Jackson is `natural=water, water=harbour` and the coastline stops at the Heads: `_flood` sinks
+  sea-level harbours under the sea (pack rebuild).
+- Map Builder did not build routing graphs, so navigation found routes only in packs with a graph
+  built by hand. `build_country._add_routing` writes them into every pack; Ukraine adds about 40 min.
+- Stills only: with gen-budget 40 and dense tiles (~300k triangles) undelivered scenes were evicted
+  and a parked camera kept the holes until the next epoch. In driving it heals, so the release keeps
+  `CELL_LIMIT, TILE_LIMIT, TRIANGLE_LIMIT, VERTEX_LIMIT`; only the stills planets raise them.
+
+## 2026-10-28 (branch feature/navigation): drive and route past the landing region
+
+- The user: a marker cannot be set far away; 100 km at least, where the packs have the roads.
+  The world came from the landing region's cells alone (Khreshchatyk is 37 km from the Kyiv
+  region's west edge) and the route from its graph alone.
+- native.lua: a cell the landing region lacks comes from a mounted neighbour region that has all
+  of it (foreignOf), moved into this frame by an affine on the cell's corners (a translation in
+  one UTM zone, ~2 degrees of turn across a zone border), its elevation resampled onto this
+  cell's grid; neighbour roads get the region id as a prefix and their copies of this region's
+  roads (same OSM end nodes) are dropped at a seam (75 ids collided at the Kyiv/Zhytomyr seam,
+  none the same road; 4,985 roads shared by node pair). edgeKm counts every mounted region.
+  Blocks are read in 256 KB pieces with pauses (own region too); features are decoded only
+  from the neighbour cells meeting the tile.
+- navigator.lua: the graphs of the regions round car and destination (native.routingRegions),
+  6 ms a frame while standing.
+- In game (out/nav-seam-01..03, nav-control-01): M06 at 50.433, 29.99 to Pereiaslav, 124.8 km over
+  6 regions found in ~5 s; 15 km driven over the Zhytomyr/Kyiv seam (UTM 35/36), 2 frames
+  waiting for tiles, 0 m off the line, roads, lamps, trees and ground markers past it. The p99
+  rise past the seam (83-90 ms) is the place: the same stretch landed in the Kyiv region gives 93.
+
+## 2026-10-27 (evening, branch feature/navigation): routing graph R4, not yet in the widget
+
+- Issue #24 (a street line like BeamNG.Earth's) and markers the navigation leads to. The game's
+  navgraph covers 1 km round the car, so long routes come from a routing graph per pack region
+  (docs/NAVIGATION.md): `routing_format.py` (EGR1, navSegment's classes and one-way rules),
+  `build_routing.py` (from a built pack's cells, no rebuild; a companion `<pack>_routing.zip`),
+  `routing.lua` (ffi arrays, regions merged by OSM node id, A* on time with a pause budget,
+  steps with street names). Kyiv region: 98,909 nodes, 2.78 MB, decode 158 ms, the whole region's
+  diagonal (171 km) 39 ms; Khreshchatyk to Zhytomyr over two regions 140 km in 25 ms (lupa LuaJIT).
+- Wired the same evening (navigator.lua, on M.navigator: world.lua is at the 200-local limit): a
+  click on the minimap, or "Navigate here" on the big map, routes from the car in the driven
+  region (2 ms a frame); the next 700 m go to core_groundMarkers as navgraph nodes `e2r_n<id>`
+  that the game has; 45 m off the line for 3 s finds a new route; the line, a flag and
+  "N km to go / In 300 m, left: <street>" show on the map. Not driven in the game yet.
+- No turn restrictions yet (they come with the next pack rebuild).
+- Driven in the game the same night (out/nav-kyiv-01, Khreshchatyk to Boryspil, 36.8 km): the graph
+  came from the mounted companion zip, ground markers lie on the ProceduralMesh roads and the
+  stock minimap draws the line; 7 km by the test autopilot, 0-12 m off the line, 47 marker
+  updates. navigator.step 0.008 ms median. The first load had a 101 ms stretch (10 k name
+  strings at once on the game's 384 MB heap) and an 18 ms read: names now stay in the file's
+  bytes and the file is read in 256 KB pieces, 102 frames for load and search. A long straight
+  handed over one node 58 m ahead: now also the first node past 700 m (to 950 m), and again near
+  the last one (unit test; not driven again).
+- Signs and lights: docs/SIGNS.md (OSM counts for Ukraine, rules that infer signs from data the
+  packs already carry, the stock italy_traf_sign_* set, a frame budget via Forest and one text mesh
+  per tile). Nothing placed yet.
+
+## 2026-10-26 (evening): no rails in front of a high deck's piers, an audit that reads rails
+
+- The user, in game at the Jüri overpass of Tallinna ringtee (0.6.4): the median rails still ran up to
+  the deck's edge and ended in a cross rail in front of the pier. ROADS.onDeck.under (8 m) and
+  .clear (3.5 m): where a deck is 3.5 m or more over the ground, OSM barriers stay 8 m off its edges
+  and ends. Confirmed in game after the change.
+- road_audit.py's near-tile barrier and spike checks read no rail mesh at all (the runtime's cover set
+  lacked e2rf_clad_metal and e2rf_fence_mesh): every earlier "0 barrier, 0 spike" was empty. With
+  the rails in: `underdeck` (rail triangles with asphalt more than 4 m over their tops; a road on an
+  embankment is 3 to 4 m over the ground its rails stand on), `barrier` pixels must have asphalt on
+  all four sides (a rail along the edge is not on the road: 109 -> 21 cells in the Jüri-Tallinn
+  box), and a tall narrow triangle at a building's outline is the building's wall (60 -> 0 spike
+  cells: they were warehouse corners, e.g. an 18 m one at 59.36823, 24.87883).
+- Left: 4 near and 7 far cells of rails under a deck in that box, mostly the stacked interchange at
+  Assaku (59.3594, 24.8735), where several decks cross and an abutment wall stands among the rails.
+
+## 2026-10-26: lamps off the lanes, no walls at bridge joints
+
+- The user, driving: more lamps standing in the middle of the road, and at bridges and flyovers a
+  barrier across the road as if it were not there.
+- Lamps: from 25.10 the packs carry OSM's surveyed lamps (203 k in the Kyiv region), placed at
+  their node, and OSM maps many as nodes of the street or in its lanes. A lamp on a street at grade
+  (its centre line within half its width, or on the drawn asphalt: junction plates and mouths)
+  goes to that street's edge on its own side, 0.7 m into the sidewalk or 1.2 m onto the verge, and
+  on off the asphalt half a metre at a time; one on a deck with no street at grade under it stands
+  in the deck's parapet at its top. A mapped tree on the asphalt is left out (one in its pit by the
+  curb stays). Kyiv, 570 tiles: 3,705 lamps and 172 trees on a carriageway -> 6 lamps and none; of
+  4,738 OSM lamps in 36 central tiles 20 are left out, the rest moved. Lviv centre: 43 -> 1.
+- Decks: liftDecks raised a deck for clearance over any road under its footprint, and a slip road
+  level with the deck that joins it through another way counted: Mykoly Mikhnovskoho at the
+  Druzhby Narodiv junction rose 12 m (deck 135.9 over a pack height of 123.6) and its ramps with it,
+  a wall across the road from the other carriageway at 125.5. A road passes under a deck only from
+  `DECK_CLEAR.below` (1 m) under it: packs and live.lua always keep a real crossing lower.
+- Parapets: a deck side was drawn or left out whole per segment (2 of 3 samples on another
+  carriageway), so where a slip road leaves a long segment its parapet stood across the mouth;
+  the united deck (0.6.1) had no such check at all. Both now go in ~2 m pieces and leave out the
+  ones over another carriageway at the deck's height (the united deck's own carriageways aside).
+- road_audit.py finds these by itself now: `parapet` (a deck wall inside a carriageway), `prop`
+  (street furniture on a carriageway; road_quality's build exports their positions) and `step`
+  (the road's own asphalt jumping and staying there). Kyiv, 50.40-50.48 N, 30.45-30.65 E:
+  parapet cells 267 (edge noise in) -> 23 with the edge rule -> 3; steps 25 -> 7; missing samples
+  121 -> 42. The rest of the steps are pack heights (the South Bridge's layer 2 deck 2-3.6 m over
+  the layer 1 ramp merging into it) or a junction plate the audit misreads (Karavaivskyi viaduct,
+  whose profile follows the pack to 0.4 m).
+- Cost: a central Kyiv near tile 1017 -> 1047 ms (the lamp checks, all in the scene phase: the road
+  goes out as before). Unit check: 423 OK; new: lamps to the edge and on a parapet, trees on the
+  asphalt, a deck not raised over a level slip road, a parapet open at a slip road's mouth; the
+  repeated-abutment test's road under the deck is now 2 m lower, as an old pack keeps it. Not
+  driven in the game.
+
+## 2026-10-26: the road ahead first
+
+- The user, driving at 300 km/h: tiles appeared in front of the car, and at times the road was not
+  there yet and the car fell. A central Kyiv near tile cost 531 ms of Lua on 19.10 and 1024 ms now
+  (`bench_native.py`, 9 tiles round Khreshchatyk): house massing and deck clearance +120 ms, city
+  lawns +100, the yards +90 ms and +38 MB of garbage, the lamp rules +70. No single bug; at the
+  game's 4 ms a frame one tile is ~4 s, and the tile was given out only when its scene was done.
+  The road and its ground are ~230 of those ms, the scene the rest.
+- generator.lua `options.roadReady(road, nav)`: the road layer is closed into its manifest as soon
+  as nothing writes it any more (after the ground lattice) and handed out; the scene is built
+  after it. The manifests are the same as a whole build (18 Kyiv and Bila Tserkva tiles: items,
+  vertices, faces, materials, spawn, navgraph).
+- native.lua (`AHEAD`): a near tile's priority is the seconds the car takes to reach it, along its
+  heading, a step sideways or back counting 3x, blended in from 10 to 30 m/s (the old distance
+  below). At speed the tiles 15 s ahead (within 150 m of the heading line, 2 km at most) are near
+  even past nearM. While driving a build yields once its road is out and is parked; its scene
+  waits 3 s plus 0.1 s per m/s over 10 behind the roads, at most 3 scenes are parked (a road due
+  first gives up the latest, which is built again if its tile is wanted near once more), and at
+  each frame's first step a scene build, or a far one while a road is urgent, goes back to the
+  parked so a road due since goes first. A road due within 6 s raises the frame's generator budget
+  from 4 to 6 ms. The landing still builds whole tiles.
+- world.lua: the ready road started first is the one due first (native's seconds); a road due
+  within 15 s starts however long the queue of scenes is (it waited for the queue to drop under
+  400 items), and a corridor tile past loadR is not unloaded. A road due within 8 s at the queue's
+  head gets 2.5 ms of spawning even when the generator took the frame (it had 0.5 ms).
+- `bench_native.py` now releases every delivered layer as the renderer does (left in the generator
+  they were evicted by its triangle budget: a Kyiv tile is ~65k of 80k) and reports the road ahead
+  of the car driving along +x: the frames on a tile with no road and the lead in seconds.
+  West to east across Kyiv from 50.45, 30.43 (5,200 frames of driving, generator only):
+  - 83 m/s: before, from ~60 s in, every frame on a tile without road; now none, lead min 7.3 s.
+  - 50 m/s: before 1,677 frames without road (lead p5 0); now none, lead min 12.1 s.
+  - 25 m/s: none either way, lead min 13.5 -> 21.5 s; 32 full tiles built against 31.
+  - Rural, west of Kyiv (50.40, 29.85), 83 m/s: lead min 1.4 -> 11.0 s (p5 5.6 -> 14.8), 264 full
+    tiles against 270.
+  At 300 km/h through central Kyiv about half as many scenes are finished (14 against 28 in the
+  same time): the buildings beside the road come later, the road does not.
+- Unit check: 419 OK; new: arrival-time priorities and the corridor, road before scene with at most
+  3 parked, the urgent budget. Not driven in the game.
+
+## 2026-10-25: roads in the far ring, no holes in staggered decks, a road audit
+
+- A free camera past the near radius (nearM, ~1 km round the car) saw the Tallinna ringtee as
+  grass between two lines of guard rail: far tiles drew ground, trees, buildings, rails and
+  fences, but no road. A far tile now draws the surface of every road of class unclassified and
+  up (and its junction plates), as decoration without collision (`ROADS.far`); service streets,
+  tunnels and the horizon draw none. The far ground is coarse (100 m triangles, a fan to the fine
+  lattice at the border) and ignores a road's cutting, so each far road vertex is lifted
+  `ROADS.far.clear` (.25 m) over the far ground's own triangle under it, never lowered: Laagna tee,
+  with the ground 4 m over its asphalt, stays on top. Cost: +4 to +19 % triangles a far tile (about
+  1,700 road triangles a tile in the city, 40 in open country).
+- The 0.6.1 united deck is one slab along the longer bridge of a dual carriageway and takes the other
+  only where it runs beside it. A staggered deck sticking out past that end had no slab and, being
+  in a group, no asphalt of its own: a hole with the lane marks floating over it (Tallinna ringtee,
+  59.3126, 24.7376). A pair whose decks stick out more than 8 m past the host stays two whole decks.
+- `earthng/road_audit.py` checks roads automatically instead of by eye: it builds every tile of an
+  area with generator.lua (near or far tiles), walks every road every 6 m, and lists the stretches
+  with no asphalt (missing) or ground over it (buried; tunnels are skipped), longest first with
+  lat/lon. `road_quality.py` can read one region of a country pack and build far tiles for it.
+- Tallinn area (59.30-59.52 N, 24.55-25.00 E, 2,808 tiles): near tiles 66,465 roads, 722,437 samples,
+  3 missing and 76 buried (was 9 and 419 before the deck fix and the tunnel rule); far tiles 29,015
+  roads, 379,524 samples, 103 missing (the Peterburi tee tunnel, before the checker skipped it)
+  and 107 buried (6.8 % before the lift).
+- The audit also finds a guard rail or mesh fence standing on a carriageway (kind `barrier`, its
+  footprint on the asphalt in m2): none in the Tallinn area.
+- road_quality's offline build now loads the 40 m of neighbouring cells round a tile as the game does
+  (native.lua buildTile, `pad`). Without them a guard rail across a tile edge sampled a ground of 0 past
+  the loaded terrain and dived 40 m into the ground there: an offline-only artefact (the game has the
+  pad), seen first as railings running down under a bridge. The audit now reports such a rail (kind
+  `spike`: a guard rail triangle taller than 3 m and no wider than 4 m); none in the Tallinn area.
+  `Pack` also reads a one-region ZIP (a county download) that has no country manifest.
+- `earthng/model_viewer.py` writes one HTML page of the tiles round a place (all meshes, built by
+  generator.lua through road_quality, `tune.all = 1`): orbit, switch layers, click to measure, and
+  paint the ground and roads by their deviation from the Land Board's LiDAR terrain (green within
+  0.5 m, a model-minus-LiDAR height at every click). It replaces driving a road to check it.
+- A guard rail or fence under a bridge deck is left out under it, at any angle and height (`ROADS.onDeck`;
+  it was only a barrier across a carriageway or under a deck less than 3.5 m up). OSM carries the median
+  and slip road rails of an overpass on under it, and at the Tallinna ringtee at Jüri they read as rails
+  running down under the bridge and crossing each other at the piers (every rail drawn there is a
+  mapped way). They stop at the deck's edges and go on past them. This reverses the earlier rule that
+  kept the lower road's rail under a high deck: the old test now asserts the cut.
+- Unit check: 381 OK (3 skipped); new: far roads and their lift in a cutting, staggered decks, the
+  audit's grading, barrier and spike checks, a one-region ZIP, rails cut under a skewed deck, and the
+  viewer's layers, raster sampling and page. Not driven in the game.
+
+## 2026-10-25: the whole of Estonia at 10 m
+
+- `build --place estonia --local-dem` over the whole country died or took every byte of RAM at
+  z13: the profile solve stitched one dense DEM grid over the bounding box of every road
+  (`fast_profile.Mosaic`: 4.7 GiB over Estonia, sea and empty bog included), and past that the
+  four export workers grew to 3.6 GB each on the islands and filled the machine.
+- `Mosaic` now stitches 8 x 8 tiles at a time and reads only the tiles its points reach (the
+  grid never read the others: at the edge of a downloaded DEM a z13 tile upsamples from z12
+  neighbours that may not be on disk). On 766,337 real Harju stations the heights equal the
+  grid's exactly (max difference 0, 5 s, 157 MB).
+- `_coastlines` kept every source tile's coastline for the life of a worker, as lists of
+  tuples. On an island every tile carries the whole coastline (about 250k vertices, the same
+  ways), so a worker over Saaremaa and Hiiumaa reached 4.9 GB in 40 blocks. Each way is now
+  stored once, as an array; a worker holds ~200 MB over the same blocks. Exported blocks are
+  byte-identical (same CRC and size on three blocks, Kuressaare among them).
+- Result: `earthng_estonia.zip`, 527 MB, 18 regions; the export took 42 minutes with the
+  region indexes already built (about 20 more to build them), Python memory 0.6-0.8 GB
+  throughout. All 15 regions with land are on the 10 m grid; the 3 open-sea regions west of
+  Saaremaa have no road and stay at 25 m. 4,778 sampled tiles of all regions build with
+  generator.lua, none failed. Not driven in the game.
+- Unit check: 354 OK (3 skipped), two new tests (the block sampler against a reference grid
+  and its memory, the shared coastline cache).
+
 ## 2026-10-25: packs carry their data credits
 
 - A map pack shared on its own (a Drive download) named only OpenStreetMap in its

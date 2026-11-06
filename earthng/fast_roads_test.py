@@ -437,6 +437,10 @@ class Floors(unittest.TestCase):
         for ps, ph in profiles:
             self.assertLess(np.max(np.abs(np.diff(ph) / np.diff(ps))), fast_profile.GRADE_MAX['motorway'] + .006)
 
+    def test_the_floors_are_off_unless_switched_on(self):
+        self.assertEqual(fr.FLOORS, os.environ.get('EARTHNG_BRIDGE_FLOORS', '').strip().lower() not in ('', '0', 'off', 'no', 'false'))
+        self.assertEqual(':floors' in fr.SIGNATURE, fr.FLOORS)
+
     def test_no_class_no_floor(self):
         bridge = seg((2, 3), [(-50, 0), (50, 0)], 'secondary', bridge='yes')
         water = [(7, ({'waterway': 'river'},), np.array([[0., -30.], [0., 30.]]))]

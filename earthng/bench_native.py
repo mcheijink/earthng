@@ -54,7 +54,15 @@ def runtime(pack):
       FS={fileExists=function(_,p) return py_exists(p) end, findFiles=function() return py_manifests() end}
       jsonReadFile=function(p) return py_json(p) end
       io.open=function(p) local data=py_bytes(p); if not data then return nil end
-        return {read=function() return data end, close=function() end} end
+        local pos=1
+        return {read=function(_, n)
+          if n == '*a' or n == nil then
+            local chunk=data:sub(pos); pos=#data+1; return chunk
+          end
+          if pos > #data then return nil end
+          local last=math.min(#data, pos+n-1)
+          local chunk=data:sub(pos,last); pos=last+1; return chunk
+        end, close=function() end} end
       hptimer=function() local t0=clock()
         return {stop=function() return (clock()-t0)*1000 end,
                 stopAndReset=function() local n=clock(); local d=(n-t0)*1000; t0=n; return d end} end
@@ -172,6 +180,7 @@ coroutine.resume = function(co, ...)
 end
 local readyFrame
 local x, y
+local released = {}
 for f = 1, frames do
   resumeMax, resumes = 0, 0
   local kb0 = collectgarbage('count')
@@ -180,6 +189,19 @@ for f = 1, frames do
   local ms = (clock() - t) * 1000
   local st = native.status()
   if st.job.state == 'error' then error(st.job.message) end
+  -- the renderer at once (world.lua takes a layer and releases it once spawned): a layer left
+  -- in the generator counts against its triangle budget and is evicted
+  if readyFrame then
+    for _, layer in ipairs({{'road', st.stream.ready}, {'scene', st.stream.scenes}, {'far', st.stream.far}, {'horizon', st.stream.horizon}}) do
+      local name, seen = layer[1], released[layer[1]] or {}
+      released[name] = seen
+      for key, token in pairs(layer[2]) do
+        token = type(token) == 'table' and token.serial or token
+        if seen[key] ~= token then seen[key] = token; native.manifest(key, name); native.release(key, name) end
+      end
+      for key in pairs(seen) do if not layer[2][key] then seen[key] = nil end end
+    end
+  end
   if st.job.state == 'ready' and not readyFrame then
     readyFrame = f
     local p = st.job.manifest.spawn.pos
@@ -192,8 +214,19 @@ for f = 1, frames do
       native.pose({x = x, y = y, vx = speed, vy = 0, state = 'driving'})
     end
   end
+  -- the road ahead (driving along +x): metres from the car to the first tile of its row whose road
+  -- the generator has not delivered (0: the car is on such a tile); the game adds spawn and collision
+  local ahead
+  if readyFrame and speed > 0 and f > readyFrame + 1 then
+    local t = st.stream.tile
+    local i, j = math.floor(x / t), math.floor(y / t)
+    ahead = 20 * t
+    for k = 0, 20 do
+      if not st.stream.ready[i + k .. '_' .. j] then ahead = k == 0 and 0 or (i + k) * t - x; break end
+    end
+  end
   log[f] = {ms = ms, resumeMax = resumeMax, resumes = resumes, kb = collectgarbage('count') - kb0,
-    built = st.stream.built, queued = st.stream.queued, ready = st.stream.readyCount}
+    built = st.stream.built, queued = st.stream.queued, ready = st.stream.readyCount, ahead = ahead}
 end
 coroutine.resume = realResume
 return {frames = log, readyFrame = readyFrame, long = long}
@@ -266,6 +299,13 @@ def main():
           f'longest resume max {max(resume):.1f}; resumes/frame mean {sum(f["resumes"] for f in frames) / len(frames):.0f}; '
           f'frames over 2x budget {sum(m > 2 * a.budget for m in ms)}; garbage KB/frame mean {sum(kb) / max(1, len(kb)):.0f}')
     print(f'  zip reads {io_stats["reads"]}, {io_stats["readMs"]:.0f} ms')
+    drive = [f['ahead'] for f in frames if f.get('ahead') is not None]
+    if drive:
+        lead = [m / a.speed for m in drive]
+        report['road'] = {'frames': len(drive), 'holeFrames': sum(m <= 0 for m in drive),
+                          'leadP5': pct(lead, .05), 'leadP50': pct(lead, .5), 'leadMin': min(lead)}
+        print(f'  road ahead at {a.speed:.0f} m/s over {len(drive)} frames: on a tile without road {report["road"]["holeFrames"]}, '
+              f'lead s min {min(lead):.1f} p5 {pct(lead, .05):.1f} p50 {pct(lead, .5):.1f}')
     for line in list(out.long.values())[:25]:
         print('  long:', line)
     report['stream'] = {'ready': ready, 'built': built, 'frames': len(frames), 'meanMs': sum(ms) / len(ms),
