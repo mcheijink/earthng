@@ -22,6 +22,8 @@ import os
 
 import numpy as np
 
+import region_profile
+
 STEP = 20.0            # station spacing, m
 ALPHA = 40.0 ** 2      # grade smoothing length 40 m
 BETA = 50.0 ** 4       # grade-change smoothing length 50 m
@@ -80,6 +82,34 @@ CURVE_MIN = {'motorway': (10000., 5700.), 'trunk': (8000., 4000.), 'primary': (6
              'trunk_link': (2500., 1000.), 'primary_link': (2500., 1000.), 'secondary_link': (1500., 800.),
              'tertiary_link': (1500., 800.)}
 
+# The class rules above, as the German design guides give them, are the fork's: HOLD_UNDER (the motorway
+# and trunk keep their line under a deck), the motorway grade of 4.5 % instead of 5 %, 8 grade passes instead
+# of 4 and the CURVE_MIN radii. They are off unless EARTHNG_ROAD_RULES=1 (or set_road_rules(True)); off, the
+# solve is upstream's: its own grades (GRADE_MAX at 5 % on motorways, 4 passes), no radii, no held line.
+# The deck floors over water (FLOOR_*) only act when the exporter hands floors in.
+_FORK_RULES = dict(HOLD_UNDER=HOLD_UNDER, GRADE_MOTORWAY=GRADE_MAX['motorway'], GRADE_PASSES=GRADE_PASSES,
+                   CURVE_MIN=dict(CURVE_MIN))
+ROAD_RULES = False
+
+
+def set_road_rules(on):
+    """Switch the fork's class rules on or off (module state read at the next solve); returns the flag."""
+    global HOLD_UNDER, GRADE_PASSES, CURVE_MIN, ROAD_RULES, SIGNATURE
+    ROAD_RULES = bool(on)
+    HOLD_UNDER = _FORK_RULES['HOLD_UNDER'] if on else ()
+    GRADE_MAX['motorway'] = _FORK_RULES['GRADE_MOTORWAY'] if on else .05
+    GRADE_PASSES = _FORK_RULES['GRADE_PASSES'] if on else 4
+    CURVE_MIN = dict(_FORK_RULES['CURVE_MIN']) if on else {}
+    SIGNATURE = _signature()
+    return ROAD_RULES
+
+
+def _signature():
+    """Goes into the source index's identity: every switch that changes a profile."""
+    return (f'profile-rules:{"on" if RULES else "off"}:roads:{"on" if ROAD_RULES else "off"}'
+            f'{":pcg" if PCG else ""}{"" if SPANS else ":nospans"}')
+
+
 # ---------------------------------------------------------------------------------------------------
 # DEM rules (EARTHNG_DEM_RULES=1; off by default until validated, ALTITUDE-REFERENCE.md "DEM
 # contamination"). The coarse DEM (Terrarium z12, an effective footprint of sigma about 60 m here)
@@ -93,8 +123,15 @@ CURVE_MIN = {'motorway': (10000., 5700.), 'trunk': (8000., 4000.), 'primary': (6
 #    (GROUND_LENGTH: a masked stretch is bridged by that curve, under GRADE_MAX and CURVE_MIN below);
 # 2. the profile solve then takes the ground line as its target instead of the raw DEM; near structures
 #    its data weight is lowered to RAMP_W so the decks' clearance and grade rules shape the ramps.
+region_profile.apply_env()      # EARTHNG_PROFILE=fork: the road rules default to on
 RULES = os.environ.get('EARTHNG_DEM_RULES', '0').strip() not in ('', '0', 'off', 'no', 'false')
-SIGNATURE = f'profile-rules:{"on" if RULES else "off"}'
+# EARTHNG_PCG=1: CG runs preconditioned by each road's chain (Chains) and warm started from the last pass, to the
+# solution; off, upstream's solver (Jacobi preconditioner, cold start) stops early at its 1e-3 tolerance.
+# EARTHNG_SPANS=0: no deck for a bridge mapped in pieces (spans(), upstream's; on by default).
+PCG = region_profile.switch('EARTHNG_PCG', False)
+SPANS = region_profile.switch('EARTHNG_SPANS', True)
+SIGNATURE = _signature()
+set_road_rules(os.environ.get('EARTHNG_ROAD_RULES', '0').strip().lower() not in ('', '0', 'off', 'no', 'false'))
 STRUCT_NEAR, STRUCT_FAR, STRUCT_W = 80., 250., .05
 FOREST_BIAS, FOREST_SIGMA, COVER_CELL = 10., 100., 20.
 HUBER, IRLS = 1.5, 3
@@ -513,9 +550,11 @@ def kind(tags):
     return 'road'
 
 
-def held_stations(segments, kinds, s, seg_of, run, xb, xt, count, classes=HOLD_UNDER):
-    """Stations of a HOLD_UNDER road (of `classes`, None: any; not a bridge or tunnel) within HOLD_REACH m
+def held_stations(segments, kinds, s, seg_of, run, xb, xt, count, classes=''):
+    """Stations of a HOLD_UNDER road (classes '': HOLD_UNDER now; None: any; not a bridge or tunnel) within HOLD_REACH m
     of a crossing under a deck, measured along that road: a bool mask over the stations."""
+    if classes == '':
+        classes = HOLD_UNDER
     held = np.zeros(count, bool)
     bounds = np.r_[run, count]
     lower = seg_of[xb]
@@ -855,6 +894,50 @@ def _fine_ground(segments, reference, ground, raw, known, pos_st, ids, seg_of, s
     return dem, raw_b, share_v, own_v, known, note
 
 
+def spans(segments, node_index, kinds, dem):
+    """{node variable: height} of the nodes inside a bridge mapped in pieces.
+
+    Only an end on the ground is an abutment: a node where nothing but bridges meet is a split
+    of the way, and the DEM under it is the water (the Golden Gate's deck, split at its north
+    tower, dived to the sea). Between the abutments the heights run linearly along the deck."""
+    ends = [(k, node_index[seg['nodes'][0]], node_index[seg['nodes'][1]]) for k, seg in enumerate(segments)]
+    ground = {n for k, a, b in ends if kinds[k] <= 0 for n in (a, b)}
+    links = {}
+    for k, a, b in ends:
+        if kinds[k] > 0 and a != b:
+            xy = np.asarray(segments[k]['xy'], dtype=float)
+            weight = 1. / max(float(np.linalg.norm(np.diff(xy, axis=0), axis=1).sum()), .5)
+            links.setdefault(a, []).append((b, weight))
+            links.setdefault(b, []).append((a, weight))
+    inside = {n for n, near in links.items() if n not in ground and len(near) >= 2}
+    heights, seen = {}, set()
+    for start in inside:
+        if start in seen:
+            continue
+        part, stack = [], [start]
+        seen.add(start)
+        while stack:
+            n = stack.pop()
+            part.append(n)
+            for m, _ in links[n]:
+                if m in inside and m not in seen:
+                    seen.add(m)
+                    stack.append(m)
+        where = {n: i for i, n in enumerate(part)}
+        system, values, anchored = np.zeros((len(part), len(part))), np.zeros(len(part)), False
+        for n, i in where.items():
+            for m, weight in links[n]:
+                system[i, i] += weight
+                if m in where:
+                    system[i, where[m]] -= weight
+                else:
+                    values[i] += weight * dem[m]
+                    anchored = True
+        if anchored:                       # a ring of bridges with no way down keeps its DEM
+            heights.update(zip(part, np.linalg.solve(system, values).tolist()))
+    return heights
+
+
 def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, rules=None, cover=None, reference=None):
     """Heights for every segment's stations. sample(xy) -> DEM height (vectorised, NaN outside).
     floors: [(segment index, s0, s1, z)]: the segment's stations within s0..s1 stay at least at z.
@@ -880,7 +963,10 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
     # highway nearly straight on) share a change-of-grade term. Within segments alone the grade could
     # turn freely at every node: a Niedersachsen pack had the motorway go from +2.4 % to -2.0 % at a way
     # joint (a crest of about 500 m radius at 123 km/h).
-    ja, jb, jc, jl, links = joints(segments, s, ids, pos_st, run)
+    if ROAD_RULES:
+        ja, jb, jc, jl, links = joints(segments, s, ids, pos_st, run)
+    else:                       # upstream's solve: the grade may turn freely at a way joint
+        ja, jb, jc, jl, links = np.zeros((0, 3), int), np.zeros(0, int), np.zeros(0, int), np.zeros(0), []
     if len(ja):
         ta, tb, tc, tl = np.r_[ta, ja[:, 0]], np.r_[tb, jb], np.r_[tc, jc], np.r_[tl, jl]
         tri_pair += [(segments[u]['tags'].get('highway'), segments[w]['tags'].get('highway')) for u, w in ja[:, 1:].tolist()]
@@ -912,16 +998,21 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
     # deck sags into the valley. Flat overpasses still want BRIDGE_CLEAR above the ground.
     # (With the rules the abutments are the ground line's, the clearance is over the raw DEM.)
     bounds = np.r_[run, len(s)]
+    deck = spans(segments, node_index, kinds, dem) if SPANS and (kinds > 0).any() else {}
     for k in np.flatnonzero(kinds > 0):
         sl = slice(int(bounds[k]), int(bounds[k + 1]))
         sid = ids[sl]
+        for n in (int(sid[0]), int(sid[-1])):
+            if n in deck:
+                target[n] = max(deck[n], raw[n] + BRIDGE_CLEAR * layers[k])
+                weight[n] = SOFT if known[n] else 1e-3
         interior = sid >= len(node_index)
         if not interior.any():
             continue
         ss = s[sl]
         span = float(ss[-1] - ss[0])
         t = (ss - ss[0]) / span if span > 1e-6 else np.zeros(len(ss))
-        chord = dem[sid[0]] * (1 - t) + dem[sid[-1]] * t
+        chord = deck.get(int(sid[0]), dem[sid[0]]) * (1 - t) + deck.get(int(sid[-1]), dem[sid[-1]]) * t
         want = np.maximum(chord, raw[sid] + BRIDGE_CLEAR * layers[k])
         target[sid[interior]] = want[interior]
         weight[sid[interior]] = np.where(known[sid[interior]], SOFT, 1e-3)
@@ -1079,8 +1170,9 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
             col == np.repeat(np.arange(nvar), np.diff(ptr)), data, 0.), nvar)
         return ptr, col, data, diag0
     ptr, col, data, diag0 = assemble()
-    chains = Chains(ids, run, len(s), nvar, links)
-    chains.bands(ptr, col, data)
+    chains = Chains(ids, run, len(s), nvar, links) if PCG else None
+    if PCG:
+        chains.bands(ptr, col, data)
 
     # the clearance springs act only where a deck would be too low (a lower bound): on a
     # crossing in an active set, outside the CSR matrix
@@ -1111,12 +1203,16 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
         if factive.any():
             diag = diag.copy()
             diag[fv] += FLOOR_WEIGHT * factive
-        # warm start from the last pass: a clearance or grade pass changes the answer only locally
-        x = np.zeros(nvar) if x0 is None else x0.copy()
-        r = b.copy() if x0 is None else b - matvec(x)
-        if chains.factored is None or not np.array_equal(chains.factored, diag):
-            chains.factor(diag)
-        z = chains.apply(r); p = z.copy(); rz = r @ z
+        if PCG:
+            # warm start from the last pass: a clearance or grade pass changes the answer only locally
+            x = np.zeros(nvar) if x0 is None else x0.copy()
+            r = b.copy() if x0 is None else b - matvec(x)
+            if chains.factored is None or not np.array_equal(chains.factored, diag):
+                chains.factor(diag)
+            z = chains.apply(r)
+        else:
+            x = np.zeros(nvar); r = b.copy(); z = r / diag      # upstream's solver: Jacobi, cold start
+        p = z.copy(); rz = r @ z
         norm0 = math.sqrt(b @ b) or 1.
         it = 0
         for it in range(iterations):
@@ -1127,7 +1223,7 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
             x += alpha * p; r -= alpha * ap
             if math.sqrt(r @ r) < tol * norm0:
                 break
-            z = chains.apply(r); rz2 = r @ z
+            z = chains.apply(r) if PCG else r / diag; rz2 = r @ z
             p = z + (rz2 / rz) * p; rz = rz2
         return x, it + 1, math.sqrt(r @ r) / norm0
 
@@ -1191,7 +1287,8 @@ def solve(segments, sample, iterations=400, tol=1e-3, emit=None, floors=None, ru
         ratio = np.abs(bend[sharp]) / limit[sharp]
         cstiff[sharp] = np.minimum(cstiff[sharp] * np.clip(3 * ratio ** 2, 2, 100), CURVE_STIFF_MAX)
         ptr, col, data, diag0 = assemble()
-        chains.bands(ptr, col, data)
+        if PCG:
+            chains.bands(ptr, col, data)
         adem = None
     h = dem + x
     if not np.isfinite(h).all():

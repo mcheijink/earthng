@@ -49,7 +49,7 @@ M.FAST = {motorway = true, motorway_link = true, trunk = true, trunk_link = true
 -- into the tile from up to this far outside it; so do a junction's signals (signals.lua)
 M.DETAIL_MARGIN = 30
 M.DETAILS = {crossing = true, give_way = true, stop_sign = true, mini_roundabout = true, turning_circle = true,
-  signal = true, speed_camera = true}
+  signal = true, traffic_sign = true, speed_camera = true}
 -- a noise barrier moves up to 25 m out of a carriageway (noise.lua): it reaches into the tile from that far off
 M.NOISE_MARGIN = 30
 

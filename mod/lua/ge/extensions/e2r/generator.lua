@@ -26,9 +26,9 @@ local CLAIM = {paved = 1, water = 2, glacier = 3, bare_rock = 4, scree = 5, beac
 -- Asphalt: the aerial street photo over 30 m, its fine detail through the detail maps
 -- (fast_style.ROAD_M, DETAIL_M).
 local COVER_SCALE = {ground = 24, forest = 24, park = 24, meadow = 24, orchard = 24,
-  scrub = 24, heath = 24, glacier = 24, farmland = 12, vineyard = 12, bare_rock = 12,
+  scrub = 24, heath = 24, glacier = 24, farmland = 24, vineyard = 12, bare_rock = 12,
   scree = 12, beach = 12, wetland = 12, bare_ground = 12,
-  road = 30, road_major = 30, road_worn = 30, footway_asphalt = 30,
+  road = 30, road_major = 30, road_worn = 30, footway_asphalt = 30, road_sett = 3,
   -- the climate's open ground (biome.lua): photo sheets of fast_photo.GROUND_M
   desert = 24, dune = 24, steppe = 24, dry_grass = 24, tundra = 24, alpine = 24, snow = 24, snow_edge = 24}
 local ABIN = 12.5      -- m: bins of asphalt pieces that sidewalks and verges are cut by
@@ -295,6 +295,9 @@ VEG.shopFront = {
 VEG.backyard = {{GDC .. 'ind_dumpster_full.DAE', 50, face = true, away = true, fp = {-1.516, 1.501, -.818, .818}},
   {GDC .. 'ind_dumpster_empty.DAE', 50, face = true, away = true, fp = {-1.516, 1.501, -.818, .818}}}
 VEG.propSets = {'yard', 'park', 'square', 'village', 'entrance', 'container', 'gate', 'shopFront', 'backyard'}
+-- A sports ground is a meadow for the ground and the trees (fast_style.ground_kind), mown short:
+-- no tufts or flowers on the field
+VEG.fields = {pitch = true, track = true}
 -- Sidewalk mixes by look.block. america is VEG.props itself, so a test can still replace that
 -- table before the first placement. europe: postsoviet, central, western, british, nordic,
 -- east and southeast Asia. med: plaster countries. No mailboxes and no scattered signs.
@@ -472,6 +475,43 @@ for _, stem in ipairs({'vegetation/dirt_road_edge_grassy_d/t_road_edge_grass_02'
     EDGE_MAPS[#EDGE_MAPS + 1] = '/assets/materials/decalroad/' .. stem .. suffix .. '.dds'
   end
 end
+-- The maps of the road covers (ROADS.covers): the Italy manhole sheet and the grid drain.
+local COVER_MAPS = {}
+for _, stem in ipairs({'baked_props/italy_ground_parts/t_manhole_01_decal', 'decalroad/detail/m_metal_grid_drain/t_metal_grid_drain'}) do
+  for _, suffix in ipairs({'_b.color', '_nm.normal', '_o.data'}) do
+    COVER_MAPS[#COVER_MAPS + 1] = '/assets/materials/' .. stem .. suffix .. '.dds'
+  end
+end
+-- The asphalt patch strip (ROADS.covers patches): newer than the covers, checked on its own.
+local PATCH_MAPS = {'/assets/materials/decalroad/asphalt/road_patches1/t_asphalt_patchstrip_b.color.dds',
+  '/assets/materials/decalroad/asphalt/road_patches1/t_asphalt_patchstrip_o.data.dds'}
+local patchesFound
+local function patchesPresent()
+  if patchesFound == nil then
+    patchesFound = true
+    if FS then
+      for _, path in ipairs(PATCH_MAPS) do
+        local ok, found = pcall(function() return FS:fileExists(path) end)
+        if not (ok and found) then patchesFound = false; break end
+      end
+    end
+  end
+  return patchesFound
+end
+local coversFound
+local function coversPresent()
+  if coversFound == nil then
+    coversFound = true
+    if FS then
+      for _, path in ipairs(COVER_MAPS) do
+        local ok, found = pcall(function() return FS:fileExists(path) end)
+        if not (ok and found) then coversFound = false; break end
+      end
+    end
+  end
+  return coversFound
+end
+
 local decalsFound
 local function decalsPresent()
   if decalsFound == nil then
@@ -949,25 +989,28 @@ local function collector(rect, key, layer, pause, mixed)
       verts[#verts + 1] = {x = x, y = y, z = z}
       return #verts - 1
     end
+    -- vmap[key]: the index of the one vertex at this x, y, or {[zq] = index} once a wall puts a
+    -- second height there (a table for every ground node was ~2 % of a city tile's garbage)
     local key = (xq + WELD) * WELD2 + yq + WELD
-    -- vmap[key]: the index of the one vertex at (x, y), or a table of them by z when there are more
-    -- (a wall's foot and top). A table for every (x, y) was 3 MB of a near tile's garbage.
-    local vmap, zq = mesh.vmap, floor(z * 1000 + .5)
-    local zs = vmap[key]
-    local index
-    if type(zs) == 'number' then
-      if floor(mesh.verts[zs + 1].z * 1000 + .5) == zq then return zs end
-      zs = {[floor(mesh.verts[zs + 1].z * 1000 + .5)] = zs}
-      vmap[key] = zs
-    elseif zs then
-      index = zs[zq]
+    local vmap, verts = mesh.vmap, mesh.verts
+    local hit = vmap[key]
+    local zq = floor(z * 1000 + .5)
+    local zs
+    if hit then
+      if type(hit) == 'table' then
+        zs = hit
+        local index = zs[zq]
+        if index then return index end
+      else
+        local zqHit = floor(verts[hit + 1].z * 1000 + .5)
+        if zqHit == zq then return hit end
+        zs = {[zqHit] = hit}
+        vmap[key] = zs
+      end
     end
-    if not index then
-      local verts = mesh.verts
-      index = #verts
-      verts[index + 1] = {x = x, y = y, z = z}
-      if zs then zs[zq] = index else vmap[key] = index end
-    end
+    local index = #verts
+    verts[index + 1] = {x = x, y = y, z = z}
+    if zs then zs[zq] = index else vmap[key] = index end
     return index
   end
   local function normalIndex(mesh, nx, ny, nz)
@@ -1012,9 +1055,9 @@ local function collector(rect, key, layer, pause, mixed)
     faces[#faces + 1] = face
   end
   -- Ground passes a per-corner normal in p[6..8] (nx can be 0, so the type is the test).
-  -- Walls, curbs and roads leave it unset and keep the face normal n. (Once per collector:
-  -- a closure per triangle was 6 MB of a near tile's garbage, generator_budget.py --garbage.)
-  local function cornerNormal(mesh, p, n, plain)
+  -- Walls, curbs and roads leave it unset and keep the face normal n. Not a closure inside
+  -- triangle(): one per triangle was ~5 % of a city tile's garbage.
+  local function cornerNormal(mesh, p, plain, n)
     if not plain and type(p[6]) == 'number' and type(p[7]) == 'number' and type(p[8]) == 'number' then
       return normalIndex(mesh, p[6], p[7], p[8])
     end
@@ -1040,7 +1083,8 @@ local function collector(rect, key, layer, pause, mixed)
       if swap == false then return end
       if swap then kind, plain = swap, true end
     end
-    local material = 'e2rf_' .. kind
+    -- a kind '=name' is the game's own material by name (ROADS.railLook: the stock guard rail)
+    local material = kind:byte(1) == 61 and kind:sub(2) or 'e2rf_' .. kind
     if mixed and total >= mixed then flush() end
     local mesh = groups[material]
     if not mixed and mesh and mesh.tris >= PIECE_TRIS then flushMaterial(material); mesh = nil end
@@ -1058,13 +1102,14 @@ local function collector(rect, key, layer, pause, mixed)
     local n = normalIndex(mesh, nx, ny, nz)
     -- BeamNG ProceduralMesh expects clockwise face indices and zero-based indices.
     local axis
-    if plain or kind == 'bare_rock' or kind == 'scree' then
+    -- hooks.box (the section bands, ROADS.section.box): a face steeper than that is box mapped like rock, whatever its kind
+    if plain or kind == 'bare_rock' or kind == 'scree' or (hooks.box and math.abs(nz) < hooks.box) then
       local ax, ay, az = math.abs(nx), math.abs(ny), math.abs(nz)
       if ax > az and ax >= ay then axis = 'x' elseif ay > az then axis = 'y' end
     end
-    corner(mesh, a, cornerNormal(mesh, a, n, plain), scale, axis)
-    corner(mesh, c, cornerNormal(mesh, c, n, plain), scale, axis)
-    corner(mesh, b, cornerNormal(mesh, b, n, plain), scale, axis)
+    corner(mesh, a, cornerNormal(mesh, a, plain, n), scale, axis)
+    corner(mesh, c, cornerNormal(mesh, c, plain, n), scale, axis)
+    corner(mesh, b, cornerNormal(mesh, b, plain, n), scale, axis)
     mesh.tris, total, operations = mesh.tris + 1, total + 1, operations + 1
     if operations % 64 == 0 then pause() end
   end
@@ -1172,7 +1217,14 @@ end
 -- profile: its folds ({off the centre line, up from the beam's foot}), `thick` m deep in all.
 ROADS.rail = {height = .75, beam = .32, thick = .1, post = .14, step = 2, posts = 4, sink = .3,
   round = 6, ease = 2, profile = {{0, 0}, {.05, .04}, {.05, .09}, {.015, .155}, {.05, .22}, {.05, .27}, {0, .32}},
-  approach = 40, offset = .5, rank = 4.5, material = 'clad_metal'}
+  approach = 40, offset = .5, rank = 4.5,
+  -- the look of beam and posts: a stock game material by name, else our own kind (sweep.lua M.RAIL, M.railLook)
+  material = 'italy_guardrails', fallback = 'clad_metal'}
+function ROADS.railLook()
+  local sweep = ROADS.sweep
+  if sweep and sweep.railLook then return sweep.railLook(ROADS.rail) end
+  return {tier = 3, stock = false, kind = ROADS.rail.fallback, name = 'e2rf_' .. ROADS.rail.fallback}
+end
 -- A far tile draws the surface of every road of this class (ROADS.rankOf) or above, decoration
 -- only: the far ring is ~130 tiles of the triangle budget, so service streets stay out. `clear`:
 -- how far over the coarse far ground a road's surface is kept where that ground would hide it.
@@ -1198,6 +1250,42 @@ do
   ROADS.noise = ok and type(mod) == 'table' and mod or nil
 end
 ROADS.swept = {on = true, mode = 'fast', scale = COVER_SCALE.road}
+-- Fork additions that change what an existing pack draws, all off so that a pack draws as upstream's
+-- generator draws it (set per call in options, for the session with world.lua's extras(), or by a pack:
+-- the region manifest's `extras` is applied by native.lua when the landing starts):
+--   signals       static traffic signals and speed cameras on stock poles (signals.lua); upstream's own
+--                 signals are options.experimentalDetail's, and with that on these stay out
+--   lots          bay lines on car parks and the zig-zag at bus stops (lots.lua)
+--   openSea       the sea plane floods only the sea joined to a seed (a level block or a mapped tidal flat), so
+--                 marsh and polder land under the sea level stays dry; off, every low quad that is not land
+--                 or a road is sea (the lattice-shaped shore of ROADS.seaWater is the same either way)
+--   lampRows      German lamp practice for the inferred street lamps (rows by street width, lit only in towns)
+--   roadProfiles  the runtime vertical alignment of roads: floors over water, class grades and radii
+--                 (German design limits), humps, carriageway pairs
+--   shops         (default ON, upstream's) shop and brand signs, storefronts, fuel and venue dressing, open
+--                 canopies (building=roof) and the glyph letters of address plates and stop signs: all drawn in
+--                 the planet's brand_sign, storefront, brand_photo and glyphs materials, which only upstream's
+--                 newer planet ships. Off, none of them is requested and a building=roof is a plain building
+--   landmarks     (default ON, upstream's) hw_ashlar walls for churches, monuments and towers, wall and roof
+--                 choices of the places of worship, roof_gold domes. Off, those buildings take the walls and
+--                 roofs of any other building, with materials every planet has
+--   railsOffDecks (default ON, upstream's) a mapped guard rail stays off a bridge deck: out to `under` m off the edges
+--                 and ends of a deck `clear` m or more over the ground, and `reach` m round a deck's ends (ROADS.onDeck),
+--                 so a rail stops short of the bridge. Off, the rail runs on to the deck's end and joins its parapet
+--                 (ROADS.joinDecks; the plain approach rail of ROADS.substructure draws in to it too)
+--   conformal     (default off) the conformal ground of conformal.lua, see below: the swept fast roads cut the
+--                 ground lattice instead of lying on it. Needs swept roads and a pack with the height pipeline
+ROADS.extras = {signals = false, lots = false, roadProfiles = false, lampRows = false, openSea = false,
+  shops = true, landmarks = true, railsOffDecks = true, conformal = false}
+function ROADS.extra(options, name)
+  local v = options and options[name]
+  if v == nil then v = ROADS.extras[name] end
+  return v == true
+end
+function ROADS.applyExtras()
+  ROADS.shoulders.motorway = ROADS.extras.roadProfiles and {.25, 3.3} or {.75, 2.5}
+  if ROADS.conformal then ROADS.conformal.on = ROADS.extras.conformal == true end
+end
 -- Power lines and wind turbines (power.lua): near scene and far layer, never the horizon
 do
   local ok, mod = pcall(require, 'ge/extensions/e2r/power')
@@ -1207,6 +1295,14 @@ end
 do
   local ok, mod = pcall(require, 'ge/extensions/e2r/lots')
   ROADS.lots = ok and type(mod) == 'table' and mod or nil
+end
+-- Conformal ground (conformal.lua; patches/GROUND-MESH-DESIGN.md, phase 1): off unless its switch is on (the extras
+-- switch `conformal`, a pack's manifest `extras` or world.lua extras(); world.lua conformalGround sets both it and
+-- M.CONFORMAL.on, and options.conformal overrides it for one build). The swept fast roads then cut the ground lattice: no ground under the carriageway or its
+-- verge bands, the toe of a band split at the lattice lines and meeting the ground there, smaller lift and ground drop.
+do
+  local ok, mod = pcall(require, 'ge/extensions/e2r/conformal')
+  ROADS.conformal = ok and type(mod) == 'table' and mod or nil
 end
 
 -- A generator way with no bridge of its own that runs on a swept road's surface at grade leaves it: its
@@ -1344,15 +1440,25 @@ end
 
 -- A box's four sides round (x, y): `across` half width along the normal of (tx, ty), `along`
 -- half length along it, from zb up to zt. Its top and bottom are never seen.
-function ROADS.box(face, material, x, y, tx, ty, across, along, zb, zt, repeatU)
+-- window {u0, v at the top, u1, v at the bottom}: a box side covers that patch of the texture instead of its metres
+function ROADS.window(poly, w, h, window)
+  for _, q in ipairs(poly) do
+    q[4], q[5] = window[1] + q[4] / w * (window[3] - window[1]), window[2] + q[5] / h * (window[4] - window[2])
+  end
+end
+function ROADS.box(face, material, x, y, tx, ty, across, along, zb, zt, repeatU, window)
   local nx, ny = -ty, tx
   local function c(sa, sb, z, u, v)
     return {x + nx * across * sa + tx * along * sb, y + ny * across * sa + ty * along * sb, z, u, v}
   end
   local h, wa, wb = (zt - zb) / repeatU, 2 * across / repeatU, 2 * along / repeatU
   for _, s in ipairs(SIDES) do
-    face({c(-1, s, zt, 0, 0), c(1, s, zt, wa, 0), c(1, s, zb, wa, h), c(-1, s, zb, 0, h)}, tx * s, ty * s, 0, material)
-    face({c(s, -1, zt, 0, 0), c(s, 1, zt, wb, 0), c(s, 1, zb, wb, h), c(s, -1, zb, 0, h)}, nx * s, ny * s, 0, material)
+    local side = {c(-1, s, zt, 0, 0), c(1, s, zt, wa, 0), c(1, s, zb, wa, h), c(-1, s, zb, 0, h)}
+    if window then ROADS.window(side, wa, h, window) end
+    face(side, tx * s, ty * s, 0, material)
+    side = {c(s, -1, zt, 0, 0), c(s, 1, zt, wb, 0), c(s, 1, zb, wb, h), c(s, -1, zb, 0, h)}
+    if window then ROADS.window(side, wb, h, window) end
+    face(side, nx * s, ny * s, 0, material)
   end
 end
 
@@ -1519,11 +1625,13 @@ function ROADS.seaQuads(ctx)
     pause()
   end
   local sea, stack = {}, {}
-  for _, q in ipairs(seeds) do
+  -- ROADS.extras.openSea: only the sea joined to a seed (below); off, every low quad that is no land or road is sea
+  if not ROADS.extras.openSea then sea = open end
+  for _, q in ipairs(ROADS.extras.openSea and seeds or NONE) do
     local k = key(q[1], q[2])
     if open[k] and not sea[k] then sea[k], stack[#stack + 1] = true, q end
   end
-  for gx = lo, hi - 2 do
+  for gx = lo, ROADS.extras.openSea and hi - 2 or lo - 1 do
     for gy = lo, hi - 2 do
       local k = key(gx, gy)
       if open[k] and open[key(gx + 1, gy)] and open[key(gx, gy + 1)] and open[key(gx + 1, gy + 1)] and not sea[k] then
@@ -1717,7 +1825,7 @@ function ROADS.guardRail(ctx, path)
   -- cut where it runs onto one (a gore's rail into the merge, a bridge-approach rail across a slip road);
   -- pieces under railClear.min m go
   if ctx.strips and not ctx.cleared then
-    local rc, runs, run = ROADS.railClear, {}, {}
+    local rc, runs, run, onRoad = ROADS.railClear, {}, {}, false
     local function close()
       local length = 0
       for k = 2, #run do length = length + math.sqrt((run[k][1] - run[k - 1][1]) ^ 2 + (run[k][2] - run[k - 1][2]) ^ 2) end
@@ -1733,18 +1841,25 @@ function ROADS.guardRail(ctx, path)
       for i = k == 1 and 0 or 1, n do
         local t = i / n
         local q = {a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, (a[3] or 0) + ((b[3] or 0) - (a[3] or 0)) * t}
-        if ROADS.onCarriageway(ctx.strips, q[1], q[2], rc.margin) then close() else run[#run + 1] = q end
+        if ROADS.onCarriageway(ctx.strips, q[1], q[2], rc.margin) then onRoad = true; close() else run[#run + 1] = q end
       end
     end
     close()
-    local sub = {}
-    for key, v in pairs(ctx) do sub[key] = v end
-    sub.cleared = true
-    for _, r in ipairs(runs) do ROADS.guardRail(sub, r) end
-    return
+    -- a rail clear of every carriageway stays whole (its corners are rounded over its own vertices, not the samples)
+    if onRoad then
+      local sub = {}
+      for key, v in pairs(ctx) do sub[key] = v end
+      sub.cleared = true
+      for _, r in ipairs(runs) do ROADS.guardRail(sub, r) end
+      return
+    end
   end
   local rail, rect, face = ROADS.rail, ctx.rect, ctx.face
   local behind = ctx.behind or 1
+  -- the look: the stock sheet's UVs (a panel of u every look.panel m, the beam's strip of v) or our own (4 m, a quarter of v)
+  local look = ROADS.railLook()
+  local kind, panel = look.kind, look.stock and look.panel or 4
+  local v0, dv = look.stock and look.v0 or 0, look.stock and look.dv or .25
   path = ROADS.roundPath(path, rail.round)
   local pts, along = {}, {}
   for k = 1, #path - 1 do
@@ -1808,17 +1923,17 @@ function ROADS.guardRail(ctx, path)
     local nx, ny = -f[2], f[1]
     local off = (q[1] + gap) * side * f[3]
     local n = pn[i]
-    return {p[1] + nx * off, p[2] + ny * off, p[3] + low + q[2], u, q[2] / rail.beam * .25,
+    return {p[1] + nx * off, p[2] + ny * off, p[3] + low + q[2], u, v0 + q[2] / rail.beam * dv,
       nx * n[1] * side, ny * n[1] * side, n[2]}
   end
-  -- a skin vertex (k, i, side) stands in four quads (two folds, two segments) with the same u, along[k] / 4:
+  -- a skin vertex (k, i, side) stands in four quads (two folds, two segments) with the same u, along[k] / panel:
   -- made once instead of four times (the rail's vertex tables were ~3 MB of a near tile's garbage,
   -- generator_budget.py --garbage). The faces only read their corners.
   local skin = {}
   local function skinVertex(k, i, side)
     local key = (k * (#profile + 1) + i) * 2 + (side > 0 and 1 or 0)
     local v = skin[key]
-    if not v then v = vertex(k, i, side, along[k] / 4); skin[key] = v end
+    if not v then v = vertex(k, i, side, along[k] / panel); skin[key] = v end
     return v
   end
   local post = 0
@@ -1835,7 +1950,7 @@ function ROADS.guardRail(ctx, path)
           local fn = pn[i][1] + pn[i + 1][1]
           local fz = pn[i][2] + pn[i + 1][2]
           face({skinVertex(k, i, side), skinVertex(k + 1, i, side), skinVertex(k + 1, i + 1, side), skinVertex(k, i + 1, side)},
-            -ty * fn * side, tx * fn * side, fz, rail.material)
+            -ty * fn * side, tx * fn * side, fz, kind)
         end
       end
       -- the beam's ends: its two skins closed by the fold
@@ -1844,7 +1959,7 @@ function ROADS.guardRail(ctx, path)
         for i = 1, #profile - 1 do
           local c = {vertex(e, i, 1, 0), vertex(e, i + 1, 1, 0), vertex(e, i + 1, -1, 0), vertex(e, i, -1, 0)}
           for _, v in ipairs(c) do v[6], v[7], v[8] = nil, nil, nil end
-          face(c, tx * s, ty * s, 0, rail.material)
+          face(c, tx * s, ty * s, 0, kind)
         end
       end
     end
@@ -1853,8 +1968,9 @@ function ROADS.guardRail(ctx, path)
       if mine then
         local t = math.max(0, math.min(1, (post - along[k]) / math.max(EPS, along[k + 1] - along[k])))
         local off = (rail.thick / 2 + rail.post / 2) * behind
-        ROADS.box(face, rail.material, a[1] + dx * t - ty * off, a[2] + dy * t + tx * off, tx, ty,
-          rail.post / 2, rail.post / 2, a[3] + (b[3] - a[3]) * t - rail.sink, a[3] + (b[3] - a[3]) * t + rail.height - .02, 1)
+        ROADS.box(face, kind, a[1] + dx * t - ty * off, a[2] + dy * t + tx * off, tx, ty,
+          rail.post / 2, rail.post / 2, a[3] + (b[3] - a[3]) * t - rail.sink, a[3] + (b[3] - a[3]) * t + rail.height - .02, 1,
+          look.stock and look.post or nil)
       end
       post = post + rail.posts
     end
@@ -1869,13 +1985,23 @@ end
 -- mapping slip. A barrier under a bridge deck, at any angle and any height, is dropped under it:
 -- a fence mapped under a low bridge would stand through the road, and the median and slip road
 -- rails OSM runs on under an overpass read as rails going down under the bridge (Tallinna ringtee
--- at Jüri), crossing each other at the piers; they resume past the deck's edge. Tunnels pass
--- under everything.
-ROADS.onDeck = {reach = 3, parallel = .85, step = 2, cross = .3, across = .5}
+-- at Jüri), crossing each other at the piers; they resume past the deck's edge. A deck at least
+-- `clear` m over the ground there also keeps barriers `under` m off its edges and ends: the median
+-- rails ran up to the deck's edge and stopped in front of its piers (a rail end across the median
+-- at the pier), which still read as rails under the bridge. Tunnels pass under everything.
+-- With `open` (ROADS.extras.railsOffDecks off) a barrier is dropped only where it runs along the deck itself or across it:
+-- not past a deck's end (the `reach` circle round it), and not for standing 8 m off a high deck: the rail runs on to the
+-- end (ROADS.joinDecks).
+ROADS.onDeck = {reach = 3, parallel = .85, step = 2, cross = .3, across = .5, under = 8, clear = 3.5}
+-- Where a rail meets a deck (ROADS.joinDecks, ROADS.substructure with ctx.join): a barrier that stops within `reach` m of a
+-- bridge's end, beside it, runs on to the end plane, its last `taper` m (at least 8 x the sideways step) drawing in to the
+-- parapet, and ends `overrun` m inside it, its line `inset` m inside the parapet's outer face (the parapet is 0.3 m thick: the
+-- beam's face lies just inside its inner face): no gap, and no rail end toward the traffic.
+ROADS.deckJoin = {reach = 12, taper = 6, overrun = .3, inset = .24}
 -- the runs of points ({x, y, ...}) off every bridge deck and carriageway in strips; nil when
 -- none is near. ground(x, y): the drawn ground, for a deck's clearance (none: decks only).
--- pause (optional): a pause point every 16 segments of the barrier
-function ROADS.offDecks(strips, points, ground, pause)
+-- pause (optional): a pause point every 16 segments of the barrier. open: see ROADS.onDeck
+function ROADS.offDecks(strips, points, ground, pause, open)
   local od, decks = ROADS.onDeck, nil
   local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
   for _, p in ipairs(points) do
@@ -1885,16 +2011,16 @@ function ROADS.offDecks(strips, points, ground, pause)
     local bridge = ROADS.bridge(strip.tags)
     if bridge or ground and not ROADS.tunnel(strip.tags) then
       local ps = strip.points
-      local r = math.max(bridge and strip.hw + od.reach or 0, strip.hw + od.cross)
+      local r = math.max(bridge and strip.hw + od.under or 0, strip.hw + od.cross)
       for k = 1, #ps - 1 do
         local a, b = ps[k], ps[k + 1]
         if math.max(a[1], b[1]) + r > x0 and math.min(a[1], b[1]) - r < x1
           and math.max(a[2], b[2]) + r > y0 and math.min(a[2], b[2]) - r < y1 then
           decks = decks or {}
-          -- {ax, ay, bx, by, along reach, across reach, az, bz, deck, x0, y0, x1, y1 (reach box)}
+          -- {ax, ay, bx, by, along reach, across reach, az, bz, deck, x0, y0, x1, y1 (reach box), under reach}
           decks[#decks + 1] = {a[1], a[2], b[1], b[2], bridge and strip.hw + od.reach or 0, strip.hw + od.cross,
             a[3] or 0, b[3] or 0, bridge, math.min(a[1], b[1]) - r, math.min(a[2], b[2]) - r,
-            math.max(a[1], b[1]) + r, math.max(a[2], b[2]) + r}
+            math.max(a[1], b[1]) + r, math.max(a[2], b[2]) + r, bridge and strip.hw + od.under or 0}
         end
       end
     end
@@ -1911,10 +2037,12 @@ function ROADS.offDecks(strips, points, ground, pause)
       if l2 > EPS and mx > s[10] and mx < s[12] and my > s[11] and my < s[13] then
         local cos = math.abs(dx * sx + dy * sy) / (l * math.sqrt(l2))
         local along = cos >= od.parallel
-        local t = math.max(0, math.min(1, ((mx - s[1]) * sx + (my - s[2]) * sy) / l2))
+        local raw = ((mx - s[1]) * sx + (my - s[2]) * sy) / l2
+        local t = math.max(0, math.min(1, raw))
         local d2 = (mx - s[1] - t * sx) ^ 2 + (my - s[2] - t * sy) ^ 2
-        if along and d2 < s[5] * s[5] then return true end
+        if along and d2 < s[5] * s[5] and not (open and (raw < 0 or raw > 1)) then return true end
         if d2 < s[6] * s[6] and (s[9] or ground and cos <= od.across) then return true end
+        if not open and s[9] and ground and d2 < s[14] * s[14] and s[7] + (s[8] - s[7]) * t - ground(mx, my) >= od.clear then return true end
       end
     end
     return false
@@ -1936,6 +2064,109 @@ function ROADS.offDecks(strips, points, ground, pause)
     end
   end
   return runs
+end
+-- A run of a barrier (ROADS.offDecks' pieces) that ends beside a bridge's end runs on to the deck (ROADS.deckJoin): the rail
+-- is extended or trimmed to the end plane, drawn in to the parapet over the last stretch and ended inside it. A deck's side
+-- without a parapet (another deck or a road at its edge) and a bridge that goes on in another way are left. sidewalk: a
+-- deck's parapet stands outside its sidewalk. Returns the run itself when nothing joins.
+function ROADS.joinDecks(strips, run, sidewalk)
+  local dj, n = ROADS.deckJoin, #run
+  if n < 2 then return run end
+  local sqrt, abs = math.sqrt, math.abs
+  local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
+  for _, p in ipairs(run) do
+    x0, y0, x1, y1 = math.min(x0, p[1]), math.min(y0, p[2]), math.max(x1, p[1]), math.max(y1, p[2])
+  end
+  local pad = dj.reach + 8
+  -- the ends of the bridges near the run: x, y, outward unit (tx, ty), strip direction (dx, dy), the strip, its half width and walks
+  local ends, decks = {}, {}
+  for _, strip in ipairs(strips) do
+    local ps = strip.points
+    if ROADS.bridge(strip.tags) and not ROADS.tunnel(strip.tags) and ps and #ps >= 2 then decks[#decks + 1] = strip end
+  end
+  for _, strip in ipairs(decks) do
+    local ps = strip.points
+    for e = 1, 2 do
+      local E, F = ps[e == 1 and 1 or #ps], ps[e == 1 and 2 or #ps - 1]
+      if E[1] > x0 - pad and E[1] < x1 + pad and E[2] > y0 - pad and E[2] < y1 + pad then
+        local tx, ty = E[1] - F[1], E[2] - F[2]
+        local l = sqrt(tx * tx + ty * ty)
+        local goes = false
+        for _, other in ipairs(decks) do
+          if other ~= strip then
+            for _, q in ipairs({other.points[1], other.points[#other.points]}) do
+              if (q[1] - E[1]) ^ 2 + (q[2] - E[2]) ^ 2 < 2.25 then goes = true end
+            end
+          end
+        end
+        if l > EPS and not goes then
+          tx, ty = tx / l, ty / l
+          -- parapet[side]: m from the end to the parapet's first piece (the deck drawing records it: nil there = none on that
+          -- side; no record at all = the end is outside this tile's drawing, the parapet is taken to start at the end)
+          local recorded = e == 1 and strip.parapetA or strip.parapetB
+          ends[#ends + 1] = {strip = strip, x = E[1], y = E[2], tx = tx, ty = ty, dx = e == 1 and -tx or tx, dy = e == 1 and -ty or ty,
+            walk = strip.walk and strip.walk[e == 1 and 1 or #ps - 1] or NONE, parapet = recorded or setmetatable({}, {__index = function() return 0 end})}
+        end
+      end
+    end
+  end
+  if #ends == 0 then return run end
+  -- another deck's carriageway at (x, y): there a parapet does not stand
+  local function crowded(own, x, y)
+    for _, other in ipairs(decks) do
+      if other ~= own then
+        local ps = other.points
+        for k = 1, #ps - 1 do
+          local ax, ay, bx, by = ps[k][1], ps[k][2], ps[k + 1][1], ps[k + 1][2]
+          local ux, uy = bx - ax, by - ay
+          local l2 = ux * ux + uy * uy
+          local t = l2 > EPS and math.max(0, math.min(1, ((x - ax) * ux + (y - ay) * uy) / l2)) or 0
+          if (x - ax - t * ux) ^ 2 + (y - ay - t * uy) ^ 2 < other.hw ^ 2 then return true end
+        end
+      end
+    end
+    return false
+  end
+  -- the points to add after P (the run's end; Q its neighbour), or nil
+  local function tail(P, Q)
+    local rx, ry = P[1] - Q[1], P[2] - Q[2]
+    local rl = sqrt(rx * rx + ry * ry)
+    if rl < EPS then return nil end
+    local best
+    for _, d in ipairs(ends) do
+      local ex, ey = P[1] - d.x, P[2] - d.y
+      local along = ex * d.tx + ey * d.ty
+      local lat = ex * -d.dy + ey * d.dx
+      local side = lat > 0 and 1 or -1
+      local outer = d.strip.hw + (d.walk[side] and sidewalk or 0)
+      -- beside the deck's end, running towards it
+      if along >= -1.5 and along <= dj.reach and abs(lat) >= outer - .35 and abs(lat) <= outer + 4.5
+        and (rx * -d.tx + ry * -d.ty) / rl > .5 and (not best or abs(along) < abs(best.along)) then
+        best = {d = d, along = along, lat = lat, side = side, outer = outer}
+      end
+    end
+    if not best then return nil end
+    local d, side = best.d, best.side
+    local skip = d.parapet[side]
+    if not skip or skip > 3 then return nil end
+    if crowded(d.strip, d.x - d.dy * side * (best.outer + 1), d.y + d.dx * side * (best.outer + 1)) then return nil end
+    local target = side * (best.outer - dj.inset)
+    local taper = math.max(dj.taper, 8 * abs(best.lat - target))
+    local function at(along, lat)
+      return {d.x + d.tx * along - d.dy * lat, d.y + d.ty * along + d.dx * lat}
+    end
+    local out = {}
+    if best.along > taper then out[#out + 1] = at(taper, best.lat) end
+    out[#out + 1] = at(-skip - dj.overrun, target)
+    return out
+  end
+  local head, last = tail(run[1], run[2]), tail(run[n], run[n - 1])
+  if not head and not last then return run end
+  local out = {}
+  for k = #(head or NONE), 1, -1 do out[#out + 1] = head[k] end
+  for _, p in ipairs(run) do out[#out + 1] = p end
+  for _, p in ipairs(last or NONE) do out[#out + 1] = p end
+  return out
 end
 -- OSM maps a guard rail where the imagery showed it, and some stand metres off the road the pack
 -- draws (an old alignment, a ramp since rebuilt, a mapping offset): out in the grass they read
@@ -2214,18 +2445,34 @@ function ROADS.substructure(ctx)
           local k0, k1, step = e == 1 and 1 or n, e == 1 and n or 1, e == 1 and 1 or -1
           for _, sign in ipairs({1, -1}) do
             local path = {}
+            -- ctx.join (ROADS.deckJoin): the rail starts inside the bridge's parapet and draws out to its line over `taper` m,
+            -- so the parapet's end does not stand out toward the traffic
+            local dj = ctx.join and ROADS.deckJoin
+            local function lateral(k, gone)
+              local full = wide(k, sign) + rail.offset
+              if not dj then return full * sign end
+              local join = wide(k, sign) - dj.inset
+              local w = math.max(0, math.min(1, gone / math.max(dj.taper, 8 * (full - join))))
+              return (join + (full - join) * w * w * (3 - 2 * w)) * sign
+            end
             for k = k0, k1, step do
-              local offset = (wide(k, sign) + rail.offset) * sign
+              local offset = lateral(k, math.abs(dist[k] - from))
               local gone = math.abs(dist[k] - from)
               if gone <= rail.approach then
                 path[#path + 1] = edge(k, offset, 0)
               else
                 local prev = k - step
                 local t = (rail.approach - math.abs(dist[prev] - from)) / math.max(EPS, math.abs(dist[k] - dist[prev]))
-                local a, b = edge(prev, offset, 0), edge(k, offset, 0)
+                local a, b = edge(prev, lateral(prev, math.abs(dist[prev] - from)), 0), edge(k, offset, 0)
                 path[#path + 1] = {a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t}
                 break
               end
+            end
+            if dj and #path >= 2 then
+              -- and `overrun` m on into the parapet, on the line of the first stretch
+              local a, b = path[1], path[2]
+              local l = math.max(EPS, math.sqrt((a[1] - b[1]) ^ 2 + (a[2] - b[2]) ^ 2))
+              table.insert(path, 1, {a[1] + (a[1] - b[1]) / l * dj.overrun, a[2] + (a[2] - b[2]) / l * dj.overrun, a[3]})
             end
             -- the path runs away from the bridge: walking from the start end the road's left
             -- (+ side) is the path's left; from the far end it is the path's right. Posts stand
@@ -2566,7 +2813,9 @@ end
 -- Paved shoulder (m) outside the edge lines, left and right of the node order: tagged
 -- (shoulder:left:width and shoulder:right:width, from the road register), else by class where the
 -- way has no width tag: the pack widened the carriageway by it (fast_sources.shoulder, same rule).
-ROADS.shoulders = {motorway = {.25, 3.3}, trunk = {1, 1}, primary = {.5, .5}, secondary = {.25, .25}}   -- bundle8: motorway 0.25 / 3.3 (fast_sources.SHOULDER)
+ROADS.shoulders = {motorway = {.75, 2.5}, trunk = {1, 1}, primary = {.5, .5}, secondary = {.25, .25}}
+-- the German motorway's shoulders (0.25 m on the median side, 3.3 m on the right; fast_sources.SHOULDER with the
+-- exporter's EARTHNG_ROAD_RULES) follow ROADS.extras.roadProfiles, see ROADS.applyExtras
 ROADS.shouldersOneway = {trunk = {.5, 1.5}, primary = {.25, .75}}
 function ROADS.shoulder(tags)
   local tagLeft, tagRight = tonumber(tags['shoulder:left:width']), tonumber(tags['shoulder:right:width'])
@@ -3029,6 +3278,541 @@ function DETAIL.paint(ctx)
   return painted
 end
 
+-- Road signs (options.experimentalDetail): the game's Italian set in the common art
+-- (garage_and_dealership/Clutter, dated 2013, so 0.39 has it too), a 3.35 m pole and its face
+-- in one model, the face to local -Y (yaw = atan2 of the travel direction turns it to the
+-- driver). Mapped give-way and stop nodes and marked crossings are facts; the rest is read off
+-- what the pack already says at a node: road classes, oneway, maxspeed. Where the data says
+-- nothing (a speed with no model, a junction that may have lights) no sign stands.
+-- SIGNS.plan returns requests {kind, model, road, dist, s, dir, key}: the sign stands on the
+-- right of travel along `road` in direction `dir` (+1 the point order) at arc length s.
+local SIGNS = {dir = GDC .. 'italy_traf_sign_', near = .5, mouth = 1.2, priority = 5, speedAt = 8,
+  oneway = 3, noentry = 1, crossing = 2, minor = 2, top = 3, lights = 30,
+  speeds = {[30] = true, [50] = true, [60] = true, [80] = true, [90] = true, [100] = true}}
+SIGNS.models = {give_way = 'give_way', stop_sign = 'stop', priority = 'priorityroad', crossing = 'zebra',
+  oneway = 'one_way', noentry = 'noentry', roundabout = 'roundabout'}
+
+-- the travel directions a road allows: forward (+1, the point order), backward (-1)
+function SIGNS.ways(tags)
+  local oneway, flip = ROADS.oneway(tags)
+  if not oneway then return true, true end
+  return not flip, flip
+end
+
+local function signSpeed(tags)
+  local v = tostring(tags.maxspeed or ''):lower()
+  if not v:match('^%d+$') then return nil end
+  return tonumber(v)
+end
+
+function SIGNS.plan(roads, mouths, order, points, cutsOf, pause)
+  local out, handled = {}, {}
+  local function arc(road)
+    if road.e2rDist then return road.e2rDist end
+    local points, dist = road.points, {0}
+    for k = 2, #points do
+      dist[k] = dist[k - 1] + math.sqrt((points[k][1] - points[k - 1][1]) ^ 2 + (points[k][2] - points[k - 1][2]) ^ 2)
+    end
+    road.e2rDist = dist
+    return dist
+  end
+  local function add(kind, road, s, dir, key, model)
+    local dist = arc(road)
+    local length = dist[#dist]
+    if length < 2 then return end
+    local shape = model or SIGNS.models[kind]
+    out[#out + 1] = {kind = kind, model = shape and (SIGNS.dir .. shape .. '.dae') or nil, road = road, dist = dist,
+      s = math.max(.5, math.min(length - .5, s)), dir = dir, key = key}
+  end
+  -- the mapped nodes on a road vertex: give-way, stop, a marked crossing
+  local vertices, wanted = {}, {}
+  for _, point in ipairs(points) do
+    if point.pos and (point.kind == 'give_way' or point.kind == 'stop_sign' or point.kind == 'crossing'
+        or point.kind == 'signal' or point.kind == 'traffic_sign') then
+      wanted[#wanted + 1] = point
+    end
+  end
+  -- Mapped signals take precedence over inferred signs at the same place.
+  local sorted = {}
+  for _, p in ipairs(wanted) do if p.kind == 'signal' then sorted[#sorted + 1] = p end end
+  for _, p in ipairs(wanted) do if p.kind ~= 'signal' then sorted[#sorted + 1] = p end end
+  wanted = sorted
+  if #wanted > 0 then
+    for index, road in ipairs(roads) do
+      for k, p in ipairs(road.points or NONE) do
+        local key = (floor(p[1]) + 65536) * 131072 + floor(p[2]) + 65536
+        local bin = vertices[key] or {}
+        vertices[key], bin[#bin + 1] = bin, {road, k}
+      end
+      if index % 256 == 0 then pause() end
+    end
+  end
+  local lights = {}
+  for _, point in ipairs(wanted) do
+    local p, tags = point.pos, point.tags or NONE
+    if point.kind == 'signal' or point.kind == 'crossing' and (tags.crossing == 'traffic_signals' or tags['crossing:signals'] == 'yes') then
+      lights[#lights + 1] = p
+    end
+    local found
+    for dx = -1, 1 do
+      for dy = -1, 1 do
+        for _, v in ipairs(vertices[(floor(p[1]) + dx + 65536) * 131072 + floor(p[2]) + dy + 65536] or NONE) do
+          local q = v[1].points[v[2]]
+          local d = (q[1] - p[1]) ^ 2 + (q[2] - p[2]) ^ 2
+          if d < SIGNS.near ^ 2 and (not found or d < found[3]) then found = {v[1], v[2], d} end
+        end
+      end
+    end
+    if found and (found[1].points and #found[1].points >= 2) then
+      local road, k = found[1], found[2]
+      local dist = arc(road)
+      local length, s = dist[#dist], dist[k]
+      local fwd, back = SIGNS.ways(road.tags or NONE)
+      if point.kind == 'signal' then
+        -- A single way vertex can control two directions. Direction is relative to that way;
+        -- when absent, show both allowed directions. It is a visual, unlit signal, not a
+        -- traffic controller. Nodes detached from a road are retained but not guessed into place.
+        local direction = tags['traffic_signals:direction'] or tags.direction
+        if fwd and direction ~= 'backward' then add('signal', road, s - 2, 1, point.id .. ':f') end
+        if back and direction ~= 'forward' then add('signal', road, s + 2, -1, point.id .. ':b') end
+      elseif point.kind == 'crossing' then
+        -- a street's crossing, not a footway over a yard's service way or a car park's aisle
+        if ROADS.rankOf(road.tags or NONE) < SIGNS.minor then fwd, back = false, false end
+        if tags.crossing == 'traffic_signals' or tags['crossing:signals'] == 'yes' then
+          if fwd then add('signal', road, s - SIGNS.crossing, 1, point.id .. ':signal:f') end
+          if back then add('signal', road, s + SIGNS.crossing, -1, point.id .. ':signal:b') end
+        end
+        if fwd then add('crossing', road, s - SIGNS.crossing, 1, point.id .. ':f') end
+        if back then add('crossing', road, s + SIGNS.crossing, -1, point.id .. ':b') end
+      else
+        local kind = point.kind
+        if kind == 'traffic_sign' then
+          local sign = tostring(tags.traffic_sign or ''):lower()
+          kind = ({['stop'] = 'stop_sign', ['ua:2.2'] = 'stop_sign',
+            ['give_way'] = 'give_way', ['ua:2.1'] = 'give_way'})[sign]
+        end
+        if kind then
+        local direction = tostring(tags.direction or '')
+        local forward
+        if direction == 'forward' then forward = true
+        elseif direction == 'backward' then forward = false
+        else forward = (length - s) <= s end
+        if (forward and fwd) or (not forward and back) then
+          -- at the line: by a junction the strip stops at its mouth (DETAIL.paint)
+          local cuts = cutsOf[road] or NONE
+          local cut = forward and (cuts[2] or 0) or (cuts[1] or 0)
+          local toEnd = forward and (length - s) or s
+          local at = s
+          if cut > 0 and toEnd <= cut + 6 then at = forward and length - cut - SIGNS.mouth or cut + SIGNS.mouth end
+          add(kind, road, at, forward and 1 or -1, point.id)
+          handled[road] = handled[road] or {}
+          handled[road][forward and 2 or 1] = true
+        end
+        end
+      end
+    end
+  end
+  pause()
+  -- derived at the nodes
+  for count, id in ipairs(order) do
+    local list = mouths[id]
+    if count % 64 == 0 then pause() end
+    local first = list[1]
+    local fp = first.road.points
+    local node = first.e == 1 and fp[1] or fp[#fp]
+    -- traffic into the node from mouth m, and out of the node into it
+    local function inbound(m)
+      local fwd, back = SIGNS.ways(m.road.tags or NONE)
+      if m.e == 2 then return fwd end
+      return back
+    end
+    local function outbound(m)
+      local fwd, back = SIGNS.ways(m.road.tags or NONE)
+      if m.e == 1 then return fwd end
+      return back
+    end
+    -- arc length from the node into the mouth's road, and the travel direction towards it
+    local function from(m, d)
+      local dist = arc(m.road)
+      local length = dist[#dist]
+      local cut = (cutsOf[m.road] or NONE)[m.e] or 0
+      if m.e == 1 then return cut + d, 1, -1 end
+      return length - cut - d, -1, 1
+    end
+    if #list == 2 then
+      -- a way split where the speed changes: the new limit 8 m on, for whoever drives into it
+      for k = 1, 2 do
+        local m, o = list[k], list[3 - k]
+        local v = signSpeed(m.road.tags or NONE)
+        local w = signSpeed(o.road.tags or NONE)
+        if v and v ~= w and SIGNS.speeds[v] and outbound(m) and not ROADS.ring(m.road.tags or NONE)
+            and arc(m.road)[#m.road.points] > SIGNS.speedAt * 2 then
+          local s, away = from(m, SIGNS.speedAt)
+          add('speed', m.road, s, away, id .. ':speed:' .. k, 'speed_' .. v)
+        end
+      end
+    elseif #list >= 3 then
+      local lit = false
+      for _, q in ipairs(lights) do
+        if (q[1] - node[1]) ^ 2 + (q[2] - node[2]) ^ 2 < SIGNS.lights ^ 2 then lit = true; break end
+      end
+      local ring = false
+      for _, m in ipairs(list) do if ROADS.ring(m.road.tags or NONE) then ring = true end end
+      if ring then
+        -- a roundabout's entry: give way, and the roundabout sign a little before it
+        for k, m in ipairs(list) do
+          local tags = m.road.tags or NONE
+          if not ROADS.ring(tags) and inbound(m) and not (handled[m.road] and handled[m.road][m.e]) then
+            local s, _, toward = from(m, SIGNS.mouth)
+            add('give_way', m.road, s, toward, id .. ':ring:' .. k)
+            s = from(m, SIGNS.mouth + 6)
+            add('roundabout', m.road, s, toward, id .. ':round:' .. k)
+          end
+        end
+      elseif not lit then
+        local top = -1
+        for _, m in ipairs(list) do top = math.max(top, ROADS.rankOf(m.road.tags or NONE)) end
+        local majors = {}
+        for _, m in ipairs(list) do
+          if ROADS.rankOf(m.road.tags or NONE) >= top - .5 then majors[#majors + 1] = m end
+        end
+        local yielded = false
+        if top >= SIGNS.top and #majors >= 2 then
+          for k, m in ipairs(list) do
+            local rank = ROADS.rankOf(m.road.tags or NONE)
+            if rank <= top - 1 and rank >= SIGNS.minor and inbound(m) then
+              yielded = true
+              if not (handled[m.road] and handled[m.road][m.e]) then
+                local s, _, toward = from(m, SIGNS.mouth)
+                add('give_way', m.road, s, toward, id .. ':give:' .. k)
+              end
+            end
+          end
+        end
+        if yielded then
+          for k, m in ipairs(majors) do
+            if inbound(m) and arc(m.road)[#m.road.points] > SIGNS.priority * 3 then
+              local s, _, toward = from(m, SIGNS.priority)
+              add('priority', m.road, s, toward, id .. ':main:' .. k)
+            end
+          end
+        end
+      end
+      -- a one-way street off a junction: 'one way' for who turns in, 'no entry' at its far end
+      for k, m in ipairs(list) do
+        local tags = m.road.tags or NONE
+        local oneway = ROADS.oneway(tags)
+        local highway = tostring(tags.highway or '')
+        if oneway and not ROADS.ring(tags) and not highway:find('_link', 1, true)
+            and ROADS.rankOf(tags) <= SIGNS.top and ROADS.rankOf(tags) >= SIGNS.minor then
+          local continued = false
+          for _, o in ipairs(list) do
+            if o ~= m and ROADS.oneway(o.road.tags or NONE) and tags.name and (o.road.tags or NONE).name == tags.name then
+              continued = true
+            end
+          end
+          if not continued then
+            local s, away = from(m, outbound(m) and SIGNS.oneway or SIGNS.noentry)
+            add(outbound(m) and 'oneway' or 'noentry', m.road, s, away, id .. ':one:' .. k)
+          end
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- A request's place: the street's edge on the right of travel, 0.7 m into a sidewalk or 1.2 m
+-- onto the verge, then off the drawn asphalt half a metre at a time (a turning lane, a
+-- junction's corner). Not on a deck or in a tunnel, nor where another street is. A sign within
+-- a metre of one already standing moves 1.5 m back against travel. The tile holding the final
+-- point (half-open) draws it. env: rect, nearAsphalt, nearestOn, walkAt, ground, put.
+function SIGNS.place(requests, env, pause)
+  local placed, counts = {}, {}
+  for index, r in ipairs(requests) do
+    if index % 32 == 0 then pause() end
+    local road, tags = r.road, r.road.tags or NONE
+    if not ROADS.bridge(tags) and not ROADS.tunnel(tags) and
+        (not r.model or not FS or FS:fileExists(r.model)) then
+      local side = -r.dir
+      local s = r.s
+      for _ = 1, 3 do
+        local c, tx, ty = alongLine(road.points, r.dist, s)
+        local sx, sy = tx * r.dir, ty * r.dir
+        local rx, ry = sy, -sx
+        local walk = env.walkAt(road, c[1], c[2], side)
+        local off = math.max(.5, math.min(80, road.width or 7)) / 2 + (walk > 0 and .7 or 1.2)
+        local x, y = c[1] + rx * off, c[2] + ry * off
+        for _ = 1, 16 do
+          if not env.nearAsphalt(x, y, .3) then break end
+          x, y = x + rx * .5, y + ry * .5
+        end
+        if env.nearAsphalt(x, y, .3) then break end
+        local z = env.ground(x, y)
+        if env.nearestOn(x, y, z, false, road) or env.nearestOn(x, y, z, true, road) or not env.clear(x, y) then break end
+        local crowded = false
+        for _, q in ipairs(placed) do
+          if (q[1] - x) ^ 2 + (q[2] - y) ^ 2 < 1 then crowded = true; break end
+        end
+        if not crowded then
+          placed[#placed + 1] = {x, y}
+          if x >= env.rect[1] and x < env.rect[3] and y >= env.rect[2] and y < env.rect[4] then
+            env.put('sign_' .. tostring(r.key):gsub('[^%w_]', '_'), r.model, x, y, z, math.atan2(sx, sy), r.kind)
+            counts[r.kind] = (counts[r.kind] or 0) + 1
+          end
+          break
+        end
+        s = s - r.dir * 1.5
+      end
+    end
+  end
+  return counts, placed
+end
+
+-- Street parking (options.experimentalDetail): where a road's own parking tags say cars stand,
+-- bays along that side (OSM's parking:left/right/both and the older parking:lane:*). A fact
+-- that a side is for parking, not an inventory of cars: the bays are spots for the game's
+-- parked cars (parking.lua), or box cars with those off. Placement: 'lane' on the carriageway
+-- at its edge where the width leaves the moving lanes their 3 m each (else astride the curb);
+-- 'street_side' and 'shoulder' beside it; 'on_kerb' on the sidewalk; 'half_on_kerb' astride
+-- the curb. Bays keep
+-- off junction mouths, crossings and stops; one every 6 m parallel, 3.2 diagonal, 2.7 across.
+ROADS.PARK = {parks = {lane = 'lane', street_side = 'side', shoulder = 'side', on_kerb = 'kerb', half_on_kerb = 'half',
+    yes = 'lane', parallel = 'lane', diagonal = 'lane', perpendicular = 'lane', marked = 'lane', inline = 'lane'},
+  orient = {parallel = {1.9, 6}, diagonal = {4.4, 3.2}, perpendicular = {5.0, 2.7}},
+  mouth = 6, crossing = 6, stop = 15, lane = 3, ends = 3, turns = 40}
+
+-- the parking on one side (1 left, -1 right of the point order): placement and orientation, or nil
+function ROADS.parkingSide(tags, side)
+  local name = side == 1 and 'left' or 'right'
+  local P = ROADS.PARK
+  local v = tags['parking:' .. name] or tags['parking:both']
+  local orient = tags['parking:' .. name .. ':orientation'] or tags['parking:both:orientation']
+  if v == nil then
+    -- the older scheme: the value is the orientation, the place a separate key
+    local old = tags['parking:lane:' .. name] or tags['parking:lane:both']
+    if old == nil then return nil end
+    v = tags['parking:lane:' .. name .. ':' .. old] or tags['parking:lane:both:' .. old] or 'lane'
+    if v == 'on_street' then v = 'lane' end
+    if P.orient[old] then orient = old elseif not P.parks[old] then return nil end
+  end
+  local where = P.parks[v]
+  if not where then return nil end
+  if P.orient[v] then orient = v end
+  orient = P.orient[orient] and orient or 'parallel'
+  if where == 'half' and orient ~= 'parallel' then where = 'kerb' end
+  return where, orient
+end
+
+-- Bays {x, y, yaw (the car's heading, math angle), key} along the roads that have them.
+-- env: rect, cutsOf, points (crossings, stops), nearestOn(x, y, z, bridges, except), clear(x, y,
+-- yaw, length, width) (no building there), walkAt(road, x, y, side), ground, pause.
+function ROADS.streetParking(roads, env)
+  local P, bays = ROADS.PARK, {}
+  local avoid = {}
+  for _, point in ipairs(env.points) do
+    if point.pos and (point.kind == 'crossing' or point.kind == 'stop') then avoid[#avoid + 1] = point end
+  end
+  local rect = env.rect
+  for index, road in ipairs(roads) do
+    if index % 64 == 0 then env.pause() end
+    local tags, points = road.tags or NONE, road.points or NONE
+    if #points >= 2 and (tags['parking:left'] or tags['parking:right'] or tags['parking:both']
+        or tags['parking:lane:left'] or tags['parking:lane:right'] or tags['parking:lane:both'])
+        and not ROADS.bridge(tags) and not ROADS.tunnel(tags) and boundsTouch(rect, ringBounds({points}), 30) then
+      local dist = {0}
+      for k = 2, #points do
+        dist[k] = dist[k - 1] + math.sqrt((points[k][1] - points[k - 1][1]) ^ 2 + (points[k][2] - points[k - 1][2]) ^ 2)
+      end
+      local length = dist[#points]
+      local width = math.max(.5, math.min(80, road.width or 7))
+      local hw = width / 2
+      local oneway, flip = ROADS.oneway(tags)
+      local cuts = env.cutsOf[road] or NONE
+      local sides = {}
+      for _, side in ipairs({1, -1}) do
+        local where, orient = ROADS.parkingSide(tags, side)
+        if where then sides[#sides + 1] = {side = side, where = where, orient = orient} end
+      end
+      -- the moving lanes keep 3 m each: 'lane' bays only where the rest of the width holds them
+      local depthLane = 0
+      for _, s in ipairs(sides) do
+        if s.where == 'lane' then depthLane = depthLane + P.orient[s.orient][1] end
+      end
+      local lanes = number(tags.lanes, oneway and 1 or 2)
+      local roomy = width - depthLane >= lanes * P.lane
+      for _, s in ipairs(sides) do
+        local depth, step = P.orient[s.orient][1], P.orient[s.orient][2]
+        local off
+        -- a 'lane' the drawn width cannot spare (a width guessed from the class, mostly): the
+        -- cars astride the curb, as Kyiv's side streets park, or none when they stand across
+        if s.where == 'lane' and not roomy then s.where = s.orient == 'parallel' and 'half' or 'none' end
+        if s.where == 'lane' then off = hw - depth / 2 - .1
+        elseif s.where == 'half' then off = hw + .05
+        elseif s.where == 'none' then off = nil
+        else off = hw + .25 + depth / 2 end
+        -- the direction cars face: with the traffic on their side, against the point order on
+        -- the left of a two-way street
+        local along = (oneway and flip) and -1 or (not oneway and s.side == 1) and -1 or 1
+        local lo, hi = (cuts[1] or 0) + P.mouth, length - (cuts[2] or 0) - P.mouth
+        -- the turn lanes before a junction (DETAIL.arrows) are not parked in: the side's traffic
+        -- runs towards the way's end, or its start against the point order
+        local turns = tags['turn:lanes'] and oneway or (along == 1 and tags['turn:lanes:forward'])
+          or (along == -1 and tags['turn:lanes:backward'])
+        if turns and along == 1 then hi = hi - P.turns elseif turns then lo = lo + P.turns end
+        if off then
+          for at = lo + step / 2, hi - step / 2, step do
+            local c, tx, ty = alongLine(points, dist, at)
+            local nx, ny = -ty * s.side, tx * s.side          -- towards this side
+            local x, y = c[1] + nx * off, c[2] + ny * off
+            local free = x >= rect[1] and x < rect[3] and y >= rect[2] and y < rect[4]
+            for _, point in ipairs(avoid) do
+              local q = point.pos
+              local r = point.kind == 'stop' and P.stop or P.crossing
+              if free and (q[1] - x) ^ 2 + (q[2] - y) ^ 2 < r * r then free = false end
+            end
+            local yaw
+            if s.orient == 'parallel' then yaw = math.atan2(ty * along, tx * along)
+            elseif s.orient == 'perpendicular' then yaw = math.atan2(ny, nx)
+            else yaw = math.atan2(ny + ty * along, nx + tx * along) end
+            local z = free and (s.where == 'lane' and (c[3] or 0) + ROAD_LIFT or env.ground(x, y))
+            -- another street there, a house, or a sidewalk for a car on the kerb with none
+            if free and (env.nearestOn(x, y, z, false, road) or env.nearestOn(x, y, z, true, road)) then free = false end
+            if free and s.where == 'kerb' and env.walkAt(road, c[1], c[2], s.side) <= 0 then free = false end
+            if free and not env.clear(x, y, yaw) then free = false end
+            if free then
+              bays[#bays + 1] = {x, y, yaw, tostring(road.id) .. ':' .. s.side .. ':' .. math.floor(at * 10), z = z, where = s.where}
+            end
+          end
+        end
+      end
+    end
+  end
+  return bays
+end
+
+-- Lane arrows (options.experimentalDetail): a way's turn:lanes (one-way), turn:lanes:forward
+-- and :backward, painted in each lane before the way's end in that direction, and again 25 m
+-- before when the way is long enough. A bare turn:lanes on a two-way street says nothing of
+-- the direction and is left. Lane k of n (left to right of travel) is a 1/n share of that
+-- direction's half of the carriageway. The arrow: a 0.15 m stem, a 1.2 m head straight on, an
+-- arm and a head to each side it turns. ctx as DETAIL.paint's (roads, cutsOf, z, emit, pause).
+DETAIL.ARROW = {stem = 3.2, width = .15, head = 1.2, base = .6, arm = .7, before = 6, again = 25, short = 15}
+DETAIL.TURNS = {through = 'through', left = 'left', slight_left = 'left', sharp_left = 'left',
+  right = 'right', slight_right = 'right', sharp_right = 'right'}
+
+function DETAIL.arrow(emit, c, sx, sy, turns, z)
+  local A = DETAIL.ARROW
+  local lx, ly = -sy, sx                                   -- left of travel
+  local function head(bx, by, ux, uy)
+    local px, py = -uy, ux
+    emit({{bx + px * A.base / 2, by + py * A.base / 2, z, 0, 0},
+      {bx + ux * A.head, by + uy * A.head, z, .5, A.head / DECAL.markRepeat},
+      {bx - px * A.base / 2, by - py * A.base / 2, z, 1, 0}})
+  end
+  local through = turns.through
+  local top = through and A.stem or A.stem - A.head / 2
+  paintQuad(emit, {c[1] + sx * top / 2, c[2] + sy * top / 2}, sx, sy, top, A.width, z)
+  if through then head(c[1] + sx * top, c[2] + sy * top, sx, sy) end
+  for _, side in ipairs({'left', 'right'}) do
+    if turns[side] then
+      local k = side == 'left' and 1 or -1
+      local at = through and top * .55 or top - A.width / 2
+      local ax, ay = c[1] + sx * at, c[2] + sy * at
+      paintQuad(emit, {ax + lx * k * A.arm / 2, ay + ly * k * A.arm / 2}, lx * k, ly * k, A.arm, A.width, z)
+      head(ax + lx * k * A.arm, ay + ly * k * A.arm, lx * k, ly * k)
+    end
+  end
+end
+
+function DETAIL.arrows(ctx)
+  local A, painted = DETAIL.ARROW, 0
+  for index, road in ipairs(ctx.roads) do
+    if index % 128 == 0 then ctx.pause() end
+    local tags, points = road.tags or NONE, road.points or NONE
+    local oneway, flip = ROADS.oneway(tags)
+    local forward, backward = tags['turn:lanes:forward'], tags['turn:lanes:backward']
+    if oneway and tags['turn:lanes'] then
+      if flip then backward, forward = tags['turn:lanes'], nil else forward, backward = tags['turn:lanes'], nil end
+    end
+    if (forward or backward) and #points >= 2 and not ROADS.tunnel(tags)
+        and boundsTouch(ctx.rect, ringBounds({points}), 10) then
+      local dist = {0}
+      for k = 2, #points do
+        dist[k] = dist[k - 1] + math.sqrt((points[k][1] - points[k - 1][1]) ^ 2 + (points[k][2] - points[k - 1][2]) ^ 2)
+      end
+      local length = dist[#points]
+      local width = math.max(.5, math.min(80, road.width or 7))
+      local left, right = ROADS.shoulder(tags)
+      if width - left - right < 3 then left, right = 0, 0 end
+      local lo, hi = -width / 2 + right, width / 2 - left
+      local cuts = ctx.cutsOf[road] or NONE
+      local function lanesOf(text)
+        local list = {}
+        for part in (tostring(text) .. '|'):gmatch('([^|]*)|') do list[#list + 1] = part end
+        return list
+      end
+      local nf = forward and #lanesOf(forward) or 0
+      local nb = backward and #lanesOf(backward) or 0
+      if not oneway then
+        nf = forward and nf or math.max(1, number(tags['lanes:forward'], 1))
+        nb = backward and nb or math.max(1, number(tags['lanes:backward'], 1))
+      end
+      local lw = (hi - lo) / math.max(1, nf + nb)
+      if lw >= 2.4 and length >= A.short then
+        for _, dir in ipairs({1, -1}) do
+          local text = backward
+          if dir == 1 then text = forward end
+          if text then
+            local lanes = lanesOf(text)
+            local n = #lanes
+            local stop = dir == 1 and length - (cuts[2] or 0) - A.before or (cuts[1] or 0) + A.before
+            for _, back in ipairs({0, A.again}) do
+              local tip = stop - dir * back
+              local base = tip - dir * (A.stem + A.head)
+              local first = dir == 1 and (cuts[1] or 0) or length - (cuts[2] or 0)
+              local within = dir == 1 and base > first + 2 or dir == -1 and base < first - 2
+              if within then
+                local c, tx, ty = alongLine(points, dist, base)
+                local sx, sy = tx * dir, ty * dir
+                -- the road's own rise along the arrow: one height for 4.4 m sank the head under
+                -- the asphalt of a sloping street (kyiv-arrows5)
+                local reach = A.stem + A.head
+                local z0 = (c[3] or 0) + ctx.z
+                local z1 = (alongLine(points, dist, base + dir * reach)[3] or 0) + ctx.z
+                local function emit(poly)
+                  for _, v in ipairs(poly) do
+                    local t = math.max(0, math.min(1, ((v[1] - c[1]) * sx + (v[2] - c[2]) * sy) / reach))
+                    v[3] = z0 + (z1 - z0) * t
+                  end
+                  ctx.emit(poly)
+                end
+                for k, value in ipairs(lanes) do
+                  local turns, any = {}, false
+                  for word in value:gmatch('[^;]+') do
+                    local t = DETAIL.TURNS[word]
+                    if t then turns[t], any = true, true end
+                  end
+                  if any then
+                    -- the lane's middle, as an offset left of the point order
+                    local o
+                    if dir == 1 then o = lo + (n - k + .5) * lw else o = hi - (n - k + .5) * lw end
+                    DETAIL.arrow(emit, {c[1] - ty * o, c[2] + tx * o}, sx, sy, turns, z0)
+                    painted = painted + 1
+                    if ctx.report then ctx.report[#ctx.report + 1] = {kind = 'arrow', x = c[1] - ty * o,
+                      y = c[2] + tx * o, z = 0, nx = -sx, ny = -sy} end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  return painted
+end
+
 -- Raised traffic islands (OSM area:highway=traffic_island, traffic_calming=island areas): a
 -- `height` m slab over the road beside it, its rim a curb face down to `sink` under the road.
 -- Grass on top when tagged so or bigger than `paved` m2, else sett paving. ctx: roads (the
@@ -3465,8 +4249,13 @@ BLD.shops = {industrial = true, warehouse = true, factory = true, commercial = t
 -- m2 two floors, small shops and workshops one tall floor; anything bigger keeps the pack's.
 function BLD.height(building, tags, area, h)
   local height = building.height or number(tags.height, number(tags['building:levels'], 3) * 3)
-  if tags.height or tags['building:levels'] or height ~= BLD.guessed then return height end
   local b = tags.building or 'yes'
+  -- a shop's or a warehouse's storey is taller than a flat's 3 m the pack counts: a two-storey
+  -- supermarket stood 6 m tall beside five-storey blocks (Velmart, Bilychi)
+  if not tags.height and tags['building:levels'] and (BLD.shops[b] or b == 'supermarket') then
+    return number(tags['building:levels'], 1) * 4 + 1
+  end
+  if tags.height or tags['building:levels'] or height ~= BLD.guessed then return height end
   if BLD.low[b] then return BLD.low[b] end
   if b == 'yes' or b == 'residential' or BLD.houses[b] then
     if area < 30 and not BLD.houses[b] then return 2.6 end
@@ -3495,18 +4284,219 @@ BLD.colour = {red = 'roof_mtile_red', darkred = 'roof_mtile_red', maroon = 'roof
   white = 'roof_sheet', silver = 'roof_metal'}
 -- metres per texture repeat on a pitched roof (u along the ridge, v down the slope)
 BLD.repeats = {roof_tile = 2, roof_metal = 2, roof_sheet = 1.75, roof_mtile_red = 1.4,
-  roof_mtile_brown = 1.4, roof_mtile_green = 1.4}
+  roof_mtile_brown = 1.4, roof_mtile_green = 1.4, roof_slate = 3, roof_shingle = 8, roof_zinc = 1.8}
 
-function BLD.roof(tags, h, postsoviet)
+-- A region's own buildings by look.block (looks.py), for a planet whose art has them: what stands
+-- in for each family of wallMaterial, the walls of its houses and the roofs over them, as
+-- 'kind weight' words. A block not named here, and a pack without a look, keep the older lists.
+-- A house's weights add up to 100; its plaster comes first and stays under 38 (BLD.house).
+BLD.spec = {
+  -- byHeight: the block's default 'panel' does not put a panel on every block of an old town; its
+  -- towers stay panel and loggia, what is lower goes by height as a mixed look does
+  postsoviet = {
+    byHeight = true,
+    panel = 'pnl_grey 3 pnl_beige 3 pnl_pink 2 pnl_blue 2 pnl_white 2 pnl_patch_grey 3 pnl_patch_beige 3 pnl_patch_white 2',
+    brick = 'brk_d_sil 4 brk_d_red 3 brk_d_old 2 brk_red 1 brk_white 1',
+    plaster = 'pls_d_dash 4 pls_d_stalin 3 pls_d_stalin_red 2 pls_d_aged 2 pls_d_flake 2 pls_yellow 1 pls_cream 1 pls_peach 1 pls_grey 1',
+    new = 'pls_d_new 2 brk_d_new 1',
+    houses = 'hw_white 7 hw_yellow 5 hw_blue 6 hw_green 4 hw_pink 2 hw_aged 6 hw_dash 4 hw_dash_cream 4 hw_brick_red 9 hw_oldbrick 6 hw_flatbrick 5 '
+      .. 'hw_flaking 6 hw_flaking_yellow 4 hw_stone 5 hw_silicate 9 hw_siding 8 hw_boards 10',
+    roofs = 'roof_sheet 6 roof_mtile_red 3 roof_mtile_brown 3 roof_mtile_green 2 roof_prof_red 2 roof_prof_brown 2 roof_prof_green 1 '
+      .. 'roof_prof_grey 1 roof_metal 2 roof_tile 1 roof_shingle 2',
+    fences = 'fence_prof_green 3 fence_prof_brown 3 fence_prof_grey 2 fence_boards 5 fence_mesh 3'},
+  nordic = {
+    panel = 'pnl_grey 2 pnl_white 2', brick = 'brk_d_dark 2 brk_d_vic 2 brk_red 1', plaster = 'pls_d_euro 3 pls_d_euro_warm 2 pls_cream 1',
+    new = 'pls_d_new 2 brk_d_new 2',
+    houses = 'hw_render_white 12 hw_render_sand 8 hw_falu 30 hw_clapboard_white 18 hw_clapboard_yellow 12 hw_clapboard_blue 8 hw_brick_red 8 hw_clinker 4',
+    roofs = 'roof_concrete 4 roof_clay 2 roof_prof_red 2 roof_prof_grey 2 roof_zinc 1'},
+  british = {
+    panel = 'pnl_grey 1', brick = 'brk_d_stock 3 brk_d_vic 4 brk_d_dark 2 brk_red 1', plaster = 'pls_d_euro 2 pls_d_dash 2 pls_cream 1',
+    new = 'brk_d_new 2 pls_d_new 1',
+    houses = 'hw_dash 18 hw_render_white 14 hw_stock 26 hw_brick_red 30 hw_brick_dark 12',
+    roofs = 'roof_slate 5 roof_concrete 4 roof_clay 2 roof_shingle 2'},
+  western = {
+    brick = 'brk_d_dark 3 brk_d_old 2 brk_d_new 2 brk_red 1', plaster = 'pls_d_euro 4 pls_d_euro_warm 3 pls_d_ashlar 2 pls_cream 1 pls_grey 1',
+    new = 'pls_d_new 2 brk_d_new 2',
+    houses = 'hw_render_white 20 hw_render_sand 18 hw_clinker 16 hw_stock 12 hw_brick_red 14 hw_stone 10 hw_fieldstone 10',
+    roofs = 'roof_clay 5 roof_concrete 4 roof_slate 2 roof_zinc 1'},
+  central = {
+    panel = 'pnl_grey 3 pnl_beige 2 pnl_white 2 pnl_patch_grey 2 pnl_patch_beige 2',
+    brick = 'brk_d_old 3 brk_d_red 3 brk_red 1', plaster = 'pls_d_euro_warm 3 pls_d_stalin 2 pls_d_aged 2 pls_d_dash 3 pls_d_euro 2 pls_yellow 1',
+    new = 'pls_d_new 2 brk_d_new 1',
+    houses = 'hw_render_white 12 hw_render_sand 12 hw_dash 8 hw_flaking 6 hw_brick_red 18 hw_oldbrick 10 hw_flatbrick 8 hw_stone 10 hw_block 8 hw_silicate 8',
+    roofs = 'roof_clay 5 roof_concrete 3 roof_prof_red 2 roof_prof_brown 2 roof_sheet 1'},
+  mediterranean = {
+    brick = 'pls_d_ashlar 2 brk_d_old 1', plaster = 'pls_d_shutter 4 pls_d_white 3 pls_d_euro_warm 2 pls_d_ashlar 2 pls_yellow 1',
+    new = 'pls_d_euro 2 pls_d_new 1',
+    houses = 'hw_render_white 16 hw_render_ochre 12 hw_render_sand 10 hw_render_terracotta 10 hw_sandstone 22 hw_fieldstone 18 hw_ashlar 12',
+    roofs = 'roof_pantile 7 roof_clay 2 roof_concrete 1'},
+  ['north-america'] = {
+    brick = 'brk_d_vic 3 brk_d_dark 3 brk_d_stock 1', plaster = 'pls_d_euro 2 pls_d_euro_warm 2',
+    new = 'pls_d_new 1 brk_d_new 2',
+    houses = 'hw_render_sand 12 hw_render_white 8 hw_vinyl_white 16 hw_vinyl_grey 12 hw_vinyl_cream 12 hw_clapboard_white 12 hw_clapboard_blue 6 hw_brick_red 14 hw_brick_dark 8',
+    roofs = 'roof_shingle 8 roof_prof_grey 1 roof_zinc 1'},
+  latin = {
+    brick = 'pls_d_stain 2 brk_d_red 1', plaster = 'pls_d_blue 3 pls_d_pink 3 pls_d_stain 3 pls_d_shutter 2 pls_d_white 2',
+    new = 'pls_d_euro 1 pls_d_tile 1',
+    houses = 'hw_render_white 8 hw_render_teal 10 hw_render_pink 10 hw_render_ochre 10 hw_block 30 hw_brick_red 20 hw_tin 6 hw_zinc 6',
+    roofs = 'roof_pantile 3 roof_zinc 3 roof_tin 2 roof_concrete 1'},
+  ['east-asia'] = {
+    brick = 'pls_d_tile 3 brk_d_dark 1', plaster = 'pls_d_tile 4 pls_d_stain 2 pls_d_euro 2',
+    new = 'pls_d_tile 1 pls_d_new 2',
+    houses = 'hw_render_white 20 hw_render_sand 10 hw_vinyl_grey 20 hw_vinyl_white 20 hw_block 10 hw_clinker 10 hw_zinc 10',
+    roofs = 'roof_concrete 4 roof_prof_grey 2 roof_prof_red 1 roof_zinc 2 roof_clay 1'},
+  ['south-asia'] = {
+    brick = 'pls_d_stain 3 brk_d_red 1', plaster = 'pls_d_stain 4 pls_d_pink 2 pls_d_blue 2 pls_d_sand 2',
+    new = 'pls_d_tile 1 pls_d_euro 1',
+    houses = 'hw_render_pink 10 hw_render_teal 10 hw_render_ochre 10 hw_render_sand 8 hw_block 30 hw_brick_red 18 hw_tin 8 hw_zinc 6',
+    roofs = 'roof_zinc 4 roof_tin 3 roof_clay 2 roof_thatch 1'},
+  ['southeast-asia'] = {
+    brick = 'pls_d_stain 3 pls_d_tile 1', plaster = 'pls_d_stain 3 pls_d_tile 2 pls_d_blue 2 pls_d_pink 2',
+    new = 'pls_d_tile 1 pls_d_new 1',
+    houses = 'hw_render_white 12 hw_render_teal 13 hw_render_ochre 13 hw_block 26 hw_clapboard_blue 12 hw_tin 12 hw_zinc 12',
+    roofs = 'roof_zinc 4 roof_tin 3 roof_pantile 2 roof_thatch 1'},
+  ['middle-east'] = {
+    brick = 'pls_d_sand 3 pls_d_stain 1', plaster = 'pls_d_sand 4 pls_d_stain 2 pls_d_adobe 2',
+    new = 'pls_d_sand 1 pls_d_euro 1',
+    houses = 'hw_render_sand 24 hw_adobe 14 hw_sandstone 26 hw_block 26 hw_fieldstone 10',
+    roofs = 'roof_zinc 2 roof_concrete 1'},
+  africa = {
+    brick = 'pls_d_stain 2 pls_d_adobe 1', plaster = 'pls_d_stain 3 pls_d_blue 2 pls_d_pink 2 pls_d_adobe 2 pls_d_sand 2',
+    new = 'pls_d_stain 1 pls_d_euro 1',
+    houses = 'hw_render_sand 10 hw_render_teal 8 hw_render_ochre 8 hw_adobe 12 hw_block 34 hw_brick_red 14 hw_tin 8 hw_zinc 6',
+    roofs = 'roof_zinc 5 roof_tin 4 roof_thatch 1'},
+  oceania = {
+    brick = 'brk_d_vic 3 brk_d_dark 2', plaster = 'pls_d_euro 2 pls_d_euro_warm 2',
+    new = 'pls_d_new 1 brk_d_new 1',
+    houses = 'hw_render_white 14 hw_render_sand 12 hw_clapboard_white 24 hw_vinyl_cream 10 hw_brick_red 28 hw_brick_dark 12',
+    roofs = 'roof_prof_grey 2 roof_prof_green 1 roof_prof_red 1 roof_concrete 4 roof_clay 2'},
+  general = {brick = 'brk_d_red 2 brk_d_dark 2', plaster = 'pls_d_euro 2 pls_d_euro_warm 2 pls_cream 1 pls_grey 1'},
+}
+
+-- Packs built before looks name only their country: looks.BLOCKS's ids, the US states released as
+-- packs, Britain's parts. 'germany-berlin' goes by its first word.
+BLD.countries = {
+  nordic = 'sweden norway finland denmark iceland faroe-islands greenland',
+  british = 'united-kingdom great-britain england scotland wales ireland britain-and-ireland isle-of-man guernsey-jersey '
+    .. 'ireland-and-northern-ireland greater-london',
+  western = 'germany france netherlands belgium austria switzerland luxembourg liechtenstein monaco andorra alps dach',
+  central = 'poland czech-republic slovakia hungary croatia slovenia serbia bosnia-herzegovina montenegro macedonia kosovo albania',
+  mediterranean = 'italy spain portugal greece turkey cyprus malta azores',
+  ['north-america'] = 'us canada us-midwest us-northeast us-pacific us-south us-west new-york california nevada kentucky indiana ohio',
+  latin = 'mexico south-america central-america chile',
+  ['east-asia'] = 'japan china south-korea north-korea taiwan mongolia',
+  ['south-asia'] = 'india pakistan bangladesh sri-lanka nepal bhutan maldives',
+  ['southeast-asia'] = 'indonesia philippines thailand vietnam cambodia laos myanmar malaysia-singapore-brunei east-timor sea',
+  ['middle-east'] = 'iran iraq israel-and-palestine jordan lebanon syria yemen gcc-states afghanistan',
+  africa = 'africa zanzibar tanzania south-africa',
+  oceania = 'australia-oceania australia new-zealand',
+}
+
+function BLD.blockOf(country)
+  if not country then return nil end
+  if not BLD.blockIds then
+    BLD.blockIds = {}
+    for id in pairs(BLD.postsoviet) do BLD.blockIds[id] = 'postsoviet' end
+    for block, ids in pairs(BLD.countries) do
+      for id in ids:gmatch('%S+') do BLD.blockIds[id] = block end
+    end
+  end
+  local id = tostring(country)
+  return BLD.blockIds[id] or BLD.blockIds[id:match('^[^-]+') or '']
+end
+
+-- 'a 2 b 1' -> {'a', 'a', 'b'}; for a house list, the {upper bound, kind} of BLD.walls.
+function BLD.words(spec)
+  local out = {}
+  for kind, weight in spec:gmatch('(%S+) (%d+)') do
+    for _ = 1, tonumber(weight) do out[#out + 1] = kind end
+  end
+  -- dealt out, not in runs: neighbouring hashes must not fall on the same kind
+  local n, dealt, step = #out, {}, #out % 7 ~= 0 and 7 or 11
+  for k = 1, n do dealt[k] = out[k * step % n + 1] end
+  return dealt
+end
+
+function BLD.bounds(spec)
+  local out, sum = {}, 0
+  for kind, weight in spec:gmatch('(%S+) (%d+)') do
+    sum = sum + tonumber(weight)
+    out[#out + 1] = {sum, kind}
+  end
+  return out
+end
+
+-- The planet's art has the region's walls: 'Refresh planet code' can bring this file to a planet
+-- ZIP built before them, whose materials do not know these kinds.
+function BLD.drawnArt()
+  if BLD.artFound == nil then
+    BLD.artFound = not FS or FS:fileExists('/e2r_stream/fast-art/v10/real/sh_render.color.dds') or false
+  end
+  return BLD.artFound
+end
+
+-- The expanded lists of a look's block, or NONE.
+function BLD.region(look)
+  local block = type(look) == 'table' and look.block or BLD.packBlock
+  local spec = block and BLD.spec[block]
+  if not spec or not BLD.drawnArt() then return NONE end
+  BLD.regions = BLD.regions or {}
+  local r = BLD.regions[block]
+  if not r then
+    r = {}
+    for _, key in ipairs({'panel', 'brick', 'plaster', 'new', 'roofs', 'fences'}) do
+      if spec[key] then r[key] = BLD.words(spec[key]) end
+    end
+    r.houses = spec.houses and BLD.bounds(spec.houses)
+    r.byHeight = spec.byHeight
+    BLD.regions[block] = r
+  end
+  return r
+end
+
+function BLD.roof(tags, h, postsoviet, region)
   local m, colour = tags['roof:material'], BLD.colour[tostring(tags['roof:colour'] or ''):lower()]
+  local r = region or NONE
   if m == 'metal' or m == 'tin' or m == 'metal_sheet' then
     return colour and colour:find('mtile', 1, true) and colour or 'roof_metal'
+  end
+  if r.roofs then
+    if m == 'thatch' or m == 'reed' or m == 'grass' then return 'roof_thatch' end
+    if m == 'asphalt' or m == 'bitumen' or m == 'tar_paper' or m == 'shingle' then return 'roof_shingle' end
+    if m == 'concrete' then return 'roof_concrete' end
+    if m == 'slate' and not postsoviet then return 'roof_slate' end
+    if m == 'roof_tiles' or m == 'tile' or m == 'clay' then
+      for _, kind in ipairs(r.roofs) do
+        if kind == 'roof_pantile' or kind == 'roof_clay' then return kind end
+      end
+    end
   end
   if m == 'roof_tiles' or m == 'tile' or m == 'clay' then return 'roof_tile' end
   if m == 'eternit' or m == 'asbestos' or (m == 'slate' and postsoviet) then return 'roof_sheet' end
   if colour then return colour end
+  if r.roofs then return r.roofs[math.floor(h / 13) % #r.roofs + 1] end
   if postsoviet then return BLD.mix[math.floor(h / 13) % #BLD.mix + 1] end
   return 'roof_tile'
+end
+
+-- A fence's look: (kind, a wall's thickness and height, metres a repeat). By OSM's tags where it
+-- has them; an untagged one takes the region's mix, and walls stay concrete unless tagged.
+function BLD.fenceKind(tags, h, region)
+  local ft, r = tags.fence_type, region or NONE
+  local art = BLD.drawnArt()
+  if art and (ft == 'brick' or tags.wall == 'brick') then return 'fence_brick', true, 2 end
+  if art and (ft == 'stone' or tags.wall == 'dry_stone' or tags.wall == 'stone') then return 'fence_stone', true, 3 end
+  if tags.barrier == 'wall' or tags.barrier == 'retaining_wall' or tags.barrier == 'city_wall' or ft == 'concrete'
+      or ft == 'brick' or ft == 'stone' then return 'fence_wall', true, 2.5 end
+  if art and (ft == 'wood' or ft == 'boards' or ft == 'split_rail' or ft == 'pole') then return 'fence_boards', false, 2 end
+  if art and (ft == 'metal' or ft == 'corrugated' or ft == 'sheet') then
+    return ({'fence_prof_green', 'fence_prof_brown', 'fence_prof_grey'})[h % 3 + 1], false, 2
+  end
+  if ft == nil and r.fences then
+    local kind = r.fences[math.floor(h / 5) % #r.fences + 1]
+    return kind, false, 2
+  end
+  return 'fence_mesh', false, 2
 end
 
 -- Houses of one or two floors: a plain wall from the game's tileable set, and the windows and a
@@ -3523,7 +4513,11 @@ BLD.wallColour = {white = 'hw_white', ivory = 'hw_white', cream = 'hw_aged', bei
   pink = 'hw_pink', red = 'hw_brick_red', brown = 'hw_brick_red', grey = 'hw_silicate', gray = 'hw_silicate'}
 -- metres per texture repeat on a house wall. Big flat bricks and stone courses are wider than a plaster repeat.
 BLD.wallScale = {hw_brick_red = 1.6, hw_oldbrick = 1.6, hw_flatbrick = 2.4, hw_stone = 2,
-  hw_silicate = 1.6, hw_siding = 1.2, hw_boards = 1.2, hw_wood = 2}
+  hw_silicate = 1.6, hw_siding = 1.2, hw_boards = 1.2, hw_wood = 2,
+  hw_dash = 1.5, hw_dash_cream = 1.5, hw_flaking = 2.5, hw_flaking_yellow = 2.5, hw_render_white = 2.5, hw_render_ochre = 2.5,
+  hw_render_terracotta = 2.5, hw_render_sand = 2.5, hw_render_teal = 2.5, hw_render_pink = 2.5, hw_adobe = 2, hw_ashlar = 2,
+  hw_clapboard_white = 1.2, hw_clapboard_blue = 1.2, hw_clapboard_yellow = 1.2, hw_vinyl_white = 2, hw_vinyl_grey = 2,
+  hw_vinyl_cream = 2, hw_falu = 2, hw_stock = 2, hw_brick_dark = 1.9, hw_clinker = 2, hw_tin = 2, hw_zinc = 1.8}
 -- atlas cells {u0, v0, u1, v1} (v0 at the image's top) and the opening's size in metres
 BLD.windows = {
   win_pvc = {w = 1.15, h = 1.5, cells = {{.441, .002, .641, .264}, {.644, .002, .846, .264},
@@ -3532,11 +4526,17 @@ BLD.windows = {
     {.264, .025, .386, .214}, {.632, .116, .753, .306}, {.503, .307, .624, .496}, {.629, .308, .751, .5}}}}
 BLD.doors = {w = 1.0, h = 2.05, cells = {{0, 0, .25, .5}, {.252, 0, .498, .5}, {.752, 0, 1, .5}}}
 
-function BLD.house(tags, height, h)
+function BLD.house(tags, height, h, region)
   if height >= 8 or not BLD.homes[tags.building or 'yes'] then return nil end
   local m = tostring(tags['building:material'] or tags['facade:material'] or '')
   if m == 'panel' or m == 'concrete' or m == 'reinforced_concrete' or m == 'glass' or m == 'metal' then return nil end
   local colour = BLD.wallColour[(tostring(tags['building:colour'] or ''):lower():gsub('[%s_]', ''))]
+  local r = region or NONE
+  if r.houses then
+    if m == 'adobe' or m == 'mud' or m == 'clay' then return 'hw_adobe' end
+    if m == 'cement_block' or m == 'concrete_block' or m == 'block' then return 'hw_block' end
+    if m == 'vinyl' or m == 'plastic' then return h % 2 == 0 and 'hw_vinyl_white' or 'hw_vinyl_grey' end
+  end
   if m == 'brick' then
     if colour == 'hw_white' or colour == 'hw_silicate' then return 'hw_silicate' end
     if h % 5 == 0 then return 'hw_oldbrick' end
@@ -3552,7 +4552,7 @@ function BLD.house(tags, height, h)
   end
   if colour and (m == 'plaster' or m == 'stucco' or m == '') then return colour end
   local plaster = m == 'plaster' or m == 'stucco'
-  for _, w in ipairs(BLD.walls) do
+  for _, w in ipairs(r.houses or BLD.walls) do
     if h % 100 < w[1] then
       if plaster and w[1] > 38 then return 'hw_white' end   -- tagged plaster: not brick, stone or wood
       return w[2]
@@ -3565,12 +4565,15 @@ end
 function BLD.dress(kind, h)
   local old = kind == 'hw_wood' or kind == 'hw_aged' or kind == 'hw_blue' or kind == 'hw_green'
     or kind == 'hw_oldbrick' or kind == 'hw_flatbrick' or kind == 'hw_stone' or kind == 'hw_boards'
+    or kind == 'hw_flaking' or kind == 'hw_flaking_yellow' or kind == 'hw_adobe' or kind == 'hw_fieldstone'
+    or kind == 'hw_falu' or kind == 'hw_tin' or kind == 'hw_block'
   local win = (old and h % 10 < 8 or not old and h % 10 < 4) and 'win_wood' or 'win_pvc'
   local cells = BLD.windows[win].cells
   return {win = win, cell = cells[math.floor(h / 11) % #cells + 1],
     door = BLD.doors.cells[math.floor(h / 17) % #BLD.doors.cells + 1],
     plinth = (h % 20 < 7) and 'plinth_brown' or 'plinth',
-    gable = (kind == 'hw_siding' or kind == 'hw_wood' or kind == 'hw_boards' or math.floor(h / 3) % 3 ~= 0) and kind or 'gable',
+    gable = (kind == 'hw_siding' or kind == 'hw_wood' or kind == 'hw_boards' or kind == 'hw_falu' or kind:find('hw_clapboard', 1, true)
+      or kind:find('hw_vinyl', 1, true) or math.floor(h / 3) % 3 ~= 0) and kind or 'gable',
     shape = math.floor(h / 23) % 20 < 9 and 'hipped' or 'gabled', pitch = 26 + math.floor(h / 29) % 13}
 end
 
@@ -3627,9 +4630,23 @@ function BLD.openings(scene, a, b, length, base, height, dress, door, detail)
   end
 end
 
-local function wallMaterial(building, look, height)
+BLD.worship = {church = true, cathedral = true, chapel = true, monastery = true, basilica = true, mosque = true,
+  synagogue = true, temple = true}
+-- What stands for itself has no storeys: bare masonry, no windows, no city grammar (the Colosseum
+-- came out a curved block of flats). building= and historic= values.
+BLD.monuments = {ruins = true, triumphal_arch = true, amphitheatre = true, gate = true, monument = true, memorial = true,
+  archaeological_site = true, city_gate = true, citywalls = true, castle_wall = true, aqueduct = true, fort = true}
+
+BLD.withShops, BLD.withLandmarks = true, true   -- the extras of the tile being built (build() sets them)
+function BLD.isMonument(tags)
+  if not BLD.withLandmarks then return false end
+  return BLD.monuments[tags.building or ''] or BLD.monuments[tags.historic or ''] or BLD.worship[tags.building or '']
+    or tags.amenity == 'place_of_worship' or tags.man_made == 'tower' or false
+end
+
+local function wallMaterial(building, look, height, footprint)
   local tags = building.tags or {}
-  local h = hash(tostring(building.id or ''))
+  local h = hash(tostring(tags.e2r_of or building.id or ''))
   height = height or building.height or number(tags.height, number(tags['building:levels'], 3) * 3)
   local material = tags['building:material'] or tags['facade:material']
   local b = tags.building
@@ -3639,24 +4656,41 @@ local function wallMaterial(building, look, height)
   -- sheds in rusty corrugated tin, warehouses half clad in metal sheet
   if b == 'shed' then return h % 2 == 0 and 'clad_tin' or 'wall_block' end
   if b == 'industrial' or b == 'warehouse' or b == 'factory' then return h % 2 == 0 and 'clad_metal' or 'wall_block' end
-  local house = BLD.house(tags, height, h)
+  -- a church in plaster, not in a panel block's photo facade; a cathedral's towers and a mapped
+  -- church's parts in stone (window rows made the Sagrada Familia a block of flats)
+  if BLD.withLandmarks and (BLD.worship[b or ''] or tags.amenity == 'place_of_worship') then
+    return (tags.e2r_part or height > 30) and 'hw_ashlar' or 'wall_pls_cream'
+  end
+  -- a steel tower is no office: its parts take the outline's building=tower (link_parts)
+  if BLD.withLandmarks and ((tags.man_made == 'tower' and not material) or (material == 'steel' and (b == 'tower' or tags.man_made == 'tower'))) then return 'clad_metal' end
+  -- a slim block hanging with nothing under it is a mast's section (Tokyo Tower is a stack of
+  -- building=yes with min_height); a squat one, the observation deck, keeps its windows, and a
+  -- building:part stands on the rest of its building
+  local lifted = building.minHeight or number(tags.min_height, 0)
+  if BLD.withLandmarks and lifted >= 20 and footprint and not tags.e2r_part and height - lifted > 2.5 * math.sqrt(footprint) then return 'clad_metal' end
+  if BLD.isMonument(tags) then return 'hw_ashlar' end
+  local region = BLD.region(look)
+  local house = not tags.e2r_part and BLD.house(tags, height, h, region)
   if house then return house end
   if material == 'glass' or b == 'office' or b == 'commercial' or b == 'retail' or b == 'hotel' or tags.office then
     local family = height > 20 and {'off_blue', 'off_green', 'off_grey', 'off_ribbon'} or {'off_ribbon', 'off_ribbon_dark'}
     return 'wall_' .. family[h % #family + 1]
   end
-  local panel = {'pnl_grey', 'pnl_beige', 'pnl_pink', 'pnl_blue', 'pnl_white'}
+  local panel = region.panel or {'pnl_grey', 'pnl_beige', 'pnl_pink', 'pnl_blue', 'pnl_white'}
   local loggia = {'lgg_cream', 'lgg_grey', 'lgg_pink'}
-  local brick = {'brk_red', 'brk_white'}
-  local plaster = {'pls_yellow', 'pls_cream', 'pls_peach', 'pls_green', 'pls_blue', 'pls_grey'}
+  local brick = region.brick or {'brk_red', 'brk_white'}
+  local plaster = region.plaster or {'pls_yellow', 'pls_cream', 'pls_peach', 'pls_green', 'pls_blue', 'pls_grey'}
   local family
-  if material == 'brick' then family = brick
+  -- a tower of this century, unless its tags say what it is built of
+  if region.new and not material and height >= 26 and h % 4 == 0 then family = region.new
+  elseif material == 'brick' then family = brick
   elseif material == 'panel' or material == 'concrete' or material == 'reinforced_concrete' then family = height >= 26 and h % 3 ~= 0 and loggia or panel
   elseif material == 'plaster' or material == 'stucco' then family = plaster
   elseif height < 8 then family = h % 5 < 3 and plaster or brick   -- a house is not a panel block
-  elseif look.buildings == 'panel' then family = height >= 26 and (h % 3 ~= 0 and loggia or panel) or panel
+  elseif look.buildings == 'panel' and not region.byHeight then family = height >= 26 and (h % 3 ~= 0 and loggia or panel) or panel
   elseif look.buildings == 'brick' then family = brick
   elseif look.buildings == 'plaster' then family = plaster
+  elseif region.brick and not region.panel then family = h % 5 < 2 and brick or plaster   -- no panel blocks here
   elseif height >= 26 then family = h % 9 < 4 and loggia or panel
   elseif height >= 14 then family = h % 20 < 8 and panel or h % 20 < 15 and brick or plaster
   else family = h % 5 < 3 and plaster or brick end
@@ -3665,6 +4699,7 @@ end
 
 local function facadeScale(kind)
   if kind:find('_end$', 1) then return 6 end
+  if kind:find('_d_', 1, true) then return 12 end       -- drawn facades (fast_facade.REPEAT_M)
   if kind:find('door_', 1, true) == 1 or kind:find('clad_', 1, true) == 1 or kind == 'plinth' then return 3 end
   if kind == 'gable' then return 1.5 end
   if kind:find('hw_', 1, true) == 1 then return BLD.wallScale[kind] or 3 end
@@ -3905,6 +4940,378 @@ function BLD.crown(scene, rings, top, height, h, area)
   end
 end
 
+-- Roof clutter of a flat-roofed block (options.experimentalDetail): two rows of ventilation
+-- shafts along the roof's long axis, a shaft every `step` m at `chance`, and a few television
+-- antennas (a mast with two cross bars) on blocks of five floors and more. Every box must lie
+-- on the roof (the crown's test); the bulkheads of BLD.crown are kept clear.
+BLD.ROOF = {step = 6, chance = .7, shaft = {.7, .7, .9}, rows = 2.2, antennas = 3, mast = 3.2}
+function BLD.roofClutter(scene, rings, top, height, h)
+  local R = BLD.ROOF
+  local ring = cleanRing(rings[1])
+  if #ring < 3 or height < 8 then return 0 end
+  local frame = footprintFrame(ring)
+  local length, width = frame.u1 - frame.u0, frame.v1 - frame.v0
+  if width < 7 or length < 9 then return 0 end
+  local function world(u, v) return u * frame.ax + v * frame.bx, u * frame.ay + v * frame.by end
+  local function fits(u, v, du, dv)
+    for _, c in ipairs({{-1, -1}, {1, -1}, {1, 1}, {-1, 1}}) do
+      local x, y = world(u + c[1] * (du / 2 + .4), v + c[2] * (dv / 2 + .4))
+      if not inside(rings, x, y) then return false end
+    end
+    return true
+  end
+  local function box(kind, cu, cv, du, dv, z0, z1)
+    local u0, u1, v0, v1 = cu - du / 2, cu + du / 2, cv - dv / 2, cv + dv / 2
+    local function p(u, v, z, uu, vv)
+      local x, y = world(u, v)
+      return {x, y, z, uu, vv}
+    end
+    local rise = z1 - z0
+    scene.polygon(kind, {p(u0, v0, z0, 0, 0), p(u1, v0, z0, du, 0), p(u1, v0, z1, du, rise), p(u0, v0, z1, 0, rise)}, false)
+    scene.polygon(kind, {p(u1, v1, z0, 0, 0), p(u0, v1, z0, du, 0), p(u0, v1, z1, du, rise), p(u1, v1, z1, 0, rise)}, false)
+    scene.polygon(kind, {p(u1, v0, z0, 0, 0), p(u1, v1, z0, dv, 0), p(u1, v1, z1, dv, rise), p(u1, v0, z1, 0, rise)}, false)
+    scene.polygon(kind, {p(u0, v1, z0, 0, 0), p(u0, v0, z0, dv, 0), p(u0, v0, z1, dv, rise), p(u0, v1, z1, 0, rise)}, false)
+    scene.polygon(kind, {p(u0, v0, z1, 0, 0), p(u1, v0, z1, du, 0), p(u1, v1, z1, du, dv), p(u0, v1, z1, 0, dv)}, true)
+  end
+  -- the crown's bulkheads sit near the middle of the long axis: leave the middle 8 m
+  local mid, n = (frame.u0 + frame.u1) / 2, 0
+  local cv = (frame.v0 + frame.v1) / 2
+  local du, dv, rise = R.shaft[1], R.shaft[2], R.shaft[3]
+  for k = 0, math.floor((length - 2) / R.step) do
+    local u = frame.u0 + 1 + k * R.step + R.step / 2
+    if math.abs(u - mid) > 4 and u < frame.u1 - 1 then
+      for side = -1, 1, 2 do
+        local v = cv + side * R.rows
+        if ihash(h, k, side + 2, 83) % 1000 < R.chance * 1000 and fits(u, v, du, dv) then
+          box('parapet', u, v, du, dv, top, top + rise)
+          n = n + 1
+        end
+      end
+    end
+  end
+  if height >= 14 then
+    for a = 1, R.antennas do
+      if ihash(h, a, 0, 89) % 3 ~= 0 then
+        local u = frame.u0 + 2 + (ihash(h, a, 1, 89) % 1000) / 1000 * math.max(0, length - 4)
+        local v = cv + ((ihash(h, a, 2, 89) % 1000) / 1000 - .5) * math.max(0, width - 4)
+        if math.abs(u - mid) > 4.5 and fits(u, v, .3, .3) then
+          box('pipe', u, v, .05, .05, top, top + R.mast)
+          box('pipe', u, v, 1.6, .03, top + R.mast - .5, top + R.mast - .46)
+          box('pipe', u, v, 1.1, .03, top + R.mast - .15, top + R.mast - .11)
+          n = n + 1
+        end
+      end
+    end
+  end
+  return n
+end
+
+local function segDistance(x, y, a, b)
+  local dx, dy = b[1] - a[1], b[2] - a[2]
+  local len2 = dx * dx + dy * dy
+  local t = len2 > EPS and math.max(0, math.min(1, ((x - a[1]) * dx + (y - a[2]) * dy) / len2)) or 0
+  return math.sqrt((a[1] + t * dx - x) ^ 2 + (a[2] + t * dy - y) ^ 2), t * math.sqrt(len2)
+end
+
+-- Address plates (options.experimentalDetail): a building's real addr:housenumber, and its
+-- addr:street shortened, white on a dark blue plate by the left corner of the wall that faces
+-- that street (the nearest segment of a road of that name within `reach` m). Without a road
+-- of that name near, no plate: a guess of the wall would put the number on the yard.
+-- Letters are cells of the glyph atlas (fast_style.GLYPHS, the same string), a monospace font.
+BLD.GLYPHS = '0123456789/-.,\'’№ ()АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯабвгґдеєжзиіїйклмнопрстуфхцчшщьюяЁЭЪЫёэъыABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+BLD.PLATE = {reach = 45, number = .26, street = .11, aspect = .6, pad = .07, z = 2.7, perRow = 16,
+  short = {{'вулиця ', 'вул. '}, {'проспект ', 'просп. '}, {'провулок ', 'пров. '}, {'бульвар ', 'бульв. '},
+    {'площа ', 'пл. '}, {'узвіз ', 'узв. '}, {'набережна ', 'наб. '}, {' вулиця', ''}, {' провулок', ' пров.'}}}
+local glyphIndex
+function BLD.glyphs(text)
+  if not glyphIndex then
+    glyphIndex = {}
+    local k = 0
+    for ch in BLD.GLYPHS:gmatch('[%z\1-\127\194-\244][\128-\191]*') do glyphIndex[ch], k = k, k + 1 end
+  end
+  -- a space keeps its place but draws nothing (its cell would show its neighbours' mips)
+  local out = {}
+  for ch in tostring(text):gmatch('[%z\1-\127\194-\244][\128-\191]*') do
+    out[#out + 1] = ch ~= ' ' and glyphIndex[ch] or -1
+  end
+  return out
+end
+
+function BLD.streetLabel(name)
+  local s = ' ' .. tostring(name) .. ' '
+  for _, pair in ipairs(BLD.PLATE.short) do
+    local a, b = pair[1], pair[2]
+    local i = s:lower():find(a, 1, true)
+    if i then s = s:sub(1, i - 1) .. b .. s:sub(i + #a) end
+  end
+  return (s:gsub('^%s+', ''):gsub('%s+$', ''))
+end
+
+function BLD.addressPlate(scene, rings, tags, base, height, roads)
+  local P = BLD.PLATE
+  local number, street = tags['addr:housenumber'], tags['addr:street']
+  if not number or not street or not roads then return false end
+  local ring = BLD.orient(rings[1], rings)
+  local best
+  for k, a in ipairs(ring) do
+    local b = ring[k % #ring + 1]
+    local dx, dy = b[1] - a[1], b[2] - a[2]
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len >= 3 then
+      local mx, my, nx, ny = (a[1] + b[1]) / 2, (a[2] + b[2]) / 2, dy / len, -dx / len
+      for _, road in ipairs(roads) do
+        if (road.tags or NONE).name == street then
+          local pts = road.points or NONE
+          for q = 1, #pts - 1 do
+            local d, t = segDistance(mx, my, pts[q], pts[q + 1])
+            if d <= P.reach then
+              local f = t / math.max(EPS, math.sqrt((pts[q + 1][1] - pts[q][1]) ^ 2 + (pts[q + 1][2] - pts[q][2]) ^ 2))
+              local px, py = pts[q][1] + (pts[q + 1][1] - pts[q][1]) * f, pts[q][2] + (pts[q + 1][2] - pts[q][2]) * f
+              if (px - mx) * nx + (py - my) * ny > 0 and (not best or d < best.d) then
+                best = {a = a, b = b, len = len, d = d}
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  if not best then return false end
+  local label = BLD.glyphs(BLD.streetLabel(street))
+  local digits = BLD.glyphs(number)
+  local w1, w2 = #digits * P.number * P.aspect, #label * P.street * P.aspect
+  local width = math.max(w1, w2) + 2 * P.pad
+  if width > best.len - .6 then return false end
+  local z0 = base + math.min(P.z, math.max(1.6, height - 1.2))
+  local hgt = P.number + P.street + 3 * P.pad
+  local a, b, len = best.a, best.b, best.len
+  local s0 = .4
+  scene.polygon('plate', {wallPoint(a, b, len, s0, .025, z0, 0, 0), wallPoint(a, b, len, s0 + width, .025, z0, 1, 0),
+    wallPoint(a, b, len, s0 + width, .025, z0 + hgt, 1, 1), wallPoint(a, b, len, s0, .025, z0 + hgt, 0, 1)}, false)
+  local function line(chars, size, zb, total)
+    local cw = size * P.aspect
+    local start = s0 + (width - total) / 2
+    for i, g in ipairs(chars) do
+      if g >= 0 then
+        local col, row = g % P.perRow, math.floor(g / P.perRow)
+        local u0, u1 = col / P.perRow, (col + 1) / P.perRow
+        local v0, v1 = 1 - (row + 1) / P.perRow, 1 - row / P.perRow
+        local c0 = start + (i - 1) * cw
+        -- a cell is square: the letter's height is the cell's, its advance `aspect` of it
+        local pad = (size - cw) / 2
+        scene.polygon('glyphs', {wallPoint(a, b, len, c0 - pad, .035, zb, u0, v0),
+          wallPoint(a, b, len, c0 + cw + pad, .035, zb, u1, v0),
+          wallPoint(a, b, len, c0 + cw + pad, .035, zb + size, u1, v1),
+          wallPoint(a, b, len, c0 - pad, .035, zb + size, u0, v1)}, false)
+      end
+    end
+  end
+  line(digits, P.number, z0 + P.pad, w1)
+  line(label, P.street, z0 + 2 * P.pad + P.number, w2)
+  BLD.note('plate', a, b, len, s0 + width / 2, z0 - base)
+  return true
+end
+
+-- A fence run without the stretches at its mapped gates: a gate
+-- point within `on` m of the run opens `width` (its tag), `drive` m where a road passes within
+-- `road` m of it, else `walk` m. Returns the pieces left, each two points or more.
+BLD.GATE = {on = .6, drive = 3.5, walk = 1.2, road = 4, min = .3}
+function BLD.openGates(run, gates, roads)
+  local G = BLD.GATE
+  if #gates == 0 or #run < 2 then return {run} end
+  local dist = {0}
+  for k = 2, #run do
+    dist[k] = dist[k - 1] + math.sqrt((run[k][1] - run[k - 1][1]) ^ 2 + (run[k][2] - run[k - 1][2]) ^ 2)
+  end
+  local cuts = {}
+  for _, g in ipairs(gates) do
+    local p = g.pos
+    local best, at = G.on
+    for k = 1, #run - 1 do
+      local d, t = segDistance(p[1], p[2], run[k], run[k + 1])
+      if d <= best then best, at = d, dist[k] + t end
+    end
+    if at then
+      local width = number((g.tags or NONE).width, nil)
+      if not width then
+        width = G.walk
+        for _, road in ipairs(roads or NONE) do
+          local pts = road.points or NONE
+          for k = 1, #pts - 1 do
+            if segDistance(p[1], p[2], pts[k], pts[k + 1]) <= G.road then width = G.drive; break end
+          end
+          if width == G.drive then break end
+        end
+      end
+      cuts[#cuts + 1] = {at - width / 2, at + width / 2}
+    end
+  end
+  if #cuts == 0 then return {run} end
+  table.sort(cuts, function(u, v) return u[1] < v[1] end)
+  local function point(s)
+    for k = 1, #run - 1 do
+      if s <= dist[k + 1] or k == #run - 1 then
+        local f = (dist[k + 1] - dist[k]) > EPS and (s - dist[k]) / (dist[k + 1] - dist[k]) or 0
+        f = math.max(0, math.min(1, f))
+        local a, b = run[k], run[k + 1]
+        return {a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f, a[3] and b[3] and a[3] + (b[3] - a[3]) * f or nil}
+      end
+    end
+  end
+  local pieces, from = {}, 0
+  local function piece(s0, s1)
+    if s1 - s0 < G.min then return end
+    local out = {point(s0)}
+    for k = 1, #run do
+      if dist[k] > s0 and dist[k] < s1 then out[#out + 1] = run[k] end
+    end
+    out[#out + 1] = point(s1)
+    pieces[#pieces + 1] = out
+  end
+  for _, c in ipairs(cuts) do
+    if c[1] > from then piece(from, c[1]) end
+    from = math.max(from, c[2])
+  end
+  if from < dist[#dist] then piece(from, dist[#dist]) end
+  return pieces
+end
+
+-- A mapped lift gate (barrier=lift_gate): a post at the right edge
+-- of the way it stands on and its boom raised upright, striped red and white. Raised: a boom
+-- across the way without collision would let a car through it. Returns true when drawn.
+BLD.LIFTGATE = {post = {.3, .3, 1.05}, boom = 3.6, stripe = .6, reach = 3}
+function BLD.liftGate(scene, p, roads, ground)
+  local G = BLD.LIFTGATE
+  local best, hit = G.reach
+  for _, road in ipairs(roads) do
+    local pts = road.points or NONE
+    for k = 1, #pts - 1 do
+      local d, t = segDistance(p[1], p[2], pts[k], pts[k + 1])
+      if d < best then best, hit = d, {a = pts[k], b = pts[k + 1], width = road.width or 4} end
+    end
+  end
+  if not hit then return false end
+  local dx, dy = hit.b[1] - hit.a[1], hit.b[2] - hit.a[2]
+  local len = math.sqrt(dx * dx + dy * dy)
+  if len < EPS then return false end
+  local ux, uy = dx / len, dy / len
+  -- a little frame on the gate's line across the way: s along the road, o to its right
+  local half = math.max(1.5, math.min(4, hit.width / 2)) + .45
+  local cx, cy = p[1] + uy * half, p[2] - ux * half
+  local a, b = {cx - ux, cy - uy}, {cx + ux, cy + uy}
+  local z = ground(cx, cy)
+  local w, d, h = G.post[1], G.post[2], G.post[3]
+  BLD.box(scene, 'dish', a, b, 2, 1 - w / 2, 1 + w / 2, -d / 2, d / 2, z, z + h, true, true, false)
+  local n = math.floor(G.boom / G.stripe)
+  for k = 0, n - 1 do
+    BLD.box(scene, k % 2 == 0 and 'paint_red' or 'dish', a, b, 2, .96, 1.04, -.04, .04,
+      z + h + k * G.stripe, z + h + (k + 1) * G.stripe, true, k == n - 1, false)
+  end
+  return true
+end
+
+-- Low-voltage lines (power=minor_line; the main grid stays off the map). A wooden pole on each
+-- node of the way, a long span divided at `step`; the arm square to the line (the game's pole has
+-- it along its x, and stands in common art since 2013). Wires: thin upright ribbons sagging
+-- between the same anchors of two poles, on each tile a span touches (scene.polygon clips them).
+BLD.POWER = {shape = '/art/shapes/common/power_lines_procedural/electric_pole_wood_old_01.dae', step = 45,
+  longest = 70, shortest = 8, sag = .012, thick = .03, segments = 4,
+  wires = {{-.65, 7.25}, {.65, 7.25}, {-.58, 6.19}, {.62, 6.19}}}
+
+function BLD.powerPoles(points, onAsphalt)
+  local P, poles = BLD.POWER, {}
+  for k, a in ipairs(points) do
+    local b = points[k + 1]
+    local n = 1
+    if b then
+      local length = math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2)
+      if length > P.longest then n = math.ceil(length / P.step) end
+    end
+    for i = 0, n - 1 do
+      local t = b and i / n or 0
+      local x, y = a[1] + (b and (b[1] - a[1]) * t or 0), a[2] + (b and (b[2] - a[2]) * t or 0)
+      local last = poles[#poles]
+      if not onAsphalt(x, y) and (not last or (x - last[1]) ^ 2 + (y - last[2]) ^ 2 >= P.shortest ^ 2) then
+        poles[#poles + 1] = {x, y}
+      end
+    end
+  end
+  return poles
+end
+
+function BLD.powerLines(lines, rect, scene, ground, onAsphalt, put, pause)
+  local P = BLD.POWER
+  for _, line in ipairs(lines) do
+    if line.kind == 'power' and #(line.points or NONE) >= 2 and boundsTouch(ringBounds({line.points}), rect, 60) then
+      local poles = BLD.powerPoles(line.points, onAsphalt)
+      for k, p in ipairs(poles) do
+        local before, after = poles[k - 1] or p, poles[k + 1] or p
+        local dx, dy = after[1] - before[1], after[2] - before[2]
+        local d = math.max(EPS, math.sqrt(dx * dx + dy * dy))
+        p.dx, p.dy, p.z = dx / d, dy / d, ground(p[1], p[2])
+      end
+      for k, p in ipairs(poles) do
+        if p[1] >= rect[1] and p[1] < rect[3] and p[2] >= rect[2] and p[2] < rect[4] then
+          put('power_' .. tostring(line.id):gsub('[^%w_]', '_') .. '_' .. k, P.shape, p[1], p[2], p.z, math.atan2(-p.dx, p.dy))
+        end
+        local q = poles[k + 1]
+        if q and boundsTouch({math.min(p[1], q[1]), math.min(p[2], q[2]), math.max(p[1], q[1]), math.max(p[2], q[2])}, rect, 2) then
+          local span = math.sqrt((q[1] - p[1]) ^ 2 + (q[2] - p[2]) ^ 2)
+          for _, wire in ipairs(P.wires) do
+            local ax, ay, az = p[1] + wire[1] * p.dy, p[2] - wire[1] * p.dx, p.z + wire[2]
+            local bx, by, bz = q[1] + wire[1] * q.dy, q[2] - wire[1] * q.dx, q.z + wire[2]
+            local function at(t, lift)
+              return {ax + (bx - ax) * t, ay + (by - ay) * t, az + (bz - az) * t - P.sag * span * 4 * t * (1 - t) + lift, t, lift}
+            end
+            for s = 0, P.segments - 1 do
+              local t0, t1 = s / P.segments, (s + 1) / P.segments
+              scene.polygon('wire', {at(t0, 0), at(t1, 0), at(t1, P.thick), at(t0, P.thick)}, false)
+            end
+          end
+        end
+      end
+      pause()
+    end
+  end
+end
+
+-- A stop's name on its own pole beside the shelter (options.experimentalDetail): the real
+-- `name` of the stop node, white on the plate's blue, over the line a -> b (the plate faces
+-- the right of it); letters shrink to keep the plate within `maxWidth`. Returns true when drawn.
+BLD.STOPSIGN = {size = .13, minSize = .07, maxWidth = 2.2, z = 2.1, pole = 2.75}
+function BLD.stopSign(scene, x, y, z, ux, uy, name)
+  local S, P = BLD.STOPSIGN, BLD.PLATE
+  if not name or name == '' then return false end
+  local chars = BLD.glyphs(name)
+  local size = math.max(S.minSize, math.min(S.size, (S.maxWidth - 2 * P.pad) / math.max(1, #chars) / P.aspect))
+  local width = #chars * size * P.aspect + 2 * P.pad
+  if width > S.maxWidth + .01 then return false end
+  local a, b = {x - ux * width / 2, y - uy * width / 2}, {x + ux * width / 2, y + uy * width / 2}
+  local hgt = size + 2 * P.pad
+  local z0 = z + S.z
+  BLD.box(scene, 'pipe', a, b, width, width / 2 - .03, width / 2 + .03, -.09, -.03, z, z + S.pole, true, true, false)
+  scene.polygon('plate', {wallPoint(a, b, width, 0, 0, z0, 0, 0), wallPoint(a, b, width, width, 0, z0, 1, 0),
+    wallPoint(a, b, width, width, 0, z0 + hgt, 1, 1), wallPoint(a, b, width, 0, 0, z0 + hgt, 0, 1)}, false)
+  scene.polygon('plate', {wallPoint(a, b, width, width, -.02, z0, 0, 0), wallPoint(a, b, width, 0, -.02, z0, 1, 0),
+    wallPoint(a, b, width, 0, -.02, z0 + hgt, 1, 1), wallPoint(a, b, width, width, -.02, z0 + hgt, 0, 1)}, false)
+  local cw = size * P.aspect
+  local pad = (size - cw) / 2
+  for i, g in ipairs(chars) do
+    if g >= 0 then
+      local col, row = g % P.perRow, math.floor(g / P.perRow)
+      local u0, u1 = col / P.perRow, (col + 1) / P.perRow
+      local v0, v1 = 1 - (row + 1) / P.perRow, 1 - row / P.perRow
+      local c0 = P.pad + (i - 1) * cw
+      scene.polygon('glyphs', {wallPoint(a, b, width, c0 - pad, .01, z0 + P.pad, u0, v0),
+        wallPoint(a, b, width, c0 + cw + pad, .01, z0 + P.pad, u1, v0),
+        wallPoint(a, b, width, c0 + cw + pad, .01, z0 + P.pad + size, u1, v1),
+        wallPoint(a, b, width, c0 - pad, .01, z0 + P.pad + size, u0, v1)}, false)
+    end
+  end
+  BLD.note('stopsign', a, b, width, width / 2, S.z)
+  return true
+end
+
 -- One concrete visor along a whole facade. The top faces the sky: the orbit camera sits
 -- above a car, and a downward sheet (the house porch) was invisible there. The outer
 -- edge is a short vertical fascia so the ledge reads from the side. h is unused.
@@ -3925,6 +5332,404 @@ function BLD.canopy(scene, a, b, length, base, h, height)
     wallPoint(a, b, length, s0, reach, zOut, 0, .16)}, false)
 end
 
+-- Facade details (options.experimentalDetail, city blocks on near tiles): what a photo wall
+-- cannot carry. Downpipes on the outer corners of low brick and plaster blocks (panel and
+-- taller blocks drain inside); air-conditioner boxes under windows of panel, brick and plaster
+-- walls, on the 3 m window grid of their textures (fast_photo: a window at .24-.76 of a cell,
+-- its sill .96 m over the floor). Small, without collision (collision.lua QUIET).
+BLD.DETAIL = {pipe = .11, pipeOff = .06, pipeMax = 6, pipeHeight = 18, cell = 3,
+  ac = {wall_pnl_ = .05, wall_brk_ = .07, wall_pls_ = .07}, acMax = 40, acWidth = .8, acDepth = .28}
+
+-- A box against the wall a -> b: s0..s1 along it, o0..o1 out from it, z0..z1. back: also the
+-- face toward the wall (a pipe stands off it); top, bottom: the horizontal faces.
+function BLD.box(scene, kind, a, b, length, s0, s1, o0, o1, z0, z1, back, top, bottom)
+  local du, dz, dd = s1 - s0, z1 - z0, o1 - o0
+  local function w(s, o, z, u, v) return wallPoint(a, b, length, s, o, z, u, v) end
+  scene.polygon(kind, {w(s0, o1, z0, 0, 0), w(s1, o1, z0, du, 0), w(s1, o1, z1, du, dz), w(s0, o1, z1, 0, dz)}, false)
+  scene.polygon(kind, {w(s1, o1, z0, 0, 0), w(s1, o0, z0, dd, 0), w(s1, o0, z1, dd, dz), w(s1, o1, z1, 0, dz)}, false)
+  scene.polygon(kind, {w(s0, o0, z0, 0, 0), w(s0, o1, z0, dd, 0), w(s0, o1, z1, dd, dz), w(s0, o0, z1, 0, dz)}, false)
+  if back then
+    scene.polygon(kind, {w(s1, o0, z0, 0, 0), w(s0, o0, z0, du, 0), w(s0, o0, z1, du, dz), w(s1, o0, z1, 0, dz)}, false)
+  end
+  if top then
+    scene.polygon(kind, {w(s0, o0, z1, 0, 0), w(s0, o1, z1, 0, dd), w(s1, o1, z1, du, dd), w(s1, o0, z1, du, 0)}, true)
+  end
+  if bottom then
+    scene.polygon(kind, {w(s0, o0, z0, 0, 0), w(s1, o0, z0, du, 0), w(s1, o1, z0, du, dd), w(s0, o1, z0, 0, dd)}, true)
+  end
+end
+
+-- Over a linked storefront (options.experimentalDetail): its sign and an awning. The sign is a
+-- dark fascia board on the shop texture's own sign strip (the top `strip` m of its band) with the
+-- POI's real `name` in the planet's glyph atlas, at least `wide` of the span, letters shrinking
+-- to fit; no name, or one mostly of letters the atlas
+-- lacks, and there is no board (never a made-up name or a logo). The awning is synthetic: a
+-- sloped sheet over the span, only where the street's carriageway is at least `clear` m from
+-- the wall and its valance stays at least 2.4 m over the pavement. Colours by the POI's id.
+BLD.SHOPSIGN = {letter = .34, minLetter = .16, pad = .08, out0 = .03, out1 = .10, strip = .05, wide = .6, longest = 30,
+  awning = {reach = 1.1, drop = .45, valance = .22, height = 3.2, least = 2.4, clear = 2.0, inset = .2},
+  colours = {'paint_red', 'plate', 'pipe'}}
+-- A name set in the glyphs: its characters and the letter height that fits `room` m, at most
+-- `letter`, or nil when too long, too small or mostly outside the atlas.
+function BLD.signFit(name, room, letter)
+  local S, P = BLD.SHOPSIGN, BLD.PLATE
+  if not name or name == '' then return nil end
+  local chars = BLD.glyphs(name)
+  local unknown = 0
+  for _, g in ipairs(chars) do if g < 0 then unknown = unknown + 1 end end
+  local spaces = select(2, tostring(name):gsub(' ', ''))
+  if #chars == 0 or #chars > S.longest or unknown - spaces > #chars / 4 then return nil end
+  local size = math.min(letter, room / (#chars * P.aspect))
+  if size < S.minLetter then return nil end
+  return chars, size
+end
+
+-- The letters centred at c along the wall, standing on z, `out` m before it
+function BLD.signLetters(scene, a, b, length, c, chars, size, z, out)
+  local P = BLD.PLATE
+  local cw = size * P.aspect
+  local text, pad = #chars * cw, (size - cw) / 2
+  for i, g in ipairs(chars) do
+    if g >= 0 then
+      local col, row = g % P.perRow, math.floor(g / P.perRow)
+      local u0, u1 = col / P.perRow, (col + 1) / P.perRow
+      local v0, v1 = 1 - (row + 1) / P.perRow, 1 - row / P.perRow
+      local l = c - text / 2 + (i - 1) * cw
+      scene.polygon('glyphs', {wallPoint(a, b, length, l - pad, out, z, u0, v0),
+        wallPoint(a, b, length, l + cw + pad, out, z, u1, v0),
+        wallPoint(a, b, length, l + cw + pad, out, z + size, u1, v1),
+        wallPoint(a, b, length, l - pad, out, z + size, u0, v1)}, false)
+    end
+  end
+end
+
+function BLD.storeFront(scene, a, b, length, span, upper, top, base, bins)
+  local S, P = BLD.SHOPSIGN, BLD.PLATE
+  local s0, s1 = span[1], span[2]
+  local chars, size = BLD.signFit(span.name, s1 - s0 - .4 - 2 * S.pad, S.letter)
+  if chars then
+    local text, h = #chars * size * P.aspect, size + 2 * S.pad
+    local w = math.min(s1 - s0 - .4, math.max(text + 2 * S.pad, (s1 - s0) * S.wide))
+    local z0 = upper - h - S.strip
+    local c = (s0 + s1) / 2
+    BLD.box(scene, 'fascia', a, b, length, c - w / 2, c + w / 2, S.out0, S.out1, z0, z0 + h, false, true, true)
+    BLD.signLetters(scene, a, b, length, c, chars, size, z0 + S.pad, S.out1 + .01)
+    BLD.note('shopsign', a, b, length, c, z0 - base)
+  end
+  local A = S.awning
+  local z = base + math.min(A.height, upper - base - .3)
+  if z - A.drop - A.valance - base < A.least or s1 - s0 < 2 * A.inset + 1 then return end
+  -- the carriageways at grade in front of the wall
+  for _, f in ipairs({.25, .5, .75}) do
+    local p = wallPoint(a, b, length, s0 + (s1 - s0) * f, A.reach, 0, 0, 0)
+    for _, s in ipairs(bins[(math.floor(p[1] / 50) + 32768) * 65536 + math.floor(p[2] / 50) + 32768] or NONE) do
+      if s.surface and s.len2 > 0 then
+        local t = math.max(0, math.min(1, ((p[1] - s.a[1]) * s.dx + (p[2] - s.a[2]) * s.dy) / s.len2))
+        local d = math.sqrt((s.a[1] + t * s.dx - p[1]) ^ 2 + (s.a[2] + t * s.dy - p[2]) ^ 2) - s.width / 2
+        if d < A.clear then return end
+      end
+    end
+  end
+  local kind = S.colours[hash(tostring(span[4])) % #S.colours + 1]
+  local e0, e1, zo = s0 + A.inset, s1 - A.inset, z - A.drop
+  local function w(s, o, zz, u, v) return wallPoint(a, b, length, s, o, zz, u, v) end
+  local sheet = {w(e0, .04, z, 0, 0), w(e1, .04, z, e1 - e0, 0), w(e1, A.reach, zo, e1 - e0, A.reach),
+    w(e0, A.reach, zo, 0, A.reach)}
+  scene.polygon(kind, sheet, true)
+  scene.polygon(kind, {sheet[4], sheet[3], sheet[2], sheet[1]}, false)
+  BLD.box(scene, kind, a, b, length, e0, e1, A.reach - .02, A.reach, zo - A.valance, zo, true, false, true)
+  for _, s in ipairs({e0, e1}) do
+    scene.polygon(kind, {w(s, .04, z, 0, 0), w(s, A.reach, zo, A.reach, 0), w(s, A.reach, zo - A.valance, A.reach, .2)}, false)
+    scene.polygon(kind, {w(s, A.reach, zo - A.valance, A.reach, .2), w(s, A.reach, zo, A.reach, 0), w(s, .04, z, 0, 0)}, false)
+  end
+  BLD.note('awning', a, b, length, (e0 + e1) / 2, z - base)
+end
+
+-- Tools only (options.detailReport, e.g. a camera list): where a facade detail stands, the
+-- wall point under it and the wall's outward normal. BLD.report is set per build.
+function BLD.note(kind, a, b, length, s, z)
+  local report = BLD.report
+  if report then
+    local dx, dy = (b[1] - a[1]) / length, (b[2] - a[2]) / length
+    report[#report + 1] = {kind = kind, x = a[1] + dx * s, y = a[2] + dy * s, z = z, nx = dy, ny = -dx}
+  end
+end
+
+-- The air-conditioner rate of a wall kind (BLD.DETAIL.ac), nil for walls without the grid.
+function BLD.acRate(kind)
+  if kind:find('_end$') then return nil end
+  for prefix, rate in pairs(BLD.DETAIL.ac) do
+    if kind:find(prefix, 1, true) == 1 then return rate end
+  end
+end
+
+-- Air conditioners on one outer wall: a box under the window of a 3 m cell (the cells run from
+-- the ring's first corner, as the texture's u does), floors above the ground one; not in a
+-- storefront's band. Returns how many it put.
+function BLD.acUnits(scene, a, b, length, along, base, height, kind, h, spans, room)
+  local D = BLD.DETAIL
+  local rate = BLD.acRate(kind)
+  if not rate or length < 6 or room <= 0 then return 0 end
+  local floors = math.floor((height - .3) / D.cell)
+  local n = 0
+  for k = math.ceil((along + .3) / D.cell), math.floor((along + length - .3) / D.cell) - 1 do
+    local s = k * D.cell - along + D.cell / 2
+    for f = 1, BLD.balconyColumn(kind, height, h, k) and 0 or floors - 1 do
+      if ihash(h, k, f, 31) % 1000 < rate * 1000 then
+        local z0 = base + f * D.cell + .22
+        local clear = true
+        for _, span in ipairs(spans or NONE) do
+          if s + D.acWidth / 2 > span[1] and s - D.acWidth / 2 < span[2] and z0 < base + BLD.STORE.band + .1 then clear = false end
+        end
+        if clear then
+          BLD.box(scene, 'ac_unit', a, b, length, s - D.acWidth / 2, s + D.acWidth / 2, .02, .02 + D.acDepth,
+            z0, z0 + .52, false, true, true)
+          BLD.note('ac_unit', a, b, length, s, z0 - base)
+          n = n + 1
+          if n >= room then return n end
+        end
+      end
+    end
+  end
+  return n
+end
+
+-- Balconies of a brick or plaster block of three to six floors (the khrushchovka) and of a
+-- panel block of three to nine (whose photo panels have none): stacks on some 3 m window
+-- columns of a wall, never two side by side, from the first floor up. A
+-- concrete slab, a parapet of profiled sheet (pale or brown by building), and on about half
+-- of them glazing (the office glass) up to the slab above, a roof slab over the top one.
+BLD.BALCONY = {column = .3, glazed = .55, width = {.12, .82}, depth = .95, minFloors = 3, maxFloors = 6,
+  panelFloors = 9}
+
+-- Whether the 3 m column k of a building (hash h) carries a balcony stack, for a wall kind.
+function BLD.balconyColumn(kind, height, h, k)
+  local B = BLD.BALCONY
+  local panel = kind:find('wall_pnl_', 1, true) == 1
+  if not (panel or kind:find('wall_brk_', 1, true) == 1 or kind:find('wall_pls_', 1, true) == 1) or kind:find('_end$') then
+    return false
+  end
+  local floors = math.floor((height - .3) / BLD.DETAIL.cell)
+  if floors < B.minFloors or floors > (panel and B.panelFloors or B.maxFloors) then return false end
+  local function chosen(c) return ihash(h, c, 0, 61) % 1000 < B.column * 1000 end
+  return chosen(k) and not chosen(k - 1)
+end
+
+function BLD.balconies(scene, a, b, length, along, base, height, kind, h, spans)
+  local B, D = BLD.BALCONY, BLD.DETAIL
+  if length < 6 then return 0 end
+  local floors = math.floor((height - .3) / D.cell)
+  local sheet = h % 3 == 0 and 'clad_tin' or 'clad_metal'
+  local n = 0
+  for k = math.ceil((along + .3) / D.cell), math.floor((along + length - .3) / D.cell) - 1 do
+    if BLD.balconyColumn(kind, height, h, k) then
+      local c0 = k * D.cell - along
+      local s0, s1 = c0 + B.width[1] * D.cell, c0 + B.width[2] * D.cell
+      local clear = true
+      for _, span in ipairs(spans or NONE) do
+        if s1 > span[1] and s0 < span[2] then clear = false end
+      end
+      for f = 1, floors - 1 do
+        local z = base + f * D.cell
+        if clear or z > base + BLD.STORE.band + .1 then
+          local o = B.depth
+          BLD.box(scene, 'plinth', a, b, length, s0, s1, .02, o, z - .02, z + .12, false, true, true)
+          BLD.box(scene, sheet, a, b, length, s0, s1, o - .05, o, z + .12, z + 1.05, true, true, false)
+          BLD.box(scene, sheet, a, b, length, s0, s0 + .05, .02, o - .05, z + .12, z + 1.05, true, true, false)
+          BLD.box(scene, sheet, a, b, length, s1 - .05, s1, .02, o - .05, z + 1.05 - .93, z + 1.05, true, true, false)
+          if ihash(h, k, f, 67) % 1000 < B.glazed * 1000 then
+            local g0, g1 = z + 1.05, z + D.cell - .02
+            local function pane(p, q, r, t)
+              scene.polygon('wall_off_grey', {p, q, r, t}, false)
+            end
+            local u0, u1 = (along + s0) / 6, (along + s1) / 6
+            pane(wallPoint(a, b, length, s0, o - .03, g0, u0, .02), wallPoint(a, b, length, s1, o - .03, g0, u1, .02),
+              wallPoint(a, b, length, s1, o - .03, g1, u1, .02 + (g1 - g0) / 6), wallPoint(a, b, length, s0, o - .03, g1, u0, .02 + (g1 - g0) / 6))
+            pane(wallPoint(a, b, length, s1, o - .03, g0, 0, .02), wallPoint(a, b, length, s1, .02, g0, (o - .05) / 6, .02),
+              wallPoint(a, b, length, s1, .02, g1, (o - .05) / 6, .02 + (g1 - g0) / 6), wallPoint(a, b, length, s1, o - .03, g1, 0, .02 + (g1 - g0) / 6))
+            pane(wallPoint(a, b, length, s0, .02, g0, 0, .02), wallPoint(a, b, length, s0, o - .03, g0, (o - .05) / 6, .02),
+              wallPoint(a, b, length, s0, o - .03, g1, (o - .05) / 6, .02 + (g1 - g0) / 6), wallPoint(a, b, length, s0, .02, g1, 0, .02 + (g1 - g0) / 6))
+          end
+          if f == floors - 1 then
+            BLD.box(scene, 'plinth', a, b, length, s0, s1, .02, o + .05, z + D.cell - .02, z + D.cell + .1, false, true, true)
+          end
+          BLD.note('balcony', a, b, length, (s0 + s1) / 2, z - base)
+          n = n + 1
+        end
+      end
+    end
+  end
+  return n
+end
+
+-- Window extras on one outer wall of a panel, brick or plaster block, on the same 3 m grid:
+-- bars over a share of the ground floor's windows (the railing's bars, 6 cm out), and a
+-- satellite dish on the pier beside a window above it (a disc tilted to the sky on an arm).
+-- Not in a storefront's span. Returns how many dishes and grilles it put.
+BLD.EXTRAS = {grille = .35, dish = .03, window = {.23, .77, .9, 2.45}, dishR = .3}
+function BLD.windowExtras(scene, a, b, length, along, base, height, kind, h, spans)
+  local D, X = BLD.DETAIL, BLD.EXTRAS
+  if not BLD.acRate(kind) or length < 6 then return 0 end
+  local floors = math.floor((height - .3) / D.cell)
+  local n = 0
+  local function free(s0, s1, z)
+    for _, span in ipairs(spans or NONE) do
+      if s1 > span[1] and s0 < span[2] and z < BLD.STORE.band + .1 then return false end
+    end
+    return true
+  end
+  for k = math.ceil((along + .3) / D.cell), math.floor((along + length - .3) / D.cell) - 1 do
+    local c0 = k * D.cell - along
+    local s0, s1 = c0 + X.window[1] * D.cell, c0 + X.window[2] * D.cell
+    if ihash(h, k, 0, 47) % 1000 < X.grille * 1000 and free(s0, s1, 0) then
+      local z0, z1 = base + X.window[3], base + X.window[4]
+      scene.polygon('railing_dark', {wallPoint(a, b, length, s0, .06, z0, 0, 0),
+        wallPoint(a, b, length, s1, .06, z0, s1 - s0, 0),
+        wallPoint(a, b, length, s1, .06, z1, s1 - s0, 1),
+        wallPoint(a, b, length, s0, .06, z1, 0, 1)}, false)
+      n = n + 1
+    end
+    for f = 1, BLD.balconyColumn(kind, height, h, k) and 0 or floors - 1 do
+      if ihash(h, k, f, 53) % 1000 < X.dish * 1000 then
+        -- on the pier right of the window, a little over its middle
+        local s, z, r = c0 + .89 * D.cell, base + f * D.cell + 1.75, X.dishR
+        if s + r < length - .2 then
+          BLD.box(scene, 'dish', a, b, length, s - .03, s + .03, .02, .32, z - .03, z + .03, false, true, true)
+          local ring = {}
+          for q = 0, 7 do
+            local t = q * math.pi / 4
+            -- a disc in the plane facing out and 25 degrees up, centred .4 m out
+            local du, dv = math.cos(t) * r, math.sin(t) * r
+            ring[#ring + 1] = wallPoint(a, b, length, s + du, .4 - dv * .42, z + dv * .9, .5 + du, .5 + dv)
+          end
+          scene.polygon('dish', ring, false)
+          local back = {}
+          for q = #ring, 1, -1 do back[#back + 1] = ring[q] end
+          scene.polygon('dish', back, false)
+          BLD.note('dish', a, b, length, s, z - base)
+          n = n + 1
+        end
+      end
+    end
+  end
+  return n
+end
+
+-- Downpipes at the outer corners of a low brick or plaster block: a pipe 0.3 m round the
+-- corner on the incoming wall, a hopper under the eaves, a kick-out at the foot. At most
+-- pipeMax, the corners between the longest walls first.
+function BLD.downpipes(scene, rings, base, top, height, kind)
+  local D = BLD.DETAIL
+  if height > D.pipeHeight or not (kind:find('wall_brk_', 1, true) == 1 or kind:find('wall_pls_', 1, true) == 1) then return 0 end
+  local ring = BLD.orient(rings[1], rings)
+  local n = #ring
+  if n < 3 then return 0 end
+  local corners = {}
+  for k = 1, n do
+    local a, p, b = ring[(k - 2) % n + 1], ring[k], ring[k % n + 1]
+    local ux, uy, vx, vy = p[1] - a[1], p[2] - a[2], b[1] - p[1], b[2] - p[2]
+    local lu, lv = math.sqrt(ux * ux + uy * uy), math.sqrt(vx * vx + vy * vy)
+    if lu >= 3 and lv >= 3 and (ux * vy - uy * vx) / (lu * lv) > .5 then
+      corners[#corners + 1] = {a = a, p = p, len = lu, weight = lu + lv, k = k}
+    end
+  end
+  table.sort(corners, function(u, v) return u.weight > v.weight or (u.weight == v.weight and u.k < v.k) end)
+  local w, o0 = D.pipe, D.pipeOff
+  for i = 1, math.min(D.pipeMax, #corners) do
+    local c = corners[i]
+    local s1 = c.len - .3
+    local s0 = s1 - w
+    BLD.box(scene, 'pipe', c.a, c.p, c.len, s0, s1, o0, o0 + w, base + .32, top - .42, true, false, false)
+    BLD.box(scene, 'pipe', c.a, c.p, c.len, s0 - .07, s1 + .07, o0 - .03, o0 + w + .07, top - .42, top - .14, true, false, true)
+    BLD.box(scene, 'pipe', c.a, c.p, c.len, s0, s1, o0, o0 + .38, base + .1, base + .32, true, true, false)
+    BLD.note('pipe', c.a, c.p, c.len, s0, 0)
+  end
+  return math.min(D.pipeMax, #corners)
+end
+
+-- Covers in a town street's asphalt (options.experimentalDetail; synthetic, not mapped): a
+-- round manhole every manholeStep m, in the gap between the wheel paths of one lane and then
+-- the other, and a grid drain every drainStep m at each curb that has a sidewalk. Lattices run
+-- from the road's source start (strip.start + dist), phased by its id, so tiles and junction
+-- cuts agree; every tile a cover touches draws it (the collector clips it to the tile), and
+-- none lies within `clear` m of a cut end (a junction's fan).
+-- With patches: a patch of new asphalt every patchStep m at patchChance, 2.5 to 6 m long,
+-- 0.9 to 1.8 m wide, somewhere across the carriageway (the patch sheet is 1 x 8 of its width).
+ROADS.COVERS = {manholeStep = 55, drainStep = 38, clear = 7, manhole = .82, drain = {.42, .95},
+  patchStep = 23, patchChance = .5,
+  classes = {residential = true, tertiary = true, secondary = true, primary = true, unclassified = true,
+    living_street = true}}
+function ROADS.covers(strips, rect, lift, decor, pause, patches)
+  local C = ROADS.COVERS
+  for n, strip in ipairs(strips) do
+    local tags, points, dist = strip.tags, strip.points, strip.dist
+    local class = (tags.highway or ''):gsub('_link$', '')
+    if strip.surface and strip.grade <= 1 and C.classes[class] and strip.hw >= 2.5 and #points >= 2 then
+      local total, start, seed = dist[#dist], strip.start or 0, hash(tostring(strip.road.id or n))
+      local function place(step, phase, put)
+        for m = math.ceil((start + C.clear - phase) / step), math.floor((start + total - C.clear - phase) / step) do
+          local at = m * step + phase - start
+          local k = 1
+          while k < #points - 1 and dist[k + 1] < at do k = k + 1 end
+          local a, b = points[k], points[k + 1]
+          local len = dist[k + 1] - dist[k]
+          if len > EPS then
+            local f = (at - dist[k]) / len
+            local ux, uy = (b[1] - a[1]) / len, (b[2] - a[2]) / len
+            put(m, k, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f, (a[3] or 0) + ((b[3] or 0) - (a[3] or 0)) * f, ux, uy)
+          end
+        end
+      end
+      -- a patch lies between the paint and the covers: none of them fights another for depth
+      local function quad(kind, x, y, z, ux, uy, along, across, u0, v0, u1, v1)
+        local reach = math.max(along, across) / 2 + .1
+        if not boundsTouch(rect, {x - reach, y - reach, x + reach, y + reach}) then return end
+        local nx, ny, ha, hc = -uy, ux, along / 2, across / 2
+        local zz = z + lift + DECAL.markLift * (kind == 'patch' and 1.25 or 1.5)
+        decor.polygon(kind, {{x - ux * ha - nx * hc, y - uy * ha - ny * hc, zz, u0, v0},
+          {x - ux * ha + nx * hc, y - uy * ha + ny * hc, zz, u1, v0},
+          {x + ux * ha + nx * hc, y + uy * ha + ny * hc, zz, u1, v1},
+          {x + ux * ha - nx * hc, y + uy * ha - ny * hc, zz, u0, v1}}, 'flat')
+      end
+      local town = false
+      for k = 1, #points - 1 do
+        local w = strip.walk[k] or NONE
+        if w[1] or w[-1] then town = true; break end
+      end
+      if town then
+        place(C.manholeStep, seed % C.manholeStep, function(m, k, x, y, z, ux, uy)
+          local side = m % 2 == 0 and 1 or -1
+          local off = strip.hw * .45 * side
+          -- the round cover: the upper right quarter of the sheet
+          quad('manhole', x - uy * off, y + ux * off, z, ux, uy, C.manhole, C.manhole, .5, 0, 1, .5)
+        end)
+        if patches then
+          place(C.patchStep, (seed * 13 + 5) % C.patchStep, function(m, k, x, y, z, ux, uy)
+            local r = ihash(seed, m, 0, 71)
+            if r % 1000 < C.patchChance * 1000 then
+              local long = 2.5 + (r % 7) * .58
+              local wide = .9 + (math.floor(r / 7) % 5) * .22
+              local room = math.max(0, strip.hw - wide / 2 - .35)
+              local off = ((math.floor(r / 35) % 101) / 50 - 1) * room
+              local v0 = (math.floor(r / 3535) % 100) / 100
+              quad('patch', x - uy * off, y + ux * off, z, ux, uy, long, wide, 0, v0, 1, v0 + long / wide / 8)
+            end
+          end)
+        end
+        place(C.drainStep, (seed * 7 + 11) % C.drainStep, function(m, k, x, y, z, ux, uy)
+          for _, side in ipairs({1, -1}) do
+            if (strip.walk[k] or NONE)[side] then
+              local off = (strip.hw - C.drain[1] / 2 - .03) * side
+              quad('drain', x - uy * off, y + ux * off, z, ux, uy, C.drain[2], C.drain[1], 0, 0, 1, .5)
+            end
+          end
+        end)
+      end
+    end
+    if n % 16 == 0 then pause() end
+  end
+end
+
 -- True when a carriageway (not a yard driveway) passes within r metres of (x, y).
 -- segmentBins is the tile's road index from build(); service ways are a yard, not a street.
 function BLD.street(bins, x, y, r)
@@ -3938,6 +5743,382 @@ function BLD.street(bins, x, y, r)
     end
   end
   return false
+end
+
+-- Storefront experiment (options.experimentalShopfront, off by default). Evidence is a mapped
+-- commercial node (a 'poi' point, packs built with EARTHNG_POIS=1) or the building's own shop,
+-- retail or commercial tag. A node is tied to the one building it stands in (or within `edge`
+-- of, with no other within `near`) and to the wall of the mapped door ('door' point, or a main
+-- entrance) on that building nearest it, within doorReach; a tagged building without a node
+-- gets its only street wall. Anything unclear is skipped, with its reason in
+-- options.poiReport when the caller passes a table. The wall's lower band then takes a neutral
+-- shop material: a synthetic look of the use, not the real sign, windows or door. Nothing is
+-- placed on the ground.
+--   reach: a street's edge at most this far out from the wall; depth: a node farther than this
+--   from its wall is inside the block, not on its front; span: metres of front per node; tie: a
+--   second street wall this much farther is still a tie (a corner); band: the shop's height (the
+--   texture's design, squeezed into a lower building down to minBand); halo: the pack's source
+--   halo round a cell (build_country.HALO); margin:
+--   the building's neighbourhood that must lie in every cell a drawing tile may load.
+BLD.STORE = {reach = 18, depth = 12, span = 8, tie = 1.5, edge = 3, near = 10, band = 4.2, minBand = 2.6, entrance = 1.2,
+  halo = 100, margin = 60, minWall = 4, doorReach = 20, inferWall = false,
+  -- a yard's service way is not a shop street, unless `service` is set (a sensitivity run of
+  -- shop_audit.py --tune): then one without a service=* subtype counts too, never a parking
+  -- aisle, a driveway or a drive-through
+  service = false, serviceNot = {parking_aisle = true, driveway = true, ['drive-through'] = true, emergency_access = true},
+  materials = {'wall_shop_dark', 'wall_shop_red', 'wall_shop_green', 'wall_shop_blue'},
+  -- a shop the generator would dress as a house (its windows and door) gets plain walls instead
+  hosts = {'wall_pls_cream', 'wall_pls_grey', 'wall_pls_peach', 'wall_brk_white'},
+  closed = {no = true, vacant = true, closed = true, disused = true, abandoned = true}}
+
+-- 'ground', 'unknown' (no level tag), 'upper', 'below' or 'unclear' for a node's level tag.
+function BLD.shopLevel(tags)
+  local value = tags.level
+  if value == nil or value == '' then return 'unknown' end
+  local low, high
+  for part in tostring(value):gmatch('[^;]+') do
+    local a, b = part:match('^%s*(%-?[%d%.]+)%s*%-%s*(%-?[%d%.]+)%s*$')
+    a, b = tonumber(a), tonumber(b)
+    if not a then a = tonumber(part:match('^%s*(.-)%s*$')); b = a end
+    if not a or not b then return 'unclear' end
+    low, high = math.min(low or a, a, b), math.max(high or a, a, b)
+  end
+  if not low then return 'unclear' end
+  if high < 0 then return 'below' end
+  if low > 0 then return 'upper' end
+  return 'ground'
+end
+
+local function shopTagged(tags)
+  local shop = tags.shop
+  return (shop and not BLD.STORE.closed[shop]) or tags.building == 'retail' or tags.building == 'commercial'
+end
+
+-- The exterior ring as the wall loop of build() walks it: cleaned, anticlockwise.
+local function outerRing(rings)
+  local ring, signed = cleanRing(rings[1]), 0
+  for k, p in ipairs(ring) do local q = ring[k % #ring + 1]; signed = signed + p[1] * q[2] - q[1] * p[2] end
+  if signed < 0 then local rev = {}; for k = #ring, 1, -1 do rev[#rev + 1] = ring[k] end; ring = rev end
+  return ring
+end
+
+function BLD.wallKey(a, b)
+  return string.format('%.3f,%.3f,%.3f,%.3f', a[1], a[2], b[1], b[2])
+end
+
+
+-- Report only (poiReport): the class of the road whose edge comes nearest a building's walls,
+-- and that gap, with no class, side or parallel test. Explains a 'no_street_wall'.
+function BLD.nearestRoad(roads, building)
+  local ring, best, class = cleanRing(building.rings[1]), math.huge, nil
+  local box = ringBounds(building.rings)
+  for _, road in ipairs(roads) do
+    local points = road.points or NONE
+    for k = 1, #points - 1 do
+      local a, b = points[k], points[k + 1]
+      if boundsTouch(box, {math.min(a[1], b[1]), math.min(a[2], b[2]), math.max(a[1], b[1]), math.max(a[2], b[2])}, 80) then
+        for _, p in ipairs(ring) do
+          local d = segDistance(p[1], p[2], a, b) - (road.width or 7) / 2
+          if d < best then best, class = d, (road.tags or NONE).highway or 'track' end
+        end
+      end
+    end
+  end
+  return class, best < math.huge and best or nil
+end
+
+-- Storefronts of one tile: building id -> {[wallKey] = {{s0, s1, material, evidence id}, ...}}
+-- (metres along the wall from its first corner), or nil. Built from the whole source data
+-- (lists), never from the tile's own road bins, so every tile that draws a building takes the
+-- same decision; options.cellSize (the game passes it) also skips a building whose
+-- neighbourhood a tile in the next cell may not have loaded.
+function BLD.shopLinks(lists, options, pause)
+  local S, report = BLD.STORE, options.poiReport
+  if type(options.shopTune) == 'table' then
+    S = {}
+    for k, v in pairs(BLD.STORE) do S[k] = v end
+    for k, v in pairs(options.shopTune) do S[k] = v end
+  end
+  local function note(entry) if type(report) == 'table' then report[#report + 1] = entry end end
+  local pois, tagged = {}, {}
+  for _, p in ipairs(lists.points) do
+    if p.kind == 'poi' and p.pos then pois[#pois + 1] = p end
+  end
+  for _, b in ipairs(lists.buildings) do
+    if shopTagged(b.tags or NONE) then tagged[#tagged + 1] = b end
+  end
+  if #pois == 0 and #tagged == 0 then return nil end
+  local function binKey(x, y) return (math.floor(x / 50) + 32768) * 65536 + math.floor(y / 50) + 32768 end
+  local function binAdd(bins, box, margin, value)
+    for by = math.floor((box[2] - margin) / 50), math.floor((box[4] + margin) / 50) do
+      for bx = math.floor((box[1] - margin) / 50), math.floor((box[3] + margin) / 50) do
+        local key = (bx + 32768) * 65536 + by + 32768
+        local bin = bins[key] or {}
+        bins[key], bin[#bin + 1] = bin, value
+      end
+    end
+  end
+  -- buildings by bin, each bin taking those within `near` of it
+  local houses, boxes = {}, {}
+  for n, b in ipairs(lists.buildings) do
+    if b.rings and b.rings[1] and #b.rings[1] >= 3 then
+      boxes[b] = ringBounds(b.rings)
+      binAdd(houses, boxes[b], S.near, b)
+    end
+    if n % 256 == 0 then pause() end
+  end
+  -- carriageways on the ground (a yard's service way and a living street are not a shop street)
+  local streets = {}
+  for n, road in ipairs(lists.roads) do
+    local tags, points = road.tags or NONE, road.points or NONE
+    local way = tags.highway
+    local yard = way == 'service' and not (S.service and not S.serviceNot[tags.service or ''])
+    if not road.track and not ROADS.bridge(tags) and not ROADS.tunnel(tags) and not yard and way ~= 'living_street' then
+      local width = math.max(.5, math.min(80, road.width or 7))
+      for k = 1, #points - 1 do
+        local a, b = points[k], points[k + 1]
+        local dx, dy = b[1] - a[1], b[2] - a[2]
+        local len2 = dx * dx + dy * dy
+        if len2 > EPS then
+          binAdd(streets, {math.min(a[1], b[1]), math.min(a[2], b[2]), math.max(a[1], b[1]), math.max(a[2], b[2])},
+            width / 2 + S.reach, {a = a, dx = dx, dy = dy, len2 = len2, width = width})
+        end
+      end
+    end
+    if n % 64 == 0 then pause() end
+  end
+  local entrances, doors = {}, {}
+  for _, p in ipairs(lists.points) do
+    local tag = (p.tags or NONE).entrance
+    if p.pos and p.kind == 'entrance' and tag ~= 'main' then binAdd(entrances, {p.pos[1], p.pos[2], p.pos[1], p.pos[2]}, 2, p) end
+    if p.pos and (p.kind == 'door' or (p.kind == 'entrance' and tag == 'main')) then
+      binAdd(doors, {p.pos[1], p.pos[2], p.pos[1], p.pos[2]}, S.doorReach, p)
+    end
+  end
+  -- The gap to the edge of the street a wall faces: parallel, outside the wall, within reach,
+  -- with no other building between them. nil when there is none.
+  local function street(owner, a, b, len)
+    local dx, dy = b[1] - a[1], b[2] - a[2]
+    local x, y = (a[1] + b[1]) / 2, (a[2] + b[2]) / 2
+    local nx, ny = dy / len, -dx / len        -- outward from an anticlockwise ring
+    local best
+    for _, s in ipairs(streets[binKey(x, y)] or NONE) do
+      if math.abs((dx * s.dx + dy * s.dy) / (len * math.sqrt(s.len2))) >= .85 then
+        local t = math.max(0, math.min(1, ((x - s.a[1]) * s.dx + (y - s.a[2]) * s.dy) / s.len2))
+        local ox, oy = s.a[1] + t * s.dx - x, s.a[2] + t * s.dy - y
+        local gap = math.sqrt(ox * ox + oy * oy) - s.width / 2
+        if ox * nx + oy * ny > s.width / 2 + .5 and gap <= S.reach and (not best or gap < best) then
+          local open = true
+          for _, f in ipairs({.25, .5, .75}) do
+            local px, py = x + nx * (.3 + gap * f), y + ny * (.3 + gap * f)
+            for _, other in ipairs(houses[binKey(px, py)] or NONE) do
+              if other ~= owner and inside(other.rings, px, py) then open = false; break end
+            end
+            if not open then break end
+          end
+          if open then best = gap end
+        end
+      end
+    end
+    return best
+  end
+  -- A tile that draws the building lies in a cell the footprint touches; each such cell (with
+  -- its halo) must hold the whole neighbourhood. Other cells a tile loads only add to it.
+  local function seamSafe(box)
+    local s = options.cellSize
+    if not s then return true end
+    local r = {box[1] - S.margin, box[2] - S.margin, box[3] + S.margin, box[4] + S.margin}
+    return r[1] >= math.floor(box[3] / s) * s - S.halo and r[3] <= (math.floor(box[1] / s) + 1) * s + S.halo and
+      r[2] >= math.floor(box[4] / s) * s - S.halo and r[4] <= (math.floor(box[2] / s) + 1) * s + S.halo
+  end
+  local walls = {}
+  local function streetWalls(b)
+    if not walls[b] then
+      local list, ring = {}, outerRing(b.rings)
+      for k, a in ipairs(ring) do
+        local q = ring[k % #ring + 1]
+        local len = math.sqrt((q[1] - a[1]) ^ 2 + (q[2] - a[2]) ^ 2)
+        if len >= S.minWall then
+          local gap = street(b, a, q, len)
+          if gap then list[#list + 1] = {a = a, b = q, len = len, gap = gap, key = BLD.wallKey(a, q)} end
+        end
+      end
+      walls[b] = list
+    end
+    return walls[b]
+  end
+  local function edgeDistance(rings, x, y)
+    local best = math.huge
+    for _, ring in ipairs(rings) do
+      local c = cleanRing(ring)
+      for k, a in ipairs(c) do best = math.min(best, (segDistance(x, y, a, c[k % #c + 1]))) end
+    end
+    return best
+  end
+  local links, chosen = {}, {}
+  local function add(b, wall, s0, s1, material, id, name)
+    local own = links[b.id] or {}
+    links[b.id], chosen[b.id] = own, b
+    local spans = own[wall.key] or {spans = {}, wall = wall}
+    own[wall.key] = spans
+    spans.spans[#spans.spans + 1] = {s0, s1, material, id, name = name}
+  end
+  local tied = {}
+  for n, p in ipairs(pois) do
+    local x, y, tags = p.pos[1], p.pos[2], p.tags or NONE
+    local entry = {evidence = 'poi', poi = tostring(p.id), x = x, y = y, shop = tags.shop, amenity = tags.amenity,
+      office = tags.office, craft = tags.craft, level = tags.level, levelRule = BLD.shopLevel(tags)}
+    local within, close = {}, {}
+    for _, b in ipairs(houses[binKey(x, y)] or NONE) do
+      if inside(b.rings, x, y) then within[#within + 1] = b
+      else
+        local d = edgeDistance(b.rings, x, y)
+        if d <= S.near then close[#close + 1] = {b, d} end
+      end
+    end
+    table.sort(close, function(u, v) return u[2] < v[2] or (u[2] == v[2] and tostring(u[1].id) < tostring(v[1].id)) end)
+    entry.inside, entry.near = #within, #close
+    local building, reason
+    local level = entry.levelRule
+    if tags.indoor and tags.indoor ~= 'no' then reason = 'indoor'
+    elseif tags.location == 'underground' or tags.location == 'indoor' then reason = 'location_' .. tags.location
+    elseif level == 'below' then reason = 'level_below_ground'
+    elseif level == 'upper' then reason = 'level_upper_floor'
+    elseif level == 'unclear' then reason = 'level_unclear'
+    elseif #within > 1 then reason = 'inside_several_buildings'
+    elseif #within == 1 then building = within[1]; entry.match = 'inside'
+    elseif #close == 0 then reason = 'no_building_near'
+    elseif close[1][2] > S.edge then reason = 'nearest_building_too_far'; entry.edge = close[1][2]
+    elseif close[2] then reason = 'several_buildings_near'
+    else building = close[1][1]; entry.match = 'edge'; entry.edge = close[1][2] end
+    if building then
+      entry.building = tostring(building.id)
+      if not seamSafe(boxes[building]) then reason, building = 'cell_seam', nil end
+    end
+    if building then
+      -- The wall: the one a mapped door of this building stands on, the door nearest the
+      -- node (a mapped shop door is the evidence; Bilychi 29.10: the nearest street wall
+      -- missed the mapped door in 10 of 15 checkable links). With S.inferWall (a
+      -- sensitivity run) a building without doors falls back to its nearest street wall.
+      local ring, door = outerRing(building.rings), nil
+      for _, d in ipairs(doors[binKey(x, y)] or NONE) do
+        local dd = math.sqrt((d.pos[1] - x) ^ 2 + (d.pos[2] - y) ^ 2)
+        if dd <= S.doorReach then
+          for k, a in ipairs(ring) do
+            local q = ring[k % #ring + 1]
+            local off, t = segDistance(d.pos[1], d.pos[2], a, q)
+            if off <= 1 and (not door or dd < door.dd or (dd == door.dd and tostring(d.id) < tostring(door.point.id))) then
+              door = {point = d, dd = dd, a = a, b = q, t = t}
+            end
+          end
+        end
+      end
+      local wall, at
+      if door then
+        local len = math.sqrt((door.b[1] - door.a[1]) ^ 2 + (door.b[2] - door.a[2]) ^ 2)
+        wall, at = {a = door.a, b = door.b, len = len, key = BLD.wallKey(door.a, door.b)}, door.t
+        wall.gap = len >= S.minWall and street(building, door.a, door.b, len) or nil
+        entry.how, entry.door, entry.doorTag, entry.doorDistance = 'mapped_door', tostring(door.point.id),
+          (door.point.tags or NONE).entrance, door.dd
+        entry.wallDistance = segDistance(x, y, door.a, door.b)
+      elseif not S.inferWall then
+        reason = 'no_mapped_door'
+      else
+        local best, second
+        for _, w in ipairs(streetWalls(building)) do
+          local d, t = segDistance(x, y, w.a, w.b)
+          if not best or d < best.d then best, second = {wall = w, d = d, t = t}, best
+          elseif not second or d < second.d then second = {wall = w, d = d, t = t} end
+        end
+        if not best then
+          reason = 'no_street_wall'
+          if type(report) == 'table' then entry.nearestRoad, entry.nearestGap = BLD.nearestRoad(lists.roads, building) end
+        elseif best.d > S.depth then reason = 'street_wall_too_far'; entry.wallDistance = best.d
+        elseif second and second.d - best.d < S.tie then reason = 'two_street_walls_tie'; entry.wallDistance = best.d
+        else wall, at = best.wall, best.t; entry.how, entry.wallDistance = 'nearest_street_wall', best.d end
+      end
+      if wall then
+        local s0, s1 = math.max(.5, at - S.span / 2), math.min(wall.len - .5, at + S.span / 2)
+        if s1 - s0 < S.span and wall.len - 1 >= S.span then
+          if s0 <= .5 then s1 = .5 + S.span else s0 = wall.len - .5 - S.span end
+        end
+        if s1 - s0 < 2 then reason = 'wall_too_short'
+        else
+          entry.decision, entry.wall, entry.street, entry.span = 'linked', wall.key, wall.gap, {s0, s1}
+          tied[building] = true
+          add(building, wall, s0, s1, S.materials[hash(tostring(p.id)) % #S.materials + 1], tostring(p.id), tags.name)
+        end
+      end
+    end
+    if not entry.decision then entry.decision, entry.reason = 'rejected', reason end
+    note(entry)
+    if n % 16 == 0 then pause() end
+  end
+  for n, b in ipairs(tagged) do
+    if not tied[b] then
+      local tags = b.tags or NONE
+      local box = boxes[b] or ringBounds(b.rings)
+      local entry = {evidence = 'building_tag', building = tostring(b.id), shop = tags.shop, use = tags.building,
+        x = (box[1] + box[3]) / 2, y = (box[2] + box[4]) / 2}
+      if #b.rings ~= 1 then entry.reason = 'courtyard_or_parts'
+      elseif not seamSafe(box) then entry.reason = 'cell_seam'
+      else
+        local list = streetWalls(b)
+        if #list == 0 then entry.reason = 'no_street_wall'
+        elseif #list > 1 then entry.reason = 'several_street_walls'
+        else
+          entry.decision, entry.wall = 'linked', list[1].key
+          add(b, list[1], .5, list[1].len - .5, S.materials[hash(tostring(b.id)) % #S.materials + 1], 'building:' .. tostring(b.id))
+        end
+      end
+      if not entry.decision then entry.decision = 'rejected' end
+      note(entry)
+    end
+    if n % 16 == 0 then pause() end
+  end
+  -- Spans along each wall in order; an overlap goes to the earlier one; a mapped staircase
+  -- entrance on the wall keeps its own wall either side.
+  for _, own in pairs(links) do
+    for key, item in pairs(own) do
+      local wall, cuts, out, at = item.wall, {}, {}, -math.huge
+      local seen = {}
+      for by = math.floor(math.min(wall.a[2], wall.b[2]) / 50), math.floor(math.max(wall.a[2], wall.b[2]) / 50) do
+        for bx = math.floor(math.min(wall.a[1], wall.b[1]) / 50), math.floor(math.max(wall.a[1], wall.b[1]) / 50) do
+          for _, e in ipairs(entrances[(bx + 32768) * 65536 + by + 32768] or NONE) do
+            local d, t = segDistance(e.pos[1], e.pos[2], wall.a, wall.b)
+            if d <= 1.5 and not seen[e] then seen[e] = true; cuts[#cuts + 1] = {t - S.entrance, t + S.entrance} end
+          end
+        end
+      end
+      table.sort(item.spans, function(u, v) return u[1] < v[1] or (u[1] == v[1] and u[4] < v[4]) end)
+      for _, span in ipairs(item.spans) do
+        local pieces = {{math.max(span[1], at), span[2]}}
+        for _, c in ipairs(cuts) do
+          local kept = {}
+          for _, piece in ipairs(pieces) do
+            if c[2] <= piece[1] or c[1] >= piece[2] then kept[#kept + 1] = piece
+            else
+              if c[1] > piece[1] then kept[#kept + 1] = {piece[1], c[1]} end
+              if c[2] < piece[2] then kept[#kept + 1] = {c[2], piece[2]} end
+            end
+          end
+          pieces = kept
+        end
+        -- the name goes on the longest piece only: a door cut in the middle leaves one sign
+        local longest
+        for _, piece in ipairs(pieces) do
+          if piece[2] - piece[1] >= 1 then
+            out[#out + 1] = {piece[1], piece[2], span[3], span[4]}
+            if not longest or piece[2] - piece[1] > longest[2] - longest[1] then longest = out[#out] end
+          end
+        end
+        if longest then longest.name = span.name end
+        at = math.max(at, span[2])
+      end
+      own[key] = #out > 0 and out or nil
+    end
+  end
+  return links
 end
 
 -- Straight facades are often many OSM edges. Chain the ones that meet and point the same
@@ -4010,10 +6191,99 @@ function BLD.gableWin(scene, frame, top, rise, dress)
 end
 
 -- guess: a house's dress (BLD.dress) for its roof shape, pitch and gables where OSM has none
+-- Domes and onions: a surface of revolution over the ring's middle, `rise` tall by roof:height or
+-- by the radius (BLD.domes: rise per radius, and the profile's radius at each step up).
+BLD.domes = {dome = {rise = 1, profile = {1, .97, .87, .71, .5, .26, 0}},
+  onion = {rise = 2.2, profile = {1, 1.2, 1.16, .84, .42, .14, 0}}}
+BLD.domeGold = {gold = true, golden = true, yellow = true, ['#ffd700'] = true, ['#ffc107'] = true}
+BLD.DOME = {sides = 12}
+
+function BLD.domeRadius(ring)
+  local cx, cy, r = 0, 0, 0
+  for _, p in ipairs(ring) do cx, cy = cx + p[1], cy + p[2] end
+  cx, cy = cx / #ring, cy / #ring
+  for _, p in ipairs(ring) do r = r + math.sqrt((p[1] - cx) ^ 2 + (p[2] - cy) ^ 2) end
+  return r / #ring, cx, cy
+end
+
+function BLD.dome(scene, ring, tags, top, material)
+  local spec, r, cx, cy = BLD.domes[tags['roof:shape']], BLD.domeRadius(ring)
+  local rise = number(tags['roof:height'], r * spec.rise)
+  if BLD.withLandmarks and BLD.domeGold[tostring(tags['roof:colour'] or ''):lower()] then material = 'roof_gold'
+  elseif BLD.isMonument(tags) then material = 'roof_metal' end -- lead, not the street's tiles
+  material = material or 'roof_metal'
+  local sides, steps = BLD.DOME.sides, #spec.profile - 1
+  local function at(side, step)
+    local a, w = side / sides * 2 * math.pi, r * spec.profile[step + 1]
+    return {cx + w * math.cos(a), cy + w * math.sin(a), top + rise * step / steps, side / sides * 4, step / steps * 2}
+  end
+  for step = 0, steps - 1 do
+    for side = 0, sides - 1 do
+      scene.polygon(material, {at(side, step), at(side + 1, step), at(side + 1, step + 1), at(side, step + 1)}, false)
+    end
+  end
+  return true
+end
+
+-- Walls under a part's dome: its height is the whole part, roof included. A far tile draws boxes,
+-- so a skillion part keeps its whole height (the Eiffel Tower's legs are skillions).
+function BLD.partWalls(height, tags, footprint, far)
+  local spec = BLD.domes[tags['roof:shape'] or '']
+  if not tags.e2r_part or not tags.height or not (spec or tags['roof:height']) then return height end
+  if far and tags['roof:shape'] == 'skillion' then return height end
+  local rise = number(tags['roof:height'], spec and math.sqrt(footprint / math.pi) * spec.rise or 0)
+  return math.max(2.2, height - rise)
+end
+
+-- A skillion: one plane falling along roof:direction, from the high side to the low, rise over
+-- the walls' top. Gives the plane's height at a point, nil for any other roof; with no direction
+-- it falls across the footprint's width. pitch: rise per metre without roof:height, up to rise.
+BLD.SKILLION = {pitch = .2, rise = 2.5}
+BLD.COMPASS = {N = 0, NNE = 22.5, NE = 45, ENE = 67.5, E = 90, ESE = 112.5, SE = 135, SSE = 157.5, S = 180,
+  SSW = 202.5, SW = 225, WSW = 247.5, W = 270, WNW = 292.5, NW = 315, NNW = 337.5}
+
+function BLD.skillion(rings, tags, top)
+  if tags['roof:shape'] ~= 'skillion' or #rings ~= 1 then return nil end
+  local ring = cleanRing(rings[1])
+  if #ring < 3 then return nil end
+  local compass = number(tags['roof:direction'], BLD.COMPASS[tostring(tags['roof:direction'] or ''):upper()])
+  local dx, dy
+  if compass then
+    dx, dy = math.sin(math.rad(compass)), math.cos(math.rad(compass))
+  else
+    local frame = footprintFrame(ring)
+    dx, dy = frame.bx, frame.by
+  end
+  local lo, hi = math.huge, -math.huge
+  for _, p in ipairs(ring) do
+    local s = p[1] * dx + p[2] * dy
+    lo, hi = math.min(lo, s), math.max(hi, s)
+  end
+  if hi - lo < EPS then return nil end
+  local rise = number(tags['roof:height'], math.min(BLD.SKILLION.rise, (hi - lo) * BLD.SKILLION.pitch))
+  return function(x, y)
+    return top + rise * math.max(0, math.min(1, (hi - (x * dx + y * dy)) / (hi - lo)))
+  end
+end
+
+-- The wall from the top of the walls up to the skillion over it
+function BLD.skillionWall(scene, kind, a, b, top, along, length, base, scale)
+  local za, zb = BLD.plane(a[1], a[2]), BLD.plane(b[1], b[2])
+  if za <= top + EPS and zb <= top + EPS then return end
+  local poly = {{a[1], a[2], top, along / scale, (top - base) / scale}, {b[1], b[2], top, (along + length) / scale, (top - base) / scale}}
+  if zb > top + EPS then poly[#poly + 1] = {b[1], b[2], zb, (along + length) / scale, (zb - base) / scale} end
+  if za > top + EPS then poly[#poly + 1] = {a[1], a[2], za, along / scale, (za - base) / scale} end
+  scene.polygon(kind, poly, false)
+end
+
 local function pitchedRoof(scene, rings, tags, top, base, kind, height, material, guess)
   if #rings ~= 1 then return false end -- Courtyards always keep their open flat-roof footprint.
   local ring = cleanRing(rings[1])
   if #ring < 3 then return false end
+  if BLD.domes[tags['roof:shape'] or ''] then return BLD.dome(scene, ring, tags, top, material) end
+  -- a part with no roof of its own stays flat: it may be one storey of a tower
+  if tags.e2r_part and not tags['roof:shape'] then return false end
+  if tags['roof:shape'] == 'round' then tags = setmetatable({['roof:shape'] = 'gabled'}, {__index = tags}) end
   local frame = footprintFrame(ring)
   local length, width = frame.u1 - frame.u0, frame.v1 - frame.v0
   local explicit, house = tags['roof:shape'], tags.building == 'house' or tags.building == 'detached' or tags.building == 'bungalow'
@@ -4079,6 +6349,32 @@ end
 -- yard: fast_art.YARD_COLOURS). A piece is placed by a frame (x, y, z, yaw counter-clockwise),
 -- its faces wound counter-clockwise from outside, each in the middle of its atlas cell.
 local SOLID = {}
+-- Shared palette/atlas order for POI labels and building signs. RGB values also serve the map.
+SOLID.BRANDS = {
+  okko={0,'OKKO',{0,90,50}}, wog={1,'WOG',{0,150,60}}, ukrnafta={2,'Укрнафта',{0,72,150}},
+  avias={3,'Авіас',{0,90,170}}, brsm={4,'БРСМ',{213,26,37}}, shell={5,'Shell',{251,206,7}},
+  socar={6,'SOCAR',{0,100,163}}, upg={7,'UPG',{24,24,26}}, k_lo={8,'KLO',{255,205,0}},
+  motto={9,'Motto',{213,35,39}}, atb={10,'АТБ',{19,69,151}}, silpo={11,'Сільпо',{240,120,30}},
+  fora={12,'Фора',{100,190,50}}, novus={13,'NOVUS',{0,160,70}}, auchan={14,'Auchan',{220,30,52}},
+  velmart={15,'Велмарт',{240,200,0}}, kolo={16,'Коло',{235,92,37}}, rukavychka={17,'Рукавичка',{110,35,60}},
+  sim23={18,'Сім23',{231,52,54}}, simi={19,'Сімі',{233,85,31}}, faino={20,'Файно',{0,140,70}},
+  thrash={21,'THRASH!',{30,30,30}}, varus={22,'VARUS',{245,120,30}}, fozzy={23,'FOZZY',{230,30,40}},
+  eco={24,'ЕКО маркет',{200,16,46}}, blyzenko={25,'Близенько',{40,113,171}},
+  amic={26,'AMIC',{0,150,70}}, parallel={27,'Parallel',{0,140,70}},
+  vst={28,'VST',{230,75,32}}, bvs={29,'БВС',{16,106,164}},
+  mcdonalds={30,"McDonald's",{200,16,46}}, nova_poshta={31,'Нова пошта',{218,41,28}},
+  oschadbank={71,'Ощадбанк',{8,72,72}}, privatbank={72,'ПриватБанк',{88,184,72}},
+  raiffeisen={73,'Райффайзен',{250,240,10}}, ukrsibbank={74,'УкрСиббанк',{0,140,110}}, sense={75,'Sense Bank',{40,40,248}},
+  pumb={76,'ПУМБ',{232,8,40}}, ukrgasbank={77,'Укргазбанк',{40,88,168}}, a_bank={78,'А-Банк',{8,200,88}},
+  credit_agricole={79,'Crédit Agricole',{0,110,80}}, otp={80,'OTP Bank',{8,104,72}},
+  podorozhnyk={81,'Подорожник',{8,104,72}}, anc={82,'АНЦ',{8,152,216}}, apteka_911={83,'Аптека 911',{168,40,40}},
+  apteka_opt={84,'Аптека оптових цін',{0,128,92}}, bazhaemo={85,"Бажаємо здоров'я",{0,128,92}},
+  dobroho_dnya={86,'Доброго дня',{0,128,92}}, zdorova_rodyna={87,'Здорова родина',{0,128,92}},
+  lviv_croissants={88,'Lviv Croissants',{30,30,30}}, kfc={89,'KFC',{228,8,40}}, dominos={90,"Domino's",{8,152,232}},
+  aroma_kava={91,'Aroma Kava',{122,66,36}}, kulynychi={92,'Кулиничі',{122,66,36}}, puzata_hata={93,'Пузата Хата',{122,66,36}},
+  pizza_day={94,'Pizza Day',{122,66,36}}, ionity={95,'IONITY',{72,8,120}}, toka={96,'TOKA',{20,130,80}},
+  autoenterprise={97,'EVA Chargers',{20,130,80}}, vianor={98,'Vianor',{42,44,50}},
+}
 function SOLID.frame(x, y, z, yaw)
   local c, s = math.cos(yaw), math.sin(yaw)
   return function(px, py, pz) return {x + px * c - py * s, y + px * s + py * c, z + pz} end
@@ -4154,6 +6450,893 @@ function SOLID.prism(mesh, material, cell, T, n, z0, z1, r0, r1, under)
     for k = n, 1, -1 do floorRing[#floorRing + 1] = bottom[k] end
     SOLID.face(mesh, material, under, T, floorRing)
   end
+end
+
+-- Shops and fuel stations: the points and sites of retail.py (kinds fuel, grocery, fast_food,
+-- post; the network in tags.e2r_brand) on the buildings OSM maps for them, never a building of
+-- our own. One atlas (fast_art.brand_art): 4 x 16 cells of 512 x 128 px, a 4:1 lightbox each
+-- (SOLID.BRANDS index: the network's logo or name; then the plain fuel and grocery signs), each
+-- network's sign, facade and accent colours as stripes, the price board, square signs and flat
+-- colours. A network is known from afar by its colours and name whichever wall its door is on:
+-- a whole shop wears its fascia (and, clad, its colour on every wall), an accent stripe, a big
+-- sign on each side and glazing toward the street; a shop inside a bigger building its fascia,
+-- sign and glazing on the street wall nearest its point. building=roof is open: a slab on
+-- columns, and over a fuel station a canopy in the network's colours with pump islands. A mapped
+-- fuel site gets a price pylon (grades, no prices) by its street.
+BLD.SHOP = {cols = 4, rows = 32, fuel = 32, grocery = 33, swatch = {34, 36, 38}, price = {0, 10, 1, 4},
+  square = {x = 512, y = 1280, side = 256, per = 6, atlas = 2048, tall = 4096},
+  white = 56, lit = 57, dark = 58, metal = 59, concrete = 60, gold = 63,
+  kinds = {fuel = true, grocery = true, fast_food = true, post = true, service = true},
+  sites = {fuel_site = 'fuel', grocery_site = 'grocery', fast_food_site = 'fast_food', post_site = 'post',
+    service_site = 'service'},
+  -- the atlas's second half (fast_art.SERVICE_SIGNS): cells from `more`, the plain signs of the
+  -- service classes first, the networks from `networks`, their colours in `more_swatch`
+  more = 64, networks = 71, more_swatch = {112, 115, 118},
+  service = {car_repair = 64, tyres = 65, car_wash = 66, charging_station = 67, pharmacy = 68, bank = 69,
+    cafe = 70, restaurant = 70, fast_food = 70, bar = 70, pub = 70},
+  -- a whole shop: up to that many m of footprint and of height; its fascia (least and most m, and
+  -- share of the wall), the accent stripe under it, the glazing's top and share of a street wall;
+  -- its sign's height per m of wall (a lightbox, a square sign) and at most
+  whole = {area = 4000, height = 8, fascia = {1.2, 3.0, .28}, accent = .3, glass = 3.2, front = .6,
+    long = {.07, .1}, tallest = 4},
+  -- a shop in a bigger building: its fascia over the ground floor, between a concrete visor's
+  -- top (BLD.canopy: 3.2 m) and the sills of the floor above (3.96 m). A tower's visor is higher
+  -- (3.5 m, from `tall` m up) and the fascia hangs `under` it. Its stretch is whole bays round
+  -- the sign and `margin`, at least two, a name given at most `most` m.
+  part = {low = 3.25, high = 3.93, tall = 22, under = {2.42, 3.06}, margin = 1.6, most = 18, accent = .1},
+  letters = .62,        -- a name's height over the fascia's
+  homes = {apartments = true, residential = true, house = true, dormitory = true, hotel = true},
+  depth = .22, out = .08, street = 8,
+  canopy = {height = 5.6, levels = 4.8, deep = .9, plain = .35, band = .32, column = .45, reach = 12,
+    island = {width = 1.3, long = 6, rise = .18}, pump = {long = .9, wide = .5, body = 1.45, top = 1.85}},
+  pylon = {half = 1.1, deep = .3, height = 8, setback = 2.5, probe = 10, board = 2.0},
+  -- fast_art.BRAND_STYLE: clad walls, the square sign's slot, an accent stripe
+  style = {okko = {square = 0, accent = true}, wog = {}, ukrnafta = {accent = true}, avias = {square = 1},
+    brsm = {}, shell = {accent = true}, socar = {}, upg = {square = 2, accent = true},
+    k_lo = {square = 3, accent = true}, motto = {}, atb = {clad = true, square = 4}, silpo = {},
+    fora = {clad = true, accent = true}, novus = {}, auchan = {}, velmart = {clad = true, accent = true},
+    kolo = {}, rukavychka = {}, sim23 = {square = 5}, simi = {}, faino = {square = 6},
+    thrash = {accent = true}, varus = {}, fozzy = {}, eco = {square = 7, accent = true}, blyzenko = {},
+    amic = {accent = true}, parallel = {accent = true}, vst = {}, bvs = {},
+    mcdonalds = {square = 8, accent = true, clad = true, wordmark = 61, photo = 'mcdonalds', pylon = 'arches'},
+    nova_poshta = {}},
+  -- photographs of real stores in brand_photo (fast_art.SHOP_PHOTOS, 2048 x 1024): the entrance
+  -- tower (half as wide as tall) and the dining room's glazing, `glass` m wide by tall a repeat
+  photo = {mcdonalds = {bay = {.0005, .001, .2495, .999}, glass = {.2505, .001, .4995, .321}, wide = {5, 3.2}}},
+  -- the photographed tower: as tall as the building and a storey more, within these
+  bay = {least = 8, most = 13, out = .6},
+  -- McDonald's pole sign (as by its restaurants across Ukraine): a grey pole, the red panel with
+  -- its name (cell 62) and the golden arches over it: total width, height, stroke, depth
+  arches = {pole = .5, panel = {4.8, 1.2}, top = 12, width = 4.6, height = 4.2, stroke = .5, depth = .32, red = 62}}
+BLD.SHOP.keys = {}
+for key, brand in pairs(SOLID.BRANDS) do BLD.SHOP.keys[brand[1]] = key end
+
+-- uv box {u0, v0, u1, v1} of a cell (an index) or a block {column, row, columns, rows}, a texel in
+function BLD.shopUV(cell)
+  local S = BLD.SHOP
+  local c, r, w, h
+  if type(cell) == 'table' then c, r, w, h = cell[1], cell[2], cell[3], cell[4]
+  else c, r, w, h = cell % S.cols, math.floor(cell / S.cols), 1, 1 end
+  return {(c + .002) / S.cols, (r + .008) / S.rows, (c + w - .002) / S.cols, (r + h - .008) / S.rows}
+end
+
+-- uv {u, v} of a flat colour: a network's sign (layer 1, the default), facade (2) or accent (3)
+-- colour in the swatch cells (16 a cell), a plain sign's left edge, or a flat cell's middle
+function BLD.shopFlat(cell, layer)
+  local S = BLD.SHOP
+  if cell < S.fuel or cell >= S.more then
+    local index = cell < S.fuel and cell or cell - S.more
+    local swatch = (cell < S.fuel and S.swatch or S.more_swatch)[layer or 1] + math.floor(index / 16)
+    return {(swatch % S.cols + (index % 16 + .5) / 16) / S.cols, (math.floor(swatch / S.cols) + .5) / S.rows}
+  end
+  local c, r = cell % S.cols, math.floor(cell / S.cols)
+  return {(c + (cell < S.white and .05 or .5)) / S.cols, (r + .5) / S.rows}
+end
+
+-- Shop fronts (fast_storefront.py): a bay of `bay` m in the atlas, a class's window and door side
+-- by side, `per` cells a row. Under `least` m of room (a hillside's raised ground) there is none.
+BLD.FRONT = {bay = 3, per = 4, least = 2, classes = {pharmacy = 1, bank = 2, cafe = 3, restaurant = 3, fast_food = 3, ice_cream = 3,
+  bar = 4, pub = 4, car_repair = 5, tyres = 6, car_wash = 7}}
+
+function BLD.shopClass(tags)
+  local F = BLD.FRONT.classes
+  tags = tags or NONE
+  return F[tags.amenity or ''] or F[tags.shop or ''] or 0
+end
+
+function BLD.shopName(tags)
+  tags = tags or NONE
+  return tags.name or tags.brand
+end
+
+-- A network's own sign, not a plain one: it may wear its colours on the walls
+function BLD.shopBranded(cell)
+  return cell < BLD.SHOP.fuel or cell >= BLD.SHOP.networks
+end
+
+-- A network's dress (BLD.SHOP.style), NONE for the plain signs
+function BLD.shopStyle(cell)
+  return BLD.SHOP.style[BLD.SHOP.keys[cell] or ''] or NONE
+end
+
+-- The sign of a cell: (uv box, width over height): its square sign where it has one, else its lightbox
+function BLD.shopMark(cell)
+  local slot = BLD.shopStyle(cell).square
+  if not slot then return BLD.shopUV(cell), 4 end
+  local Q = BLD.SHOP.square
+  local x, y = Q.x + slot % Q.per * Q.side, Q.y + math.floor(slot / Q.per) * Q.side
+  return {(x + 1) / Q.atlas, (y + 1) / Q.tall, (x + Q.side - 1) / Q.atlas, (y + Q.side - 1) / Q.tall}, 1
+end
+
+-- The sign cell of a point, site or building: its network's lightbox, the plain sign of a fuel
+-- station or a small grocery, or nil (a parcel locker, an unknown supermarket, another shop)
+function BLD.shopCell(kind, tags)
+  tags = tags or NONE
+  if tags.e2r_post_type == 'locker' then return nil end
+  local brand = SOLID.BRANDS[tags.e2r_brand]
+  if brand then return brand[1] end
+  if kind == 'fuel' or tags.amenity == 'fuel' then return BLD.SHOP.fuel end
+  if (kind == 'grocery' or tags.shop) and tags.shop and tags.shop ~= 'supermarket'
+      and (tags.shop == 'convenience' or tags.shop == 'grocery' or tags.shop == 'general' or tags.shop == 'food'
+        or tags.shop == 'greengrocer') then
+    return BLD.SHOP.grocery
+  end
+  return BLD.SHOP.service[tags.amenity] or BLD.SHOP.service[tags.shop]
+end
+
+-- A quad from four points (counter-clockwise seen from its front: bottom left first) in the
+-- atlas: over a uv box {u0, v0, u1, v1} or in a flat colour {u, v}
+function BLD.shopQuad(scene, pts, uv)
+  local q = {}
+  for k = 1, 4 do
+    local p, u, v = pts[k], uv[1], uv[2]
+    if #uv == 4 then u, v = (k == 1 or k == 4) and uv[1] or uv[3], k <= 2 and uv[4] or uv[2] end
+    q[k] = {p[1], p[2], p[3], u, v}
+  end
+  scene.polygon('brand_sign', q, false)
+end
+
+-- A box in frame T (SOLID.frame): x0..x1 along, y0..y1 across, z0..z1, in the flat colour
+-- `flat`; o.front / o.back: a uv box on the -y / +y face, o.under: the underside too
+function BLD.shopBox(scene, T, x0, y0, z0, x1, y1, z1, flat, o)
+  o = o or NONE
+  local function q(pts, uv)
+    BLD.shopQuad(scene, {T(pts[1][1], pts[1][2], pts[1][3]), T(pts[2][1], pts[2][2], pts[2][3]),
+      T(pts[3][1], pts[3][2], pts[3][3]), T(pts[4][1], pts[4][2], pts[4][3])}, uv or flat)
+  end
+  q({{x0, y0, z1}, {x1, y0, z1}, {x1, y1, z1}, {x0, y1, z1}})
+  q({{x0, y0, z0}, {x1, y0, z0}, {x1, y0, z1}, {x0, y0, z1}}, o.front)
+  q({{x1, y1, z0}, {x0, y1, z0}, {x0, y1, z1}, {x1, y1, z1}}, o.back)
+  q({{x1, y0, z0}, {x1, y1, z0}, {x1, y1, z1}, {x1, y0, z1}})
+  q({{x0, y1, z0}, {x0, y0, z0}, {x0, y0, z1}, {x0, y1, z1}})
+  if o.under then q({{x0, y0, z0}, {x0, y1, z0}, {x1, y1, z0}, {x1, y0, z0}}) end
+end
+
+-- A lightbox w x (z1 - z0) on wall a -> b (outside on the right), centred s m along it, its face
+-- over the uv box `uv`
+function BLD.shopSign(scene, a, b, length, s, w, z0, z1, uv)
+  local S = BLD.SHOP
+  local p = wallPoint(a, b, length, s, 0, 0)
+  local T = SOLID.frame(p[1], p[2], 0, math.atan2(b[2] - a[2], b[1] - a[1]))
+  BLD.shopBox(scene, T, -w / 2, -(S.out + S.depth), z0, w / 2, -S.out, z1, BLD.shopFlat(S.metal),
+    {front = uv, under = true})
+end
+
+-- A band of flat colour over s0..s1 and z0..z1 of a wall, `out` m in front of it
+function BLD.shopBand(scene, a, b, length, s0, s1, z0, z1, out, flat)
+  BLD.shopQuad(scene, {wallPoint(a, b, length, s0, out, z0), wallPoint(a, b, length, s1, out, z0),
+    wallPoint(a, b, length, s1, out, z1), wallPoint(a, b, length, s0, out, z1)}, flat)
+end
+
+-- The pavement before a wall at s: on a hillside the door stands on it, not on the building's
+-- mean height
+function BLD.frontFloor(a, b, length, s, base, ground)
+  local p = wallPoint(a, b, length, s, 1.5, 0)
+  return math.max(base, ground(p[1], p[2]))
+end
+
+-- A class's shop front over s0..s1 of a wall from z0 to at most a bay's height: whole bays, the
+-- door in the middle one. Below the base the bay's foot stretches down to the ground.
+function BLD.shopFront(scene, a, b, length, s0, s1, z0, z1, base, class)
+  local F = BLD.FRONT
+  local bays = math.max(1, math.floor((s1 - s0) / F.bay + .5))
+  local width, door, top = (s1 - s0) / bays, math.ceil(bays / 2), math.min(z1, base + F.bay)
+  if top - base < F.least then return end
+  for n = 1, bays do
+    local cell = (class or 0) * 2 + (n == door and 1 or 0)
+    local col, row = cell % F.per, math.floor(cell / F.per)
+    local u0, u1 = (col + .004) / F.per, (col + .996) / F.per
+    local function v(z) return (row + 1 - math.max(.004, math.min(.996, (z - base) / F.bay))) / F.per end
+    local x0, x1 = s0 + (n - 1) * width, s0 + n * width
+    scene.polygon('storefront', {wallPoint(a, b, length, x0, .06, z0, u0, v(z0)), wallPoint(a, b, length, x1, .06, z0, u1, v(z0)),
+      wallPoint(a, b, length, x1, .06, top, u1, v(top)), wallPoint(a, b, length, x0, .06, top, u0, v(top))}, false)
+  end
+end
+
+-- A quad of brand_photo over s0..s1 and z0..z1 of a wall, `out` m in front of it, over a uv box
+function BLD.shopPhoto(scene, a, b, length, s0, s1, z0, z1, out, uv)
+  scene.polygon('brand_photo', {wallPoint(a, b, length, s0, out, z0, uv[1], uv[4]),
+    wallPoint(a, b, length, s1, out, z0, uv[3], uv[4]), wallPoint(a, b, length, s1, out, z1, uv[3], uv[2]),
+    wallPoint(a, b, length, s0, out, z1, uv[1], uv[2])}, false)
+end
+
+-- A quad of frame T's points (x, y, z) facing `want` (a direction in the frame), in a flat colour
+function BLD.shopFace(scene, T, pts, flat, want)
+  local p, q, r = pts[1], pts[2], pts[3]
+  local ux, uy, uz = q[1] - p[1], q[2] - p[2], q[3] - p[3]
+  local vx, vy, vz = r[1] - p[1], r[2] - p[2], r[3] - p[3]
+  local nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+  if nx * want[1] + ny * want[2] + nz * want[3] < 0 then pts = {pts[4], pts[3], pts[2], pts[1]} end
+  local world = {}
+  for k = 1, 4 do world[k] = T(pts[k][1], pts[k][2], pts[k][3]) end
+  BLD.shopQuad(scene, world, flat)
+end
+
+-- The golden arches in frame T: two parabolas from the feet (z0) to where they meet at 0.45 of
+-- their height, a ribbon `stroke` wide and `depth` deep, gold
+function BLD.shopArches(scene, T, z0)
+  local A = BLD.SHOP.arches
+  local gold, half, d = BLD.shopFlat(BLD.SHOP.gold), A.stroke / 2, A.depth / 2
+  local a = (A.width / 2 - half) / 1.742
+  local c = -.742 * a
+  for _, mirror in ipairs({1, -1}) do
+    local line = {}
+    for k = 0, 16 do
+      local u = -1 + 1.742 * k / 16
+      line[#line + 1] = {mirror * (c + a * u), z0 + A.height * (1 - u * u)}
+    end
+    -- each point's offset along the mean of its two segments' normals: the ribbon has no gaps
+    local outer, inner = {}, {}
+    for k = 1, #line do
+      local p, q = line[math.max(1, k - 1)], line[math.min(#line, k + 1)]
+      local tx, tz = q[1] - p[1], q[2] - p[2]
+      local l = math.sqrt(tx * tx + tz * tz)
+      local nx, nz = -tz / l * half, tx / l * half
+      outer[k], inner[k] = {line[k][1] + nx, line[k][2] + nz}, {line[k][1] - nx, line[k][2] - nz}
+    end
+    for k = 1, #line - 1 do
+      local p, q = line[k], line[k + 1]
+      local tx, tz = q[1] - p[1], q[2] - p[2]
+      local nx, nz = -tz, tx
+      local po, pi, qo, qi = outer[k], inner[k], outer[k + 1], inner[k + 1]
+      for _, y in ipairs({-d, d}) do
+        BLD.shopFace(scene, T, {{pi[1], y, pi[2]}, {qi[1], y, qi[2]}, {qo[1], y, qo[2]}, {po[1], y, po[2]}}, gold, {0, y, 0})
+      end
+      BLD.shopFace(scene, T, {{po[1], -d, po[2]}, {qo[1], -d, qo[2]}, {qo[1], d, qo[2]}, {po[1], d, po[2]}}, gold, {nx, 0, nz})
+      BLD.shopFace(scene, T, {{pi[1], -d, pi[2]}, {qi[1], -d, qi[2]}, {qi[1], d, qi[2]}, {pi[1], d, pi[2]}}, gold, {-nx, 0, -nz})
+    end
+  end
+end
+
+-- McDonald's pole sign by wall a -> b of its restaurant, facing out: the first of a few spots
+-- beyond the wall's ends, nearest the street first, that is off any carriageway and clear of
+-- the building
+function BLD.shopPoleSign(scene, a, b, length, rings, ground, segmentBins)
+  local S, A = BLD.SHOP, BLD.SHOP.arches
+  for _, spot in ipairs({{-4, 7}, {length + 4, 7}, {-4, 4}, {length + 4, 4}, {-6, 1}, {length + 6, 1},
+      {-4, 12}, {length + 4, 12}}) do
+    local p = wallPoint(a, b, length, spot[1], spot[2], 0)
+    if not BLD.street(segmentBins, p[1], p[2], 1.5) and not inside(rings, p[1], p[2]) and not nearEdge(rings, p[1], p[2], 2) then
+      local T = SOLID.frame(p[1], p[2], ground(p[1], p[2]), math.atan2(b[2] - a[2], b[1] - a[1]))
+      local w, h, r = A.panel[1] / 2, A.panel[2], A.pole / 2
+      BLD.shopBox(scene, T, -r, -r, -.3, r, r, A.top - h, BLD.shopFlat(S.metal))
+      BLD.shopBox(scene, T, -w, -.2, A.top - h, w, .2, A.top, BLD.shopFlat(30), {front = BLD.shopUV(A.red), under = true})
+      local uv = BLD.shopUV(A.red)
+      BLD.shopQuad(scene, {T(w, .21, A.top - h), T(-w, .21, A.top - h), T(-w, .21, A.top), T(w, .21, A.top)}, uv)
+      BLD.shopArches(scene, T, A.top)
+      return true
+    end
+  end
+  return false
+end
+
+-- The mapped points by 100 m bin, the buildings their sites hold (shops.own: building -> cell),
+-- the roofs over pumps (shops.roofs: building -> {fuel, cell}), and each fuel site's pylon.
+function BLD.shopSites(shops, lists, rect, scene, ground, segmentBins, pause)
+  local S = BLD.SHOP
+  local any, venues = false, {}
+  for _, poi in ipairs(lists.points) do
+    local p = poi.pos
+    if p and poi.kind == 'venue' then venues[#venues + 1] = poi; any = true end
+    local cell = p and S.kinds[poi.kind] and BLD.shopCell(poi.kind, poi.tags)
+    if cell then
+      local key = math.floor(p[1] / 100) * 65536 + math.floor(p[2] / 100)
+      shops.points[key] = shops.points[key] or {}
+      table.insert(shops.points[key], {pos = p, cell = cell, kind = poi.kind, name = BLD.shopName(poi.tags), class = BLD.shopClass(poi.tags)})
+      any = true
+    end
+  end
+  local sites = {}
+  for _, site in ipairs(lists.areas) do
+    local kind = S.sites[site.kind]
+    if kind and site.rings and site.rings[1] and boundsTouch(ringBounds(site.rings), rect, S.pylon.probe) then
+      sites[#sites + 1] = {site = site, kind = kind, cell = BLD.shopCell(kind, site.tags)}
+    end
+  end
+  if #sites == 0 and not any then return end
+  local bins = {}
+  for _, b in ipairs(lists.buildings) do
+    if b.rings and b.rings[1] then
+      local box = ringBounds(b.rings)
+      for bx = math.floor(box[1] / 100), math.floor(box[3] / 100) do
+        for by = math.floor(box[2] / 100), math.floor(box[4] / 100) do
+          local key = bx * 65536 + by
+          bins[key] = bins[key] or {}
+          bins[key][#bins[key] + 1] = b
+        end
+      end
+    end
+  end
+  -- buildings within r of a box, each once
+  local function near(box, r)
+    local out, seen = {}, {}
+    for bx = math.floor((box[1] - r) / 100), math.floor((box[3] + r) / 100) do
+      for by = math.floor((box[2] - r) / 100), math.floor((box[4] + r) / 100) do
+        for _, b in ipairs(bins[bx * 65536 + by] or NONE) do
+          if not seen[b] then seen[b], out[#out + 1] = true, b end
+        end
+      end
+    end
+    return out
+  end
+  for _, poi in ipairs(venues) do
+    local x, y, r = poi.pos[1], poi.pos[2], BLD.VENUE.reach
+    BLD.venueBuilding(shops, poi, near({x, y, x, y}, r), lists.points)
+  end
+  for _, poi in ipairs(shops.stands) do
+    if poi.pos[1] >= rect[1] and poi.pos[1] < rect[3] and poi.pos[2] >= rect[2] and poi.pos[2] < rect[4] then
+      BLD.venueStand(scene, poi, ground, segmentBins)
+    end
+  end
+  for _, entry in ipairs(sites) do
+    local site, held, best, bestArea = entry.site, {}, nil, 0
+    for _, b in ipairs(near(ringBounds(site.rings), 0)) do
+      local ring, cx, cy, contained = cleanRing(b.rings[1]), 0, 0, true
+      for _, p in ipairs(ring) do
+        cx, cy = cx + p[1], cy + p[2]
+        if not inside(site.rings, p[1], p[2]) and not nearEdge(site.rings, p[1], p[2], .1) then contained = false end
+      end
+      if #ring >= 3 and contained and inside(b.rings, cx / #ring, cy / #ring) then
+        held[#held + 1] = b
+        local roof = (b.tags or NONE).building == 'roof'
+        local area = footprintFrame(ring).area
+        if roof and entry.kind == 'fuel' then
+          shops.roofs[b] = {fuel = true, cell = entry.cell}
+        elseif not roof and (not best or area > bestArea or area == bestArea and tostring(b.id or '') < tostring(best.id or '')) then
+          best, bestArea = b, area
+        end
+      end
+    end
+    -- one sign per building: the lower cell where two sites hold it
+    if best and entry.cell and (not shops.own[best] or entry.cell < shops.own[best]) then
+      shops.own[best] = entry.cell
+      shops.info[best] = {name = BLD.shopName(site.tags), class = BLD.shopClass(site.tags)}
+    end
+    if entry.kind == 'fuel' and entry.cell then
+      BLD.shopPylon(scene, site, entry.cell, held, ground, segmentBins)
+    end
+    pause()
+  end
+  -- a fuel point under or beside a mapped roof (no site drawn): that roof is its canopy
+  for _, list in pairs(shops.points) do
+    for _, poi in ipairs(list) do
+      if poi.kind == 'fuel' then
+        local x, y, r = poi.pos[1], poi.pos[2], S.canopy.reach
+        for _, b in ipairs(near({x, y, x, y}, r)) do
+          if (b.tags or NONE).building == 'roof' and not shops.roofs[b]
+              and (inside(b.rings, x, y) or nearEdge(b.rings, x, y, r)) then
+            shops.roofs[b] = {fuel = true, cell = poi.cell}
+          end
+        end
+      end
+    end
+  end
+end
+
+-- A fuel site's price pylon: inside the site, `setback` m in from its longest edge that has a
+-- street outside, clear of its buildings and of any carriageway; facing that street.
+function BLD.shopPylon(scene, site, cell, held, ground, segmentBins)
+  local P, S = BLD.SHOP.pylon, BLD.SHOP
+  local ring, best = BLD.orient(site.rings[1], site.rings), nil
+  for k, a in ipairs(ring) do
+    local b = ring[k % #ring + 1]
+    local length = math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2)
+    if length >= 6 and (not best or length > best[3]) then
+      local probe = wallPoint(a, b, length, length / 2, P.probe, 0)
+      if BLD.street(segmentBins, probe[1], probe[2], 6) then best = {a, b, length} end
+    end
+  end
+  if not best then return false end
+  local a, b, length = best[1], best[2], best[3]
+  for _, t in ipairs({.2, .8, .5, .35, .65}) do
+    local p = wallPoint(a, b, length, length * t, -P.setback, 0)
+    local clear = inside(site.rings, p[1], p[2]) and not BLD.street(segmentBins, p[1], p[2], 1.5)
+    for _, building in ipairs(held) do
+      if clear and (inside(building.rings, p[1], p[2]) or nearEdge(building.rings, p[1], p[2], 2)) then clear = false end
+    end
+    if clear then
+      local z = ground(p[1], p[2])
+      local T = SOLID.frame(p[1], p[2], z, math.atan2(b[2] - a[2], b[1] - a[1]))
+      local h, w = P.height, P.half
+      local uv, aspect = BLD.shopMark(cell)
+      local sign = 2 * w / aspect
+      BLD.shopBox(scene, T, -w, -P.deep, -.3, w, P.deep, h, BLD.shopFlat(cell, 2))
+      -- the network's sign at the top and the board under it, both faces
+      for _, side in ipairs({-1, 1}) do
+        local y = side * (P.deep + .01)
+        local function face(x0, x1, z0, z1, uv)
+          if side < 0 then
+            BLD.shopQuad(scene, {T(x0, y, z0), T(x1, y, z0), T(x1, y, z1), T(x0, y, z1)}, uv)
+          else
+            BLD.shopQuad(scene, {T(x1, y, z0), T(x0, y, z0), T(x0, y, z1), T(x1, y, z1)}, uv)
+          end
+        end
+        face(-w + .05, w - .05, h - .05 - sign, h - .05, uv)
+        face(-w + .1, w - .1, h - .4 - sign - P.board, h - .4 - sign, BLD.shopUV(S.price))
+      end
+      return true
+    end
+  end
+  return false
+end
+
+-- building=roof: a slab `deep` m thick under its roof (the caller draws the top) on columns.
+-- Over pumps (info.fuel) a canopy: the lit underside, the stripe and sign of info.cell on the
+-- fascia, pump islands along its long axis with a column in each; elsewhere plain columns.
+function BLD.shopCanopy(scene, rings, base, top, info, ground, pause, rect)
+  local S, C = BLD.SHOP, BLD.SHOP.canopy
+  local fuel = info and info.fuel
+  local deep = fuel and C.deep or math.min(C.plain, (top - base) * .15)
+  local low = top - deep
+  local ring = BLD.orient(rings[1], rings)
+  local branded = fuel and info.cell and BLD.shopBranded(info.cell)
+  local white, under = BLD.shopFlat(S.white), BLD.shopFlat(fuel and S.lit or S.white)
+  local face = branded and BLD.shopFlat(info.cell, 2) or white
+  local stripe = branded and BLD.shopStyle(info.cell).accent and BLD.shopFlat(info.cell, 3)
+    or (fuel and info.cell and BLD.shopFlat(info.cell))
+  for _, tri in ipairs(triangulate(rings, pause, rect)) do
+    local p, q, r = tri[1], tri[2], tri[3]
+    -- facing down
+    if (q[1] - p[1]) * (r[2] - p[2]) - (q[2] - p[2]) * (r[1] - p[1]) > 0 then q, r = r, q end
+    scene.polygon('brand_sign', {{p[1], p[2], low, under[1], under[2]}, {q[1], q[2], low, under[1], under[2]},
+      {r[1], r[2], low, under[1], under[2]}}, false)
+  end
+  local signs = {}
+  for k, a in ipairs(ring) do
+    local b = ring[k % #ring + 1]
+    local length = math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2)
+    if length > .05 then
+      BLD.shopQuad(scene, {wallPoint(a, b, length, 0, 0, low), wallPoint(a, b, length, length, 0, low),
+        wallPoint(a, b, length, length, 0, top), wallPoint(a, b, length, 0, 0, top)}, face)
+      if fuel and info.cell then
+        BLD.shopQuad(scene, {wallPoint(a, b, length, 0, .01, low), wallPoint(a, b, length, length, .01, low),
+          wallPoint(a, b, length, length, .01, low + C.band), wallPoint(a, b, length, 0, .01, low + C.band)},
+          stripe)
+        signs[#signs + 1] = {a, b, length}
+      end
+    end
+  end
+  -- the sign on the two longest sides of the fascia
+  table.sort(signs, function(x, y) return x[3] > y[3] end)
+  for n = 1, math.min(2, #signs) do
+    local a, b, length = signs[n][1], signs[n][2], signs[n][3]
+    local uv, aspect = BLD.shopMark(info.cell)
+    local h = deep * (aspect == 1 and 1.4 or .85)
+    if length >= aspect * h + 1 then
+      local s, m, half = length / 2, (low + top) / 2, aspect * h / 2
+      BLD.shopQuad(scene, {wallPoint(a, b, length, s - half, .03, m - h / 2), wallPoint(a, b, length, s + half, .03, m - h / 2),
+        wallPoint(a, b, length, s + half, .03, m + h / 2), wallPoint(a, b, length, s - half, .03, m + h / 2)}, uv)
+    end
+  end
+  local f = footprintFrame(ring)
+  local L, W = f.u1 - f.u0, f.v1 - f.v0
+  local yaw = math.atan2(f.ay, f.ax)
+  local function at(u, v) return u * f.ax + v * f.bx, u * f.ay + v * f.by end
+  local metal, half = BLD.shopFlat(S.metal), C.column / 2
+  local function column(x, y, z)
+    BLD.shopBox(scene, SOLID.frame(x, y, z, yaw), -half, -half, 0, half, half, low - z, metal)
+  end
+  if fuel and L >= 6 and W >= 4 then
+    local I, P = C.island, C.pump
+    local rows, per = math.max(1, math.floor(W / 7 + .5)), math.max(1, math.floor(L / 9))
+    local long = math.min(I.long, L / per - 2.5)
+    for row = 1, rows do
+      local v = f.v0 + W * (row - .5) / rows
+      for k = 1, long >= 2.5 and per or 0 do
+        local u = f.u0 + L * (k - .5) / per
+        local fits = true
+        for _, c in ipairs({{-1, -1}, {1, -1}, {1, 1}, {-1, 1}}) do
+          local x, y = at(u + c[1] * long / 2, v + c[2] * I.width / 2)
+          if not inside(rings, x, y) then fits = false end
+        end
+        if fits then
+          local x, y = at(u, v)
+          local z = ground(x, y)
+          local T = SOLID.frame(x, y, z, yaw)
+          BLD.shopBox(scene, T, -long / 2, -I.width / 2, -.3, long / 2, I.width / 2, I.rise, BLD.shopFlat(S.concrete))
+          column(x, y, z + I.rise)
+          for _, s in ipairs(long >= 4 and {-1, 1} or {1}) do
+            local c = s * long * .28
+            BLD.shopBox(scene, T, c - P.long / 2, -P.wide / 2, I.rise, c + P.long / 2, P.wide / 2, I.rise + P.body, white)
+            BLD.shopBox(scene, T, c - P.long / 2, -P.wide / 2, I.rise + P.body, c + P.long / 2, P.wide / 2, I.rise + P.top,
+              BLD.shopFlat(info.cell or S.fuel))
+          end
+        end
+      end
+      pause()
+    end
+  else
+    -- columns on a grid at most 8 m apart, half a metre in from the outline, inside it
+    local nu, nv = math.max(1, math.ceil((L - 1) / 8)), W > 5 and 1 or 0
+    for i = 0, nu do
+      for j = 0, nv do
+        local u = nu > 0 and f.u0 + .5 + (L - 1) * i / nu or (f.u0 + f.u1) / 2
+        local v = nv > 0 and f.v0 + .5 + (W - 1) * j or (f.v0 + f.v1) / 2
+        local x, y = at(u, v)
+        if inside(rings, x, y) and not nearEdge(rings, x, y, .3) then column(x, y, ground(x, y) - .2) end
+      end
+    end
+  end
+end
+
+-- The signs of one building: `own` its own cell (its tags or a site's), `points` the shop
+-- points inside it. One network for a small non-residential building is a whole shop: its fascia
+-- (and cladding) round every wall, a sign on the longest wall of each side, glazing on the street
+-- walls (or the longest). Any other point dresses the street wall nearest it: its fascia over the
+-- ground floor, the sign on it, glazing under it.
+function BLD.shopSigns(scene, building, rings, base, bottom, height, own, points, segmentBins, ground, info)
+  local S = BLD.SHOP
+  local W, P = S.whole, S.part
+  local tags = building.tags or NONE
+  info = info or {name = BLD.shopName(tags), class = BLD.shopClass(tags)}
+  local ring = BLD.orient(rings[1], rings)
+  local footprint = footprintFrame(ring).area
+  local walls, longest = {}, nil
+  for k, a in ipairs(ring) do
+    local b = ring[k % #ring + 1]
+    local length = math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2)
+    if length >= 2 then
+      local probe = wallPoint(a, b, length, length / 2, S.street, 0)
+      local wall = {a = a, b = b, length = length, dx = (b[1] - a[1]) / length, dy = (b[2] - a[2]) / length,
+        street = BLD.street(segmentBins, probe[1], probe[2], S.street + 4)}
+      walls[#walls + 1] = wall
+      if not longest or length > longest.length then longest = wall end
+    end
+  end
+  if #walls == 0 then return end
+  local shown, parts = {}, {}
+  if own then shown[own] = true end
+  for _, poi in ipairs(points) do
+    if not shown[poi.cell] then shown[poi.cell], parts[#parts + 1] = true, poi end
+  end
+  local small = footprint <= W.area and height <= W.height and not S.homes[tags.building or 'yes']
+    and not (tags['building:levels'] and number(tags['building:levels'], 1) > 2)
+  if not own and #parts == 1 and small then own, parts, info = parts[1].cell, {}, parts[1] end
+  local top = base + height
+  if own then
+    local style = BLD.shopStyle(own)
+    local branded = BLD.shopBranded(own)
+    local plain = own >= S.more and not branded
+    local fh = math.max(W.fascia[1], math.min(W.fascia[2], height * W.fascia[3], height - 2.6))
+    local low = top - fh
+    local face, accent = BLD.shopFlat(own, 2), style.accent and BLD.shopFlat(own, 3)
+    local glass = math.min(base + W.glass, low - (accent and W.accent or 0) - .1)
+    local anyStreet, sides, front = false, {}, nil
+    for _, wall in ipairs(walls) do
+      anyStreet = anyStreet or wall.street
+      if wall.street and (not front or wall.length > front.length) then front = wall end
+    end
+    front = front or longest
+    -- a network with photographs (McDonald's) wears them: its entrance tower in the middle of the
+    -- front wall, its dining room's glazing along the street walls
+    local photo = S.photo[style.photo or '']
+    local tower
+    if photo and front.length >= 6 then
+      local B = S.bay
+      local h = math.max(B.least, math.min(B.most, height + 3))
+      local w = math.min(h / 2, front.length * .6)
+      tower = {w = w, h = 2 * w}
+    end
+    for _, wall in ipairs(walls) do
+      local a, b, length = wall.a, wall.b, wall.length
+      if branded or plain then
+        if style.clad then BLD.shopBand(scene, a, b, length, -.04, length + .04, bottom, low, .04, face) end
+        BLD.shopBand(scene, a, b, length, -.07, length + .07, low, top + .15, .07, face)
+        if accent then BLD.shopBand(scene, a, b, length, -.07, length + .07, low - W.accent, low, .07, accent) end
+      end
+      if length >= 4 and glass > base + 2 and (wall.street or (not anyStreet and wall == longest)) then
+        if photo then
+          -- whole panes of the photograph, as tall as fits under the fascia
+          local gh = math.min(photo.wide[2], glass - (base + .4))
+          local gw = gh * photo.wide[1] / photo.wide[2]
+          local skip0, skip1 = math.huge, -math.huge
+          if wall == front and tower then skip0, skip1 = (length - tower.w) / 2 - .3, (length + tower.w) / 2 + .3 end
+          for n = 0, math.floor((length - 1) / gw) - 1 do
+            local s0 = (length - math.floor((length - 1) / gw) * gw) / 2 + n * gw
+            if gh >= 1.5 and (s0 + gw <= skip0 or s0 >= skip1) then
+              BLD.shopPhoto(scene, a, b, length, s0, s0 + gw, base + .4, base + .4 + gh, .06, photo.glass)
+            end
+          end
+        else
+          BLD.shopFront(scene, a, b, length, length * (1 - W.front) / 2, length * (1 + W.front) / 2, bottom, glass,
+            BLD.frontFloor(a, b, length, length / 2, base, ground), info.class)
+        end
+      end
+      -- the longest wall of each of four sides carries the sign, sized by the whole side (OSM
+      -- draws a long facade as several walls)
+      local side = math.abs(wall.dx) >= math.abs(wall.dy) and (wall.dx >= 0 and 1 or 2) or (wall.dy >= 0 and 3 or 4)
+      if not sides[side] or length > sides[side].length then sides[side] = wall end
+      sides[side + 4] = (sides[side + 4] or 0) + length
+    end
+    local uv, aspect = BLD.shopMark(own)
+    if style.wordmark then uv, aspect = BLD.shopUV(style.wordmark), 4 end
+    if tower then
+      -- the tower: a charcoal box `out` m before the wall with the photograph on its face
+      local a, b, length = front.a, front.b, front.length
+      local p = wallPoint(a, b, length, length / 2, 0, 0)
+      local T = SOLID.frame(p[1], p[2], 0, math.atan2(b[2] - a[2], b[1] - a[1]))
+      local w, out = tower.w / 2, S.bay.out
+      BLD.shopBox(scene, T, -w, -out, bottom, w, .05, base + tower.h, face)
+      BLD.shopPhoto(scene, a, b, length, length / 2 - w, length / 2 + w, base, base + tower.h, out + .01, photo.bay)
+    end
+    if style.pylon == 'arches' then BLD.shopPoleSign(scene, front.a, front.b, front.length, rings, ground, segmentBins) end
+    -- a place with no network of its own goes by its own name on its fascia, over the street
+    local chars, size
+    if plain then chars, size = BLD.signFit(info.name, front.length * .9, fh * S.letters) end
+    if chars then
+      BLD.signLetters(scene, front.a, front.b, front.length, front.length / 2, chars, size, low + (top + .15 - low - size) / 2, .09)
+    end
+    for side = 1, 4 do
+      local wall = sides[side]
+      if wall and wall.length >= 4 and not (tower and wall == front) and not chars then
+        -- as tall as the fascia, more on a long wall (a 100 m hypermarket's name is read from the
+        -- far side of its car park), at most half the building and clear of the glazing
+        local h = math.min(math.max(fh * (aspect == 1 and 1.15 or .8), sides[side + 4] * W.long[aspect == 1 and 2 or 1]),
+          W.tallest, height * .5, wall.length * .9 / aspect, top - .1 - (glass + .2))
+        local z1 = top - .1 + (aspect == 1 and h * .2 or 0)
+        if h >= .5 then
+          BLD.shopSign(scene, wall.a, wall.b, wall.length, wall.length / 2, h * aspect, z1 - h, z1, uv)
+        end
+      end
+    end
+  end
+  for _, poi in ipairs(parts) do
+    local x, y = poi.pos[1], poi.pos[2]
+    local best, bestScore, bestT
+    for _, wall in ipairs(walls) do
+      if wall.length >= 3 then
+        local a, dx, dy = wall.a, wall.b[1] - wall.a[1], wall.b[2] - wall.a[2]
+        local t = math.max(0, math.min(1, ((x - a[1]) * dx + (y - a[2]) * dy) / (wall.length ^ 2)))
+        local d = math.sqrt((x - a[1] - t * dx) ^ 2 + (y - a[2] - t * dy) ^ 2) + (wall.street and 0 or S.street)
+        if not bestScore or d < bestScore then best, bestScore, bestT = wall, d, t end
+      end
+    end
+    local style = BLD.shopStyle(poi.cell)
+    local uv, aspect = BLD.shopMark(poi.cell)
+    local z0, z1 = base + (height >= P.tall and P.under[1] or P.low), math.min(base + (height >= P.tall and P.under[2] or P.high), top - .2)
+    if z1 - z0 < .6 then z0 = math.max(base + 2.4, z1 - .7) end
+    local h = best and math.min((z1 - z0) * (aspect == 1 and 1.1 or .85), (best.length - .4) / aspect) or 0
+    if h >= .4 then
+      local a, b, length = best.a, best.b, best.length
+      local chars, size
+      if not BLD.shopBranded(poi.cell) then chars, size = BLD.signFit(poi.name, math.min(length, P.most) - .6, (z1 - z0) * S.letters) end
+      local bay = BLD.FRONT.bay
+      local span = math.min(length, bay * math.max(2, math.ceil(((chars and #chars * size * BLD.PLATE.aspect or h * aspect) + P.margin) / bay)))
+      local s = math.max(span / 2, math.min(length - span / 2, bestT * length))
+      local under = z0
+      BLD.shopBand(scene, a, b, length, s - span / 2, s + span / 2, z0, z1, .07, BLD.shopFlat(poi.cell, 2))
+      if style.accent and BLD.shopBranded(poi.cell) then
+        under = z0 - P.accent
+        BLD.shopBand(scene, a, b, length, s - span / 2, s + span / 2, under, z0, .07, BLD.shopFlat(poi.cell, 3))
+      end
+      BLD.shopFront(scene, a, b, length, s - span / 2, s + span / 2, bottom, under, BLD.frontFloor(a, b, length, s, base, ground), poi.class)
+      local m = (z0 + z1) / 2
+      if chars then
+        BLD.signLetters(scene, a, b, length, s, chars, size, m - size / 2, .09)
+      else
+        BLD.shopSign(scene, a, b, length, s, h * aspect, m - h / 2, m + h / 2, uv)
+      end
+      -- McDonald's in a mall keeps its pole sign: beyond the ends of its stretch of the wall
+      if style.pylon == 'arches' then
+        BLD.shopPoleSign(scene, wallPoint(a, b, length, s - span / 2, 0, 0), wallPoint(a, b, length, s + span / 2, 0, 0),
+          span, rings, ground, segmentBins)
+      end
+    end
+  end
+end
+
+-- A place from a register (earthng/venues.py, docs/VENUES.md): the point's building keeps its own
+-- walls, the type adds what shows from the street. reach: a point this far from a building still
+-- means it. No type is in use. A type: rgb on the map; sign and banner, uv boxes in brand_photo
+-- (its free half, x from 1024; fast_art.brand_art draws them); panel over the door, wide and
+-- tall, its underside `low` over the ground and `deep` m out on a canopy; door: glazed width and
+-- height; banners: count, step along the wall, poles' height, cloth width and height, its top
+-- `drop` under the pole's; aside: from the door along the wall; out: distances from the wall to try.
+BLD.VENUE = {reach = 30, types = {}}
+
+-- The building of a venue point: the one it stands in, else the nearest within reach; the first
+-- point of a building keeps it (two numbered places may share an address). doors: the entrances
+-- mapped within 40 m, for the wall of its door.
+function BLD.venueBuilding(shops, poi, candidates, points)
+  local x, y, best, bestD = poi.pos[1], poi.pos[2], nil, math.huge
+  for _, b in ipairs(candidates) do
+    if (b.tags or NONE).building ~= 'roof' then
+      local d = inside(b.rings, x, y) and 0 or math.huge
+      if d > 0 then
+        local ring = cleanRing(b.rings[1])
+        for k, a in ipairs(ring) do
+          local c = ring[k % #ring + 1]
+          d = math.min(d, (segDistance(x, y, a, c)))
+        end
+      end
+      if d < bestD or (d == bestD and best and tostring(b.id or '') < tostring(best.id or '')) then best, bestD = b, d end
+    end
+  end
+  if not best or bestD > BLD.VENUE.reach then
+    shops.stands[#shops.stands + 1] = poi
+    return
+  end
+  if shops.venue[best] then return end
+  local doors = {}
+  for _, p in ipairs(points) do
+    if p.pos and (p.kind == 'entrance' or p.kind == 'door') and (p.pos[1] - x) ^ 2 + (p.pos[2] - y) ^ 2 < 1600 then
+      doors[#doors + 1] = p
+    end
+  end
+  shops.venue[best] = {poi = poi, doors = doors}
+end
+
+-- The wall of a venue's door and how far along it: the wall of a mapped door (a main one first),
+-- in a mall the street wall nearest the point, else the longest street wall's middle, else the
+-- longest wall's.
+function BLD.venueWall(ring, info, within, segmentBins)
+  local S, walls, front, longest = BLD.SHOP, {}, nil, nil
+  for k, a in ipairs(ring) do
+    local b = ring[k % #ring + 1]
+    local length = math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2)
+    if length >= 3 then
+      local probe = wallPoint(a, b, length, length / 2, S.street, 0)
+      local wall = {a = a, b = b, length = length, street = BLD.street(segmentBins, probe[1], probe[2], S.street + 4)}
+      walls[#walls + 1] = wall
+      if not longest or length > longest.length then longest = wall end
+      if wall.street and (not front or length > front.length) then front = wall end
+    end
+  end
+  if #walls == 0 then return end
+  local function along(wall, p)
+    local a, dx, dy = wall.a, wall.b[1] - wall.a[1], wall.b[2] - wall.a[2]
+    local t = math.max(0, math.min(1, ((p[1] - a[1]) * dx + (p[2] - a[2]) * dy) / wall.length ^ 2))
+    return t * wall.length, math.sqrt((p[1] - a[1] - t * dx) ^ 2 + (p[2] - a[2] - t * dy) ^ 2)
+  end
+  local best, bestS, bestScore
+  for _, door in ipairs(info.doors) do
+    for _, wall in ipairs(walls) do
+      local s, d = along(wall, door.pos)
+      local score = d + ((door.tags or NONE).entrance == 'main' and 0 or 2)
+      if d <= 3 and (not bestScore or score < bestScore) then best, bestS, bestScore = wall, s, score end
+    end
+  end
+  if best then return best, bestS end
+  if within == 'mall' then
+    for _, wall in ipairs(walls) do
+      local s, d = along(wall, info.poi.pos)
+      local score = d + (wall.street and 0 or S.street)
+      if not bestScore or score < bestScore then best, bestS, bestScore = wall, s, score end
+    end
+    return best, bestS
+  end
+  best = front or longest
+  return best, best.length / 2
+end
+
+-- A cloth of brand_photo in frame T at x, both faces reading the right way round
+function BLD.venueCloth(scene, T, x, y, wide, z0, z1, uv)
+  local x0, x1 = x - wide / 2, x + wide / 2
+  local function corner(px, u, pz, v) local q = T(px, y, pz); return {q[1], q[2], q[3], u, v} end
+  scene.polygon('brand_photo', {corner(x0, uv[1], z0, uv[4]), corner(x1, uv[3], z0, uv[4]),
+    corner(x1, uv[3], z1, uv[2]), corner(x0, uv[1], z1, uv[2])}, false)
+  scene.polygon('brand_photo', {corner(x1, uv[1], z0, uv[4]), corner(x0, uv[3], z0, uv[4]),
+    corner(x0, uv[3], z1, uv[2]), corner(x1, uv[1], z1, uv[2])}, false)
+end
+
+-- The banners by the door: a row beside its stretch of wall, out towards the street, at the
+-- first distance where every pole clears the carriageway and the building.
+function BLD.venueBanners(scene, wall, s, rings, ground, segmentBins, kind)
+  local S, B, a, b, length = BLD.SHOP, BLD.VENUE.types[kind].banners, wall.a, wall.b, wall.length
+  local yaw = math.atan2(b[2] - a[2], b[1] - a[1])
+  local half = (B.count - 1) * B.step / 2
+  for _, out in ipairs(B.out) do
+    for _, side in ipairs({-1, 1}) do
+      local mid, clear = s + side * B.aside, true
+      for n = 0, B.count - 1 do
+        local p = wallPoint(a, b, length, mid - half + n * B.step, out, 0)
+        if BLD.street(segmentBins, p[1], p[2], 1.2) or inside(rings, p[1], p[2]) or nearEdge(rings, p[1], p[2], 1.5) then
+          clear = false
+        end
+      end
+      if clear then
+        for n = 0, B.count - 1 do
+          local p = wallPoint(a, b, length, mid - half + n * B.step, out, 0)
+          local T = SOLID.frame(p[1], p[2], ground(p[1], p[2]), yaw)
+          BLD.shopBox(scene, T, -.05, -.05, -.3, .05, .05, B.pole, BLD.shopFlat(S.white))
+          local top = B.pole - B.drop
+          BLD.venueCloth(scene, T, B.wide / 2 + .06, -.02, B.wide, top - B.high, top, BLD.VENUE.types[kind].banner)
+        end
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- A place OSM holds no building for: its panel on two posts and its banners where the point is,
+-- along the nearest street and facing it. Never on a carriageway.
+function BLD.venueStand(scene, poi, ground, segmentBins)
+  local tags, S = poi.tags or NONE, BLD.SHOP
+  local V = BLD.VENUE.types[tags.e2r_venue]
+  if not V or tags.e2r_within == 'metro' then return end
+  local x, y, best, bestD = poi.pos[1], poi.pos[2], nil, math.huge
+  if BLD.street(segmentBins, x, y, 1.2) then return end
+  for bx = -2, 2 do
+    for by = -2, 2 do
+      local key = (math.floor(x / 50) + bx + 32768) * 65536 + math.floor(y / 50) + by + 32768
+      for _, s in ipairs(segmentBins[key] or NONE) do
+        if s.surface and s.len2 > 0 then
+          local d = (segDistance(x, y, s.a, {s.a[1] + s.dx, s.a[2] + s.dy}))
+          if d < bestD then best, bestD = s, d end
+        end
+      end
+    end
+  end
+  local dx, dy = 1, 0
+  if best then
+    local length = math.sqrt(best.len2)
+    dx, dy = best.dx / length, best.dy / length
+    -- the frame's -y faces the road
+    local t = math.max(0, math.min(1, ((x - best.a[1]) * best.dx + (y - best.a[2]) * best.dy) / best.len2))
+    if (best.a[1] + t * best.dx - x) * dy - (best.a[2] + t * best.dy - y) * dx < 0 then dx, dy = -dx, -dy end
+  end
+  local T = SOLID.frame(x, y, ground(x, y), math.atan2(dy, dx))
+  local P, w, flat = V.panel, V.panel.wide / 2, BLD.shopFlat(S.metal)
+  for _, at in ipairs({-w + .4, w - .4}) do BLD.shopBox(scene, T, at - .06, -.06, -.3, at + .06, .06, P.low + P.tall, flat) end
+  BLD.shopBox(scene, T, -w, 0, P.low, w, .1, P.low + P.tall, flat)
+  BLD.venueCloth(scene, T, 0, -.01, P.wide, P.low, P.low + P.tall, V.sign)
+  local B = V.banners
+  for n = 0, B.count - 1 do
+    local at = w + 2 + n * B.step
+    BLD.shopBox(scene, T, at - .05, -.05, -.3, at + .05, .05, B.pole, BLD.shopFlat(S.white))
+    BLD.venueCloth(scene, T, at + B.wide / 2 + .06, -.02, B.wide, B.pole - B.drop - B.high, B.pole - B.drop, V.banner)
+  end
+end
+
+-- A venue on its building: glazing at the door, a canopy with the panel on its front edge, a
+-- step and the banners. In a mall only the door's stretch of wall is its own; a metro hall shows
+-- nothing above ground.
+function BLD.venueSigns(scene, rings, base, bottom, height, info, segmentBins, ground)
+  local tags, S = info.poi.tags or NONE, BLD.SHOP
+  local kind = tags.e2r_venue
+  local V = BLD.VENUE.types[kind]
+  if not V or tags.e2r_within == 'metro' then return end
+  local wall, s = BLD.venueWall(BLD.orient(rings[1], rings), info, tags.e2r_within, segmentBins)
+  if not wall then return end
+  local P, a, b, length = V.panel, wall.a, wall.b, wall.length
+  local wide = math.min(P.wide, length - .4)
+  s = math.max(wide / 2 + .2, math.min(length - wide / 2 - .2, s))
+  -- on a single storey the panel stands at the eaves, a little over the roof line
+  local low = math.max(P.least, math.min(P.low, height - P.tall - .2))
+  if height < P.shed then return end
+  local door = math.min(V.door.wide, wide - .6)
+  BLD.shopFront(scene, a, b, length, s - door / 2, s + door / 2, bottom, base + math.min(V.door.high, low - .1), base)
+  local p = wallPoint(a, b, length, s, 0, 0)
+  local T = SOLID.frame(p[1], p[2], base, math.atan2(b[2] - a[2], b[1] - a[1]))
+  local w = wide / 2
+  BLD.shopBox(scene, T, -w, -P.deep, low - .15, w, 0, low, BLD.shopFlat(S.metal), {under = true})
+  BLD.shopBox(scene, T, -w, -P.deep, bottom - base, w, 0, .16, BLD.shopFlat(S.concrete))
+  BLD.shopBox(scene, T, -w, -P.deep - .1, low, w, -P.deep, low + P.tall, BLD.shopFlat(S.metal))
+  local function corner(px, u, pz, v) local q = T(px, -P.deep - .11, pz); return {q[1], q[2], q[3], u, v} end
+  scene.polygon('brand_photo', {corner(-w, V.sign[1], low, V.sign[4]), corner(w, V.sign[3], low, V.sign[4]),
+    corner(w, V.sign[3], low + P.tall, V.sign[2]), corner(-w, V.sign[1], low + P.tall, V.sign[2])}, false)
+  if tags.e2r_within ~= 'mall' then BLD.venueBanners(scene, wall, s, rings, ground, segmentBins, kind) end
 end
 
 -- A parked car, 4.4 x 1.76 m: a body with a sloped bonnet and boot, a glasshouse with its
@@ -4344,6 +7527,19 @@ end
 -- `kerb` m behind a kerb and `edge` m off a paved edge with no sidewalk: the old 0.35 m put the pole at the shoulder,
 -- where a driver ran into one in play.
 VEG.lampRule = {step = 30, wide = 6, kerb = .5, edge = 1, never = {motorway = true, motorway_link = true}}
+-- The storefront spans (BLD.shopLinks) of one building on the wall p -> q, in metres from p,
+-- whichever way the source ring runs; nil when the wall has none.
+function VEG.shopSpans(own, p, q, length)
+  if not own then return nil end
+  local spans = own[BLD.wallKey(p, q)]
+  if spans then return spans end
+  spans = own[BLD.wallKey(q, p)]
+  if not spans then return nil end
+  local out = {}
+  for k = #spans, 1, -1 do out[#out + 1] = {length - spans[k][2], length - spans[k][1]} end
+  return out
+end
+
 function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, lift, walkWidth, ground, put, pause, context)
   context = context or {}
   spacing = math.max(0, tonumber(spacing) or 0)
@@ -4359,9 +7555,12 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
   local count = 0
   -- More furniture in yards and squares as the street step shortens (Balanced 12 m: 1)
   local dense = spacing > 0 and math.min(1.5, 12 / spacing) or 0
-  -- the tile's buildings in 50 m bins, 0.6 m out from the walls (a footway along a wall)
+  -- the tile's buildings in 50 m bins, 0.6 m out from the walls (a footway along a wall).
+  -- These set-up loops pause too: over a city tile's buildings, lines and strips they ran
+  -- 13-22 ms without one (Kyiv stream bench).
   local walls = {}
   for _, building in ipairs(buildings) do
+    pause()
     if ringsTouch(building.rings, rect) then
       local b = ringBounds(building.rings)
       local entry = {rings = building.rings, bounds = b}
@@ -4374,6 +7573,7 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
     end
   end
   for _, area in ipairs(context.areas or NONE) do
+    pause()
     -- a traffic island keeps every prop out, inferred lamps too (0.6 m round it, inWall)
     if area.kind == 'water' or area.kind == 'island' or area.kind == 'parking' or (area.tags or NONE).amenity == 'parking' then
       local b = ringBounds(area.rings)
@@ -4396,6 +7596,7 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
   -- and the 50 m bins with a building in them (a town, not a field or a forest)
   local grounds, built, squares = {}, {}, {}
   for _, area in ipairs(context.areas or NONE) do
+    pause()
     local tags = area.tags or NONE
     local kind = area.kind
     if kind == 'paved' and (tags.place == 'square' or tags.highway == 'pedestrian') then kind = 'square' end
@@ -4419,6 +7620,7 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
   -- of flats or taller than 3 floors (a town's, not a village's)
   local footprint = {}
   for _, building in ipairs(buildings) do
+    pause()
     local b = ringBounds(building.rings)
     if boundsTouch(b, rect, 100) then
       local ring, a2 = building.rings[1] or NONE, 0
@@ -4528,6 +7730,7 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
   -- whose lamps are mapped gets no inferred lamp within 12 m of one (the row is every 30 m).
   local surveyedLamps = {}
   for _, p in ipairs(context.points or NONE) do
+    pause()
     if p.pos and (p.kind == 'tree' or p.kind == 'lamp' or p.kind == 'stop') then
       local x, y = p.pos[1], p.pos[2]
       local r = p.kind == 'tree' and 3 or p.kind == 'stop' and 5 or 2
@@ -4535,10 +7738,14 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
       if p.kind == 'lamp' then band(surveyedLamps, {x - .001, y}, {x + .001, y}, 12) end
     end
   end
+  for _, p in ipairs(context.signs or NONE) do
+    band(occupied, {p[1] - .001, p[2]}, {p[1] + .001, p[2]}, .6)
+  end
   -- paths on the ground (their paving and 0.3 m more; a crossing 2 m either side) and the
   -- streets' sidewalks (a footway's prop does not stand on them)
   local paths, walks = {}, {}
   for _, line in ipairs(lines) do
+    pause()
     local tags, points = line.tags or NONE, line.points or NONE
     if line.kind == 'path' and tags.area ~= 'yes' and pathOnGround(tags) then
       local r = pathCrossing(tags) and 2 or (tonumber(tags.width) or 2) / 2 + .3
@@ -4547,6 +7754,7 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
   end
   pause()
   for _, strip in ipairs(strips) do
+    pause()
     if strip.surface then
       for k = 1, #strip.points - 1 do
         local w = strip.walk[k] or NONE
@@ -4666,15 +7874,20 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
         end, nil, 'prop_' .. id)
       local major = tags.highway == 'primary' or tags.highway == 'secondary' or tags.highway == 'tertiary' or tags.highway == 'trunk'
       local lr = VEG.lampRule
-      if context.lamps and tags.lit ~= 'no' and not lr.never[tags.highway] and (tags.lit == 'yes' or major)
+      -- ROADS.extras.lampRows: German practice (one row on a narrow street, staggered rows on a wide one, an unlit
+      -- major road lit only in a town, none on a motorway). Off, upstream's rule: a row on the right and, on
+      -- a wide street, on a sidewalk side, on every major road not tagged lit=no.
+      local rows = ROADS.extras.lampRows
+      if context.lamps and tags.lit ~= 'no' and not (rows and lr.never[tags.highway]) and (tags.lit == 'yes' or major)
           and (not FS or FS:fileExists(LAMP)) then
         local function lit(k)
-          return tags.lit == 'yes' or town(strip.points[k][1], strip.points[k][2])
+          return not rows or tags.lit == 'yes' or town(strip.points[k][1], strip.points[k][2])
         end
         -- the row's side: a wide street both (its sidewalks'), a narrow one the side with the only sidewalk, else the right
         local function sides(k, side)
           if not lit(k) then return false end
           local w = strip.walk[k] or NONE
+          if not rows then return side == -1 or hw >= 6 and w[side] end
           if hw >= lr.wide then return side == -1 or w[side] end
           if side == 1 then return w[1] and not w[-1] or false end
           return not (w[1] and not w[-1])
@@ -4692,7 +7905,8 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
         -- the right row on the step, the left one half a step on (a wide street's rows staggered)
         for _, side in ipairs({-1, 1}) do
           walk(strip.points, strip.dist, hash(id), function(k, which) return which == side and sides(k, side) end,
-            6, 6, strip.start or 0, offset, nil, 'streetlamp_' .. id, false, lr.step, lamp, side == 1 and lr.step / 2 or 0)
+            6, 6, strip.start or 0, offset, nil, 'streetlamp_' .. id, false, lr.step, lamp,
+            rows and side == 1 and lr.step / 2 or 0)
         end
       end
       if context.tree and spacing > 0 then
@@ -4805,7 +8019,21 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
               local nx, ny = -uy * out, ux * out
               local mx, my = (p[1] + q[1]) / 2 + nx * 8, (p[2] + q[2]) / 2 + ny * 8
               local street = roadNear(mx, my, shop and 18 or 6) ~= nil
-              if flats and not street and length >= 12 then
+              -- a block's mapped shop (the storefront experiment): the shop set along its span only
+              local spans = not shop and VEG.shopSpans(context.shopLinks and context.shopLinks[building.id], p, q, length)
+              if spans and roadNear(mx, my, 18) then
+                local step = math.max(8, spacing * 1.25)
+                for n, span in ipairs(spans) do
+                  local count = math.max(1, math.floor((span[2] - span[1]) / step))
+                  for e = 1, count do
+                    if ihash(seed, k, n * 16 + e, 7) % 100 < 60 * dense then
+                      place(seed, k * 100 + 50 + n * 4 + e, p, span[1] + (e - .5) * (span[2] - span[1]) / count, ux, uy, out,
+                        function(c) return .9 + c.near, true end, ground, 'poifront_' .. id .. '_' .. k .. '_' .. n .. '_' .. e,
+                        false, sets.shopFront)
+                    end
+                  end
+                end
+              elseif flats and not street and length >= 12 then
                 yardWalls[#yardWalls + 1] = {k, length}
                 local n = math.max(1, math.floor(length / 25))
                 for e = 1, n do
@@ -4895,6 +8123,9 @@ function VEG.streetProps(strips, lines, buildings, segmentBins, rect, spacing, l
     end
   end
   local reserved = {}
+  for _, p in ipairs(context.signs or NONE) do
+    band(reserved, {p[1] - .001, p[2]}, {p[1] + .001, p[2]}, 2.6)
+  end
   for index, c in ipairs(candidates) do
     local clear = true
     for _, q in ipairs(near(bins, c.ax, c.ay, c.bx, c.by, c.r + .4, 0)) do
@@ -5917,25 +9148,22 @@ local function liftDecks(roads, pause)
           for k, z in ipairs(want) do m.points[k][3] = z end
         end
       end
-      -- The united slab runs along the host and takes a mate only where it runs beside it. A
-      -- mate's end past the host's (a deck with neither slab nor its own asphalt and soffit there:
-      -- a hole) or the host's past a mate's (the slab's parapet ran diagonally across the mate's
-      -- lanes: a concrete wall in the lane at a motorway bridgeheads) by more than ROADS.united.ends:
-      -- such a group stays separate decks, each whole. (8 m of a mate past the host were let
-      -- through, and the host's ends were not checked.)
-      local loose, h = false, meta[host]
+      -- The united slab runs along the host and takes a mate only where it runs beside it: a
+      -- deck sticking out past the host's end would have neither slab nor (its own are
+      -- suppressed in a group) asphalt and soffit, a hole with the lane marks floating over it.
+      -- Such a group stays separate decks, each whole, at their own heights (the levelling
+      -- raised a deck to the other carriageway's, and the ramps after it).
+      -- A mate beside the host along its whole length stays one deck, though the host runs on
+      -- past it (the host's ends are not tested).
+      local loose = false
       for _, i in ipairs(list) do
         if i ~= host then
-          local m = meta[i]
-          local len = m.dist[#m.dist]
-          for s = 0, len + 4, 4 do
-            local x, y = pointAt(m, math.min(s, len))
-            if not project(h, x, y, ROADS.united.ends) then loose = true end
+          local m, out = meta[i], 0
+          for s = 0, m.dist[#m.dist], 4 do
+            local x, y = pointAt(m, s)
+            if not project(meta[host], x, y) then out = out + 4 end
           end
-          for _, s in ipairs({0, h.dist[#h.dist]}) do
-            local x, y = pointAt(h, s)
-            if not project(m, x, y, ROADS.united.ends) then loose = true end
-          end
+          if out > 8 then loose = true end
         end
       end
       if loose then
@@ -6117,7 +9345,7 @@ ROADS.seaFloor = {cut = 1, span = 200,
 -- a street class, or maxspeed <= urbanSpeed) always the gentle blend, flush with the sidewalk or kerb top.
 ROADS.section = {bank = {motorway = 1.5, trunk = 1.5, primary = 1.5, secondary = 1.5, tertiary = 1, unclassified = 1},
   bankOther = .5, fall = .12, slope = 1.5, roundMax = 3, roundHeight = 2, reach = 30, bands = 4, press = 2, clear = 0,
-  soft = {.5, 1}, gentle = 6, gentleMin = 2, urbanSpeed = 60, margin = .03,
+  soft = {.5, 1}, gentle = 6, gentleMin = 2, urbanSpeed = 60, margin = .03, box = math.cos(math.rad(45)),
   urbanClasses = {residential = true, living_street = true, service = true, pedestrian = true, road = true}}
 -- a street in a built-up area (no embankment or cutting faces beside it)
 function ROADS.section.urbanOf(tags)
@@ -7098,9 +10326,15 @@ function VEG.hedgePlant(ctx, c)
   return true
 end
 function VEG.hedgePlanter(ctx) return function(c) return VEG.hedgePlant(ctx, c) end end
+-- LuaJIT lets a function capture 60 upvalues: build() reaches these through tables it holds anyway.
+BLD.wallPoint, BLD.facadeScale, BLD.wallMaterial = wallPoint, facadeScale, wallMaterial
+BLD.pitchedRoof, BLD.footprintFrame = pitchedRoof, footprintFrame
+ROADS.trimLine, ROADS.simplify, ROADS.densifyWear = trimLine, simplify, densifyWear
+ROADS.liftDecks, ROADS.walkSides = liftDecks, walkSides
 
 local function build(cells, i, j, options)
   options = options or {}
+  BLD.withShops, BLD.withLandmarks = ROADS.extra(options, 'shops'), ROADS.extra(options, 'landmarks')
   local pause = options.pause or options.yield or function() end
   local size = options.tileSize or 500
   -- far: the 3 km ring. horizon: DEM-only past it. Both shape the ground like near (so the
@@ -7125,7 +10359,10 @@ local function build(cells, i, j, options)
   -- leaves the swept roads' furniture corridor (their own rails stand in) or at least their surface.
   local SW = ROADS.sweep and ROADS.swept.on and options.roads3 and not options.horizon and not options.vista
     and ROADS.sweep.plan(options.roads3, {rect = rect, classes = ROADS.sweep.CLASSES[ROADS.swept.mode] or ROADS.sweep.CLASSES.fast,
-      tileKey = key, lift = ROAD_LIFT, pause = pause}) or nil
+      tileKey = key, pause = pause,
+      -- conformal ground (ROADS.conformal): the swept fast roads cut the ground, with their own lift and ground drop
+      lift = ROADS.conformal and ROADS.conformal.wanted(options, terrain, FINE_DEM.grid) and ROADS.conformal.TUNE.lift or ROAD_LIFT,
+      conformal = ROADS.conformal and ROADS.conformal.wanted(options, terrain, FINE_DEM.grid) and ROADS.conformal.TUNE.classes or nil}) or nil
   if SW then
     local copy, kept, lines = {}, {}, {}
     for name, list in pairs(lists) do copy[name] = list end
@@ -7166,15 +10403,19 @@ local function build(cells, i, j, options)
   -- decks' clearance, the floors over water, the class grades and radii, and couple the carriageways) keeps
   -- them as exported, so its roads stay on the ground grid made from the same heights.
   if not options.heightPipeline then
-    local packed = ROADS.pairs.classes and ROADS.pairSnapshot(lists.roads)
-    ROADS.liftFloors(lists.roads, function(x, y) return ROADS.terrainAt(terrain, x, y) end,
-      type(options.seaLevel) == 'number' and options.seaLevel + SEA_ABOVE or nil, pause)
-    ROADS.alignProfiles(lists.roads, pause)
-    -- only with native.lua's terrain ring and cellformat's FAST_MARGIN (options.terrainRing): without them two
-    -- tiles could solve one hump from different ways and meet with a step
-    if options.terrainRing then ROADS.alignHumps(lists.roads, pause) end
-    if packed then ROADS.pairCarriageways(lists.roads, packed, pause) end
-    liftDecks(lists.roads, pause)
+    -- the vertical alignment of the runtime (ROADS.extras.roadProfiles, off by default: upstream's packs
+    -- keep their exported profiles apart from the deck pass below)
+    if ROADS.extra(options, 'roadProfiles') then
+      local packed = ROADS.pairs.classes and ROADS.pairSnapshot(lists.roads)
+      ROADS.liftFloors(lists.roads, function(x, y) return ROADS.terrainAt(terrain, x, y) end,
+        type(options.seaLevel) == 'number' and options.seaLevel + SEA_ABOVE or nil, pause)
+      ROADS.alignProfiles(lists.roads, pause)
+      -- only with native.lua's terrain ring and cellformat's FAST_MARGIN (options.terrainRing): without them two
+      -- tiles could solve one hump from different ways and meet with a step
+      if options.terrainRing then ROADS.alignHumps(lists.roads, pause) end
+      if packed then ROADS.pairCarriageways(lists.roads, packed, pause) end
+    end
+    ROADS.liftDecks(lists.roads, pause)
   end
   local roads, scene = collector(rect, key, 'road', pause), collector(rect, key, layerName, pause, distant and MIXED_TRIS or nil)
   local roadDecor, sceneDecor = collector(rect, key .. '_marks', 'road', pause), collector(rect, key .. '_cars', 'scene', pause)
@@ -7194,6 +10435,7 @@ local function build(cells, i, j, options)
   -- mark(name): the stage that just ended (the road quality bench times them)
   local mark = options.mark or function() end
   local look = type(options.look) == 'table' and options.look or NONE
+  BLD.packBlock = BLD.blockOf(options.country)
   local postsoviet = look.block == 'postsoviet' or BLD.postsoviet[tostring(options.country or '')] or false
   local function lookOf(slot)
     local value = look[slot]
@@ -7207,6 +10449,9 @@ local function build(cells, i, j, options)
   -- a junction takes the material of its most important road
   local function roadMaterial(tags)
     local grade = roadGrade(tags)
+    if grade == 1 and (tags.surface == 'sett' or tags.surface == 'cobblestone' or tags.surface == 'unhewn_cobblestone') and BLD.drawnArt() then
+      return 'road_sett', grade
+    end
     if grade ~= 0 then return ROAD_GRADE_MAT[grade], grade end
     return ROADS.rankOf(tags) >= 4.5 and majorRoad or minorRoad, grade
   end
@@ -7239,10 +10484,17 @@ local function build(cells, i, j, options)
   -- the cross-section (ROADS.section) instead of the pull: a fine grid from the new height pipeline
   tune.section = options.heightPipeline and gridStep <= FINE_DEM.grid and not options.vista or false
   if options.terrainStep then tune.terrainStep = options.terrainStep end
+  tune.conformal = ROADS.conformal ~= nil and ROADS.conformal.wanted(options, terrain, FINE_DEM.grid)
+  if tune.conformal then
+    -- the road lies lower and the ground higher: no ground under the roads that z-fights with them any more
+    tune.groundDrop, tune.roadLift = ROADS.conformal.TUNE.drop, ROADS.conformal.TUNE.lift
+  end
   for name, value in pairs(options.tune or NONE) do tune[name] = value end
   if tune.section then tune.pullZero = math.max(tune.pullZero, ROADS.section.reach) end
   tune.sectionClear = tune.sectionClear or ROADS.section.clear
   local lift, step = tune.roadLift, tune.terrainStep
+  -- the footprints that cut the lattice (near tiles; ROADS.conformal.new), filled once the roads are drawn
+  tune.cf = tune.conformal and SW and not distant and ROADS.conformal.new(step, rect) or nil
   -- A road shapes the ground up to pullZero from its edge, and the ground lattice reaches one
   -- step past the tile (its border nodes are lowered for roads in the neighbour's cells too).
   local reach = tune.pullZero + step + 5
@@ -7288,7 +10540,8 @@ local function build(cells, i, j, options)
       local road = SW.road[p.S]
       if not road then road = {id = 'sw:' .. p.S.id, tags = p.S.tags, width = p.width, swept = true}; SW.road[p.S] = road end
       local segment = {a = a, b = b, dx = dx, dy = dy, len2 = len2, width = p.width, road = road, tags = p.S.tags, surface = p.surface,
-        bank = ROADS.section.bankOf(p.S.tags), urban = ROADS.section.urbanOf(p.S.tags)}
+        bank = ROADS.section.bankOf(p.S.tags), urban = ROADS.section.urbanOf(p.S.tags),
+        conformal = tune.conformal and ROADS.conformal.stroke(p.S) or nil}
       segments[#segments + 1] = segment
       local margin = p.width / 2 + tune.pullZero
       for by = math.floor((bounds[2] - margin) / 50), math.floor((bounds[4] + margin) / 50) do
@@ -7347,11 +10600,6 @@ local function build(cells, i, j, options)
     local z01, z11 = heights[row + grid.nx] or 0, heights[row + grid.nx + 1] or 0
     return (z00 * (1 - tx) + z10 * tx) * (1 - ty) + (z01 * (1 - tx) + z11 * tx) * ty
   end
-  -- the natural ground as the lattice draws it (the cross-section's skirts end on it)
-  local function drawnDem(x, y)
-    local z = demAt(x, y)
-    return z and z - tune.groundDrop
-  end
   local function rawHeight(x, y)
     local z = demAt(x, y)
     if z == nil then return 0 end
@@ -7368,10 +10616,11 @@ local function build(cells, i, j, options)
     local nearby = segmentBins[(floor(x / 50) + 32768) * 65536 + floor(y / 50) + 32768] or NONE
     if tune.section then
       -- the cross-section of every ground road round the point: on a road's footprint its height (the nearest
-      -- centre line), else the highest embankment, else the deepest cutting, else the natural ground
+      -- centre line), else the highest embankment, else the deepest cutting, else the natural ground. A conformal
+      -- road shapes nothing here: its bands are drawn, the ground is cut by them and stays the natural ground.
       local fill, cut, inside, insideD = 0, 0, nil, math.huge
       for _, segment in ipairs(nearby) do
-        if segment.surface then
+        if segment.surface and not segment.conformal then
           local a = segment.a
           local t = math.max(0, math.min(1, ((x - a[1]) * segment.dx + (y - a[2]) * segment.dy) / segment.len2))
           local px, py = a[1] + t * segment.dx, a[2] + t * segment.dy
@@ -7402,7 +10651,7 @@ local function build(cells, i, j, options)
     end
     local sa, sz, pull = 0, 0, 0
     for _, segment in ipairs(nearby) do
-      if segment.surface then
+      if segment.surface and not segment.conformal then
         local a = segment.a
         local t = math.max(0, math.min(1, ((x - a[1]) * segment.dx + (y - a[2]) * segment.dy) / segment.len2))
         local px, py = a[1] + t * segment.dx, a[2] + t * segment.dy
@@ -7483,6 +10732,12 @@ local function build(cells, i, j, options)
   -- The ground as drawn: each lattice cell is two triangles split along its (x0, y0)-(x1, y1)
   -- diagonal (the collector fans a quad from its first corner).
   local function ground(x, y)
+    local cf = tune.cf
+    if cf and cf.ready then
+      -- conformal ground, after the road layer: on a swept fast road or its bands the surface drawn there
+      local z = cf:surface(x, y)
+      if z then return z end
+    end
     local k, u, v = lattice(x, y)
     if k then
       local a, b, c, d = nodes[k], nodes[k + 4096], nodes[k + 1], nodes[k + 4097]
@@ -7715,7 +10970,12 @@ local function build(cells, i, j, options)
   -- consecutive quads share their edge vertices (no bevels, no gaps on bends), on every tile.
   -- asphaltCut: the drawn asphalt's own cutters (at, outside), a table so that no local is added (the 200 limit);
   -- asphaltCut.walks: the same bins for the drawn kerbs and sidewalks (asphaltCut.walk, asphaltCut.cut)
-  local strips, asphaltCut, asphaltBins = {}, {walks = {}}, {}
+  local strips, asphaltCut, asphaltBins = {}, {walks = {}, shelf = {}}, {}
+  -- the natural ground as the lattice draws it (the cross-section's skirts end on it)
+  function asphaltCut.dem(x, y)
+    local z = demAt(x, y)
+    return z and z - tune.groundDrop
+  end
   -- twice the signed area (counter-clockwise > 0)
   local function area2(poly)
     local s = 0
@@ -7942,6 +11202,7 @@ local function build(cells, i, j, options)
       end
       ::swept_plate::
     end
+    lists.signMouths, lists.signOrder = mouths, order   -- SIGNS.plan, in the scene
   end
   local trimmed = {}
   for _, road in ipairs(lists.roads) do
@@ -7955,11 +11216,11 @@ local function build(cells, i, j, options)
     end
     -- the road stops at its junction mouths; the junction's own surface is between
     local cuts, full = cutsOf[road], points
-    if cuts and #points >= 2 and (cuts[1] > 0 or cuts[2] > 0) then points = trimLine(points, cuts[1], cuts[2]) end
-    if tune.simplifyXY > 0 then points = simplify(points, tune.simplifyXY, tune.simplifyZ) end
+    if cuts and #points >= 2 and (cuts[1] > 0 or cuts[2] > 0) then points = ROADS.trimLine(points, cuts[1], cuts[2]) end
+    if tune.simplifyXY > 0 then points = ROADS.simplify(points, tune.simplifyXY, tune.simplifyZ) end
     if #points >= 2 and boundsTouch(rect, ringBounds({points}), width / 2 + stripReach) then
       local grade = roadGrade(tags)
-      points = densifyWear(points, grade)
+      points = ROADS.densifyWear(points, grade)
       local normals, hw = {}, width / 2
       for k = 1, #points do
         local tx, ty = 0, 0
@@ -7999,7 +11260,7 @@ local function build(cells, i, j, options)
       end
       -- The sides a segment has sidewalks on: the tags', or for an untagged street only where
       -- it is built up (walkAt).
-      local sides, walk = walkSides(tags), {}
+      local sides, walk = ROADS.walkSides(tags), {}
       for k = 1, #points - 1 do walk[k] = walkAt(tags, sides, points[k], points[k + 1], builtAt) end
       -- start: metres of the road cut off before points[1] (street props keep the road's lattice);
       -- joints: its ends that run on into the next way (no junction there)
@@ -8126,6 +11387,39 @@ local function build(cells, i, j, options)
         end
       end
     end
+    -- ROADS.extras.railsOffDecks off: a deck's plain approach (the one other way at its end node) does not hold the first metres
+    -- of the parapet back. Its end counts as a surface within the parapet line's reach (half a width and a half metre round
+    -- the end point), so the parapet used to start a piece or two past the deck's end, and a rail joining it had a gap.
+    -- approach[deck][way] = true
+    local approach
+    if not ROADS.extra(options, 'railsOffDecks') then
+      approach = {}
+      local count = {}
+      for _, st in ipairs(strips) do
+        local nodes = st.road and st.road.nodes or NONE
+        for e = 1, 2 do
+          local id = nodes[e] ~= nil and tostring(nodes[e])
+          if id then count[id] = (count[id] or 0) + 1 end
+        end
+      end
+      for _, st in ipairs(strips) do
+        local nodes = st.road and st.road.nodes or NONE
+        if ROADS.bridge(st.tags) then
+          for e = 1, 2 do
+            local id = nodes[e] ~= nil and tostring(nodes[e])
+            if id and count[id] == 2 then
+              for _, other in ipairs(strips) do
+                local on = other.road and other.road.nodes or NONE
+                if other ~= st and not ROADS.bridge(other.tags) and (tostring(on[1]) == id or tostring(on[2]) == id) then
+                  approach[st] = approach[st] or {}
+                  approach[st][other] = true
+                end
+              end
+            end
+          end
+        end
+      end
+    end
     -- own: a strip, or a set of strips (a united deck's carriageways)
     local function onOtherSurface(own, p)
       if SW and ROADS.sweep.onSurface(SW, p[1], p[2], p[3] - lift, .5, 1.5) then return true end
@@ -8136,12 +11430,15 @@ local function build(cells, i, j, options)
           local dx, dy = b[1] - a[1], b[2] - a[2]
           local len2 = dx * dx + dy * dy
           if len2 > EPS then
-            local t = math.max(0, math.min(1, ((p[1] - a[1]) * dx + (p[2] - a[2]) * dy) / len2))
+            local raw = ((p[1] - a[1]) * dx + (p[2] - a[2]) * dy) / len2
+            local t = math.max(0, math.min(1, raw))
             local d = math.sqrt((p[1] - a[1] - t * dx) ^ 2 + (p[2] - a[2] - t * dy) ^ 2)
             local side = (p[1] - a[1]) * -dy + (p[2] - a[2]) * dx >= 0 and 1 or -1
             local reach = other.hw + (other.walk[k][side] and tune.sidewalk or 0) + .5
             local z = (a[3] or 0) + t * ((b[3] or 0) - (a[3] or 0)) + lift
-            if d < reach and math.abs(z - p[3]) < 1.5 then return true end
+            -- past the end of the deck's plain approach: not on it
+            local past = approach and approach[own] and approach[own][other] and (raw <= 0 and k == 1 or raw >= 1 and k == #other.points - 1)
+            if d < reach and math.abs(z - p[3]) < 1.5 and not past then return true end
           end
         end
       end
@@ -8187,6 +11484,15 @@ local function build(cells, i, j, options)
                   local e = s
                   while e < n and free[e + 1] do e = e + 1 end
                   local f0, f1 = (s - 1) / n, e / n
+                  -- strip.parapetA[sign] / strip.parapetB[sign]: m from the strip's start / end to the first / last piece (ROADS.joinDecks)
+                  if k == 1 then
+                    strip.parapetA = strip.parapetA or {}
+                    strip.parapetA[sign] = strip.parapetA[sign] or f0 * math.sqrt(dx * dx + dy * dy)
+                  end
+                  if k == #points - 1 then
+                    strip.parapetB = strip.parapetB or {}
+                    strip.parapetB[sign] = (1 - f1) * math.sqrt(dx * dx + dy * dy)
+                  end
                   -- the edge face, outside, from the parapet's top to the soffit
                   face({along(outer, top, f0, 0), along(outer, top, f1, 0),
                     along(outer, low, f1, (top - low) / deck.repeatU), along(outer, low, f0, (top - low) / deck.repeatU)}, ox, oy, 0,
@@ -8235,7 +11541,7 @@ local function build(cells, i, j, options)
     ROADS.unitedDecks({strips = strips, rect = rect, ground = ground, face = face, roads = roads,
       lift = lift, pause = pause, sidewalk = tune.sidewalk, onOther = onOtherSurface, under = sweptUnder})
     ROADS.substructure({strips = strips, rect = rect, ground = ground, face = face, pause = pause, sidewalk = tune.sidewalk,
-      under = sweptUnder})
+      under = sweptUnder, join = not ROADS.extra(options, 'railsOffDecks')})
     ROADS.embankmentRails({strips = strips, rect = rect, dem = #terrain > 0 and demAt or nil, face = face, pause = pause, sidewalk = tune.sidewalk,
       crowded = function(x, y, road, clear)
         for _, segment in ipairs(segmentBins[(floor(x / 50) + 32768) * 65536 + floor(y / 50) + 32768] or NONE) do
@@ -8495,6 +11801,8 @@ local function build(cells, i, j, options)
   local cutOps = 0
   local function subtract(poly, skip, bins)
     bins = bins or asphaltBins
+    -- a piece under 1e-4 m2 is dropped; where the ground is cut by the roads (conformal) nothing under a band may be lost
+    local minArea = tune.cf and ROADS.conformal.TUNE.sliver or 2e-4
     local pieces = {poly}
     local box = ringBounds({poly})
     local pccw = area2(poly) > 0
@@ -8516,14 +11824,13 @@ local function build(cells, i, j, options)
                 for k = 1, #c do
                   local a, b = c[k], c[k % #c + 1]
                   local inner, outer = split(rest, a[1], a[2], b[1], b[2], ccw)
-                  if #outer >= 3 and math.abs(area2(outer)) > 2e-4 then out[#out + 1] = outer end
+                  if #outer >= 3 and math.abs(area2(outer)) > minArea then out[#out + 1] = outer end
                   rest = inner
-                  if #rest < 3 or math.abs(area2(rest)) <= 2e-4 then break end
+                  if #rest < 3 or math.abs(area2(rest)) <= minArea then break end
                 end
               end
               cutOps = cutOps + 1
-              -- 256 cuts of a town's sidewalks ran 8 ms in one piece (generator_budget.py)
-              if cutOps % 64 == 0 then pause() end
+              if cutOps % 32 == 0 then pause() end
             end
             if cut then pieces = out end
             if #pieces == 0 then return pieces end
@@ -8679,7 +11986,7 @@ local function build(cells, i, j, options)
             local bank = ROADS.section.bankOf(strip.tags)
             -- the town rule from the tags alone, as the lattice takes it (a sidewalk drawn from the building
             -- density can differ between neighbouring tiles)
-            local skirt = ROADS.section.skirt(edge, k, sign, outer, bank, drawnDem, tune.vergeSink, tune.sectionClear,
+            local skirt = ROADS.section.skirt(edge, k, sign, outer, bank, asphaltCut.dem, tune.vergeSink, tune.sectionClear,
               ROADS.section.urbanOf(strip.tags))
             -- kept for the press when it reaches the lattice nodes round the tile (a skirt in the neighbour
             -- tile lowers the shared border nodes there too, so both tiles must press it), drawn when it
@@ -8753,15 +12060,15 @@ local function build(cells, i, j, options)
             for _, offset in ipairs({-right, -hw, -hw * .5, 0, hw * .5, hw, left}) do
               press(x + nx * offset, y + ny * offset, z)
             end
-            pressed = pressed + 7
-            if pressed >= 256 then pressed = 0; pause() end
+            pressed = pressed + 1
+            if pressed % 16 == 0 then pause() end
           end
         end
       end
     end
   end
   for index, plate in ipairs(plates) do
-    if index % 32 == 0 then pause() end
+    if index % 8 == 0 then pause() end
     local c = plate.centre
     press(c[1], c[2], c[3] - tune.margin)
     for k, m in ipairs(plate.mids or NONE) do
@@ -8775,16 +12082,16 @@ local function build(cells, i, j, options)
       press((p[1] + q[1] + c[1]) / 3, (p[2] + q[2] + c[2]) / 3, (p[3] + q[3] + c[3]) / 3 - tune.margin)
     end
   end
-  if SW then ROADS.sweep.press(SW, press, tune.margin) end
-  local pathShelf = {}   -- bundle7 (P1): the footways and cycleways lifted to a raised swept road (ROADS.pathShelves)
+  if SW then ROADS.sweep.press(SW, press, tune.margin, tune.conformal and ROADS.conformal.stroke or nil) end
+  asphaltCut.shelf = {}   -- bundle7 (P1): the footways and cycleways lifted to a raised swept road (ROADS.pathShelves)
   if tune.section then
     -- the swept roads' verges and slopes, once (pressed here, drawn with the other verges)
     if SW then
       SW.skirts = {}
       ROADS.sweep.verges(SW, 1, tune.vergeSink, function(quad, S, s)
         local bank = ROADS.section.bankOf(S and S.tags)
-        for band, poly in ipairs(ROADS.section.sweptSkirt(quad, bank, drawnDem, tune.sectionClear, ROADS.section.urbanOf(S and S.tags))) do
-          SW.skirts[#SW.skirts + 1] = {poly, S, s, band = band}
+        for band, poly in ipairs(ROADS.section.sweptSkirt(quad, bank, asphaltCut.dem, tune.sectionClear, ROADS.section.urbanOf(S and S.tags))) do
+          SW.skirts[#SW.skirts + 1] = {poly, S, s, band = band, endA = quad.endA, endB = quad.endB}
         end
       end)
     end
@@ -8816,7 +12123,9 @@ local function build(cells, i, j, options)
     for _, strip in ipairs(strips) do
       for _, item in ipairs(strip.verges or NONE) do pressPoly(item[1]) end
     end
-    for _, item in ipairs(SW and SW.skirts or NONE) do pressPoly(item[1]) end
+    for _, item in ipairs(SW and SW.skirts or NONE) do
+      if not (tune.conformal and ROADS.conformal.stroke(item[2])) then pressPoly(item[1]) end
+    end
     -- bundle7 (P1): the paths beside raised swept roads, their fill to the road and their banks: drawn with the
     -- skirts, pressed like them (after every other press: the paths read the ground as it now is)
     if SW and not distant and not options.horizon then
@@ -8839,9 +12148,9 @@ local function build(cells, i, j, options)
         end
         if bx then return bx, by, bz, bestD end
       end
-      local lifted = ROADS.pathShelves({lines = lists.lines, swept = SW, rect = rect, ground = ground, dem = drawnDem,
+      local lifted = ROADS.pathShelves({lines = lists.lines, swept = SW, rect = rect, ground = ground, dem = asphaltCut.dem,
         edge = roadEdge, clear = tune.sectionClear, pause = pause})
-      pathShelf = lifted.shelves
+      asphaltCut.shelf = lifted.shelves
       for _, item in ipairs(lifted.skirts) do
         SW.skirts[#SW.skirts + 1] = item
         pressPoly(item[1])
@@ -8866,9 +12175,14 @@ local function build(cells, i, j, options)
           local upper, lower2 = split(piece, cx, cy, cx + step, cy + step, true)
           for _, half in ipairs({upper, lower2}) do
             if #half >= 3 and math.abs(area2(half)) > 2e-4 then
-              local out = {}
-              for n, q in ipairs(half) do out[n] = {q[1], q[2], ground(q[1], q[2]) + above} end
-              scene.polygon(kind, out, true)
+              -- conformal ground: nothing is draped over the fast roads and their bands (no ground there)
+              local cf = tune.cf
+              local ring = cf and cf:cell(gx, gy) and ROADS.conformal.ring(half)
+              for _, part in ipairs(ring and cf:cut(ring, gx, gy) or {half}) do
+                local out = {}
+                for n, q in ipairs(part) do out[n] = {q[1], q[2], ground(q[1], q[2]) + above} end
+                scene.polygon(kind, out, true)
+              end
             end
           end
         end
@@ -8972,6 +12286,8 @@ local function build(cells, i, j, options)
   -- Edge decals over a carriageway's edge where it has no sidewalk: grass creeping onto the
   -- asphalt, or a dirt shoulder along main roads (and wherever the look's verge is bare).
   -- Graded roads are dirt already. Decoration only: no collision (collision.lua QUIET).
+  local edgeOps = 0
+  do
   local edgesOn = visualRoads and decalsPresent()
   local function edgeKind(strip)
     if not edgesOn or strip.grade > 1 or strip.tags.service == 'parking_aisle' then return nil end
@@ -9006,7 +12322,7 @@ local function build(cells, i, j, options)
   -- verge, slope and edge pieces emitted since the last pause point: each is cut by the asphalt round it
   -- and shaded from the ground, and the 64 collector triangles between pause points were up to 32 ms of
   -- them on a far tile, 6 ms on a near one (generator_budget.py)
-  local edgeOps = 0
+  tune.endWalls = {}
   for _, strip in ipairs(strips) do
     local kind = edgeKind(strip)
     for _, item in ipairs(strip.verges or NONE) do
@@ -9028,7 +12344,10 @@ local function build(cells, i, j, options)
       end
     end
   end
+  end  -- the edge decals' helpers go out of scope here (build() is at LuaJIT's 200 locals)
 
+  -- a band steeper than ROADS.section.box is drawn box mapped (a flat top-down mapping streaks a steep face)
+  for _, c in ipairs({roads, scene}) do c.hooks.box = ROADS.section.box end
   for _, item in ipairs(SW and SW.skirts or NONE) do
     local quad, S, s = item[1], item[2], item[3]
     if vergeWanted(ringBounds({quad})) then
@@ -9038,11 +12357,63 @@ local function build(cells, i, j, options)
         quad[2][3], quad[3][3] = ground(quad[2][1], quad[2][2]), ground(quad[3][1], quad[3][2])
         quad[2][9], quad[3][9] = 1, 1
       end
+      if tune.cf and ROADS.conformal.stroke(S) then
+        -- a fast road's band cuts the ground. Its toe edge gets a corner at every lattice line it crosses, on the
+        -- ground there, so the ground pieces beside it end on the band's own vertices
+        if quad.toe then
+          quad = ROADS.conformal.withToe(quad, step)
+          for k = 3, #quad - 2 do quad[k][3] = ground(quad[k][1], quad[k][2]) end
+        end
+      end
       local skip = S and function(entry) return entry.road == S and entry.index and math.abs(entry.index - s) < 25 end or nil
-      if tune.vergeCut > 0 then emit(distant and scene or roads, vergeKind, quad, skip, true, true)
+      if tune.vergeCut > 0 then
+        -- (a twisted conformal band is cut as the two triangles it is drawn as)
+        local cuts = tune.cf and ROADS.conformal.stroke(S)
+        for _, part in ipairs(cuts and ROADS.conformal.pieces(quad) or {quad}) do
+          local drawn = emit(distant and scene or roads, vergeKind, part, skip, true, true)
+          -- the ground is cut by what is drawn of the band (the rest lies under a road or a sidewalk that is drawn)
+          if cuts then for _, piece in ipairs(drawn) do tune.cf:add(piece) end end
+          if cuts and ROADS.conformal.TUNE.walls and (item.endA or item.endB) and not distant then
+            -- the band ends at a bridge or a tunnel: the ground goes on past it at its own height, so a wall closes the
+            -- end, from the band down or up to what lies below. Only along the DRAWN band: the part of the end line that
+            -- lies under another road (an embankment that a road passes under) is no end, and a wall there would stand
+            -- in it. Collected here, built when every footprint is known (ROADS.conformal.buildWalls below)
+            local n = #quad
+            local mid = function(a, b) return {(a[1] + b[1]) / 2, (a[2] + b[2]) / 2} end
+            local ma, mb = mid(quad[1], quad[2]), mid(quad[n], quad[n - 1])
+            for _, e in ipairs({{item.endA, quad[1], quad[2], ma, mb}, {item.endB, quad[n], quad[n - 1], mb, ma}}) do
+              if e[1] then
+                for _, piece in ipairs(drawn) do
+                  for _, span in ipairs(ROADS.conformal.endSpans(piece, e[2], e[3])) do
+                    tune.endWalls[#tune.endWalls + 1] = {span[1], span[2], e[4][1] - e[5][1], e[4][2] - e[5][2]}
+                  end
+                end
+              end
+            end
+          end
+        end
       elseif visualRoads then roads.polygon(vergeKind, quad, true)
       elseif distant then scene.polygon(vergeKind, quad, true) end
     end
+  end
+  for _, c in ipairs({roads, scene}) do c.hooks.box = nil end
+  if tune.cf then
+    -- and the fast roads' carriageway rows (bridge decks and tunnels are other levels: the ground stays under them)
+    -- the bridge decks' and tunnels' rows go to a second index: the walls between stacked footprints keep out of them
+    tune.cfDecks = ROADS.conformal.new(step, rect, true)
+    ROADS.sweep.footprints(SW, function(poly, S, s, bridge, tunnel)
+      if ROADS.conformal.stroke(S) or (S and S.swept) then
+        if bridge or tunnel then tune.cfDecks:add(poly)
+        elseif ROADS.conformal.stroke(S) then tune.cf:add(poly, true) end
+      end
+    end)
+  end
+  if tune.cf and #tune.endWalls > 0 then
+    -- the end walls of the bands, now that every footprint (carriageways, other roads' bands) is known
+    ROADS.conformal.buildWalls(tune.endWalls, tune.cf, ground, function(wall) roads.polygon(ROADS.wing.material, ROADS.conformal.wallUV(wall, ROADS.deck.repeatU)) end, pause)
+  end
+  if tune.cf and ROADS.conformal.TUNE.walls and ROADS.conformal.TUNE.stack and not distant then
+    ROADS.conformal.stackWalls(tune.cf, function(wall) roads.polygon(ROADS.wing.material, ROADS.conformal.wallUV(wall, ROADS.deck.repeatU)) end, tune.cfDecks, pause, ground)
   end
   if SW and tune.shoulder > 0 and not tune.section then
     ROADS.sweep.verges(SW, tune.shoulder, tune.vergeSink, function(quad, S, s)
@@ -9101,6 +12472,9 @@ local function build(cells, i, j, options)
     end
   end
 
+  if visualRoads and not distant and options.experimentalDetail and coversPresent() then
+    ROADS.covers(strips, rect, lift, roadDecor, pause, patchesPresent())
+  end
   if visualRoads and not distant then
     ROADS.aprons({roads = lists.roads, rect = rect, lift = lift, pause = pause,
       polygon = function(material, poly, up) roads.polygon(material, poly, up) end})
@@ -9122,6 +12496,11 @@ local function build(cells, i, j, options)
     DETAIL.paint({roads = lists.roads, points = lists.points, stars = stars, cutsOf = cutsOf, rect = rect,
       kinds = DETAIL.kinds, z = lift + DECAL.markLift,
       emit = function(poly) roadDecor.polygon(markKind, poly, 'flat') end, pause = pause})
+    if options.experimentalDetail then
+      DETAIL.arrows({roads = lists.roads, cutsOf = cutsOf, rect = rect, z = lift + DECAL.markLift,
+        report = type(options.detailReport) == 'table' and options.detailReport or nil,
+        emit = function(poly) roadDecor.polygon(markKind, poly, 'flat') end, pause = pause})
+    end
   end
   mark('marks')
   -- OSM has no sea polygons (only coastlines); the DEM's sea is flat at the region's seaLevel
@@ -9137,11 +12516,11 @@ local function build(cells, i, j, options)
     end
     if dry then sea = nil end
   end
-  local seaStep = distant and size / 5 or size / count
-  local seaCount = math.max(1, math.floor(size / seaStep + .5))
   -- only the open sea: ROADS.seaQuads (low land and its roads stay dry)
   local seaQuads, seaAll = {}, false
   if sea then
+    local seaStep = distant and size / 5 or size / count
+    local seaCount = math.max(1, math.floor(size / seaStep + .5))
     seaQuads, seaAll = ROADS.seaQuads({rect = rect, count = seaCount, sea = sea, dem = rawHeight, cover = coverAt,
       segmentBins = segmentBins, pause = pause, ground = ground, exact = not distant,
       -- shore shaping (ROADS.seaQuads): the lattice node at (x, y) drawn at height z
@@ -9190,12 +12569,32 @@ local function build(cells, i, j, options)
       east0, east1 = b, c
       local gkey = ((cx + 32768) * 65536 + cy + 32768) * 2
       local tx, ty = (x0+x1+x1)/3, (y0+y0+y1)/3
-      roads.polygon(surfaceKind(tx, ty, claims[gkey] or backgroundKind(tx, ty)), {a, b, c}, true)
-      tx, ty = (x0+x1+x0)/3, (y0+y1+y1)/3
-      roads.polygon(surfaceKind(tx, ty, claims[gkey + 1] or backgroundKind(tx, ty)), {a, c, d}, true)
+      local cf = tune.cf
+      if cf and cf:cell(cx, cy) then
+        -- conformal ground: the pieces of the two triangles outside the fast roads' footprints, on the lattice plane
+        local kind1 = surfaceKind(tx, ty, claims[gkey] or backgroundKind(tx, ty))
+        local kind2 = surfaceKind((x0+x1+x0)/3, (y0+y1+y1)/3, claims[gkey + 1] or backgroundKind((x0+x1+x0)/3, (y0+y1+y1)/3))
+        for half = 1, 2 do
+          local p, q, r = a, half == 1 and b or c, half == 1 and c or d
+          for _, piece in ipairs(cf:cut({{p[1], p[2]}, {q[1], q[2]}, {r[1], r[2]}}, cx, cy)) do
+            local out = {}
+            for n, v in ipairs(piece) do
+              local z = ROADS.conformal.planeZ(p, q, r, v[1], v[2])
+              out[n] = {v[1], v[2], z}
+              out[n][6], out[n][7], out[n][8] = groundNormal(v[1], v[2])
+            end
+            roads.polygon(half == 1 and kind1 or kind2, out, true)
+          end
+        end
+      else
+        roads.polygon(surfaceKind(tx, ty, claims[gkey] or backgroundKind(tx, ty)), {a, b, c}, true)
+        tx, ty = (x0+x1+x0)/3, (y0+y1+y1)/3
+        roads.polygon(surfaceKind(tx, ty, claims[gkey + 1] or backgroundKind(tx, ty)), {a, c, d}, true)
+      end
     end
     pause()
   end
+  if tune.cf then tune.cf.ready = true end
   local function manifest(collector, layer)
     local mats, total = {}, 0
     for material in pairs(collector.used) do mats[#mats + 1] = material end
@@ -9241,6 +12640,7 @@ local function build(cells, i, j, options)
     for material in pairs(roadDecor.used) do roads.used[material] = true end
     if SW and visualRoads then
       local items, used = ROADS.sweep.items(SW, {tileKey = key, markKind = markKind, pause = pause, roadScale = ROADS.swept.scale,
+        railLook = ROADS.railLook(),
         material = function(tags) return (roadMaterial(tags)) end, deckDepth = ROADS.deckDepth, deckMaterial = ROADS.deckMaterial,
         dem = #terrain > 0 and demAt or nil})
       for _, item in ipairs(items) do roads.items[#roads.items + 1] = item end
@@ -9424,11 +12824,16 @@ local function build(cells, i, j, options)
     end
   end
   mark('areas')
+  -- Shops and fuel stations (BLD.SHOP): the mapped points by bin, the buildings their sites
+  -- hold, the roofs over pumps, the pylons
+  local shops = {points = {}, own = {}, info = {}, roofs = {}, venue = {}, stands = {}}
+  if decor and not distant and BLD.withShops then BLD.shopSites(shops, lists, rect, scene, ground, segmentBins, pause) end
+  shops.links = decor and BLD.withShops and options.experimentalShopfront and not options.far and BLD.shopLinks(lists, options, pause) or nil
   for _, building in ipairs(decor and lists.buildings or NONE) do
     local rings, tags = building.rings or {}, building.tags or {}
     local exterior = cleanRing(rings[1])
-    if #exterior >= 3 and ringsTouch(rings, rect) then
-      local footprint, h = math.abs(area2(exterior)) / 2, hash(tostring(building.id or ''))
+    if #exterior >= 3 and not tags.e2r_outline and ringsTouch(rings, rect) then
+      local footprint, h = math.abs(area2(exterior)) / 2, hash(tostring(tags.e2r_of or building.id or ''))
       -- Buildings can cross source-cell boundaries. Their full exported footprint Z
       -- gives both tiles the same datum even when the centroid's DEM cell is absent.
       local sourceLow, sourceSum, sourceCount = math.huge, 0, 0
@@ -9444,15 +12849,50 @@ local function build(cells, i, j, options)
       for _, p in ipairs(exterior) do low, cx, cy = math.min(low, ground(p[1], p[2])), cx + p[1], cy + p[2] end
       local base = sourceCount > 0 and sourceSum / sourceCount or ground(cx / #exterior, cy / #exterior)
       if sourceCount > 0 then low = sourceLow end
-      local height = math.max(2.2, math.min(850, BLD.height(building, tags, footprint, h)))
+      local height = BLD.partWalls(math.max(2.2, math.min(850, BLD.height(building, tags, footprint, h))), tags, footprint, options.far)
       local lifted = (building.minHeight or number(tags.min_height, 0)) > 0
       local bottom = lifted and base + (building.minHeight or number(tags.min_height, 0)) or low - .3
-      local top, kind = base + height, wallMaterial(building, look, height)
+      local top, kind = base + height, BLD.wallMaterial(building, look, height, footprint)
+      -- building=roof stands open on columns (BLD.shopCanopy); a canopy over pumps clears a
+      -- lorry unless OSM gives its height
+      local open = BLD.withShops and tags.building == 'roof' and not options.far
+      if open and shops.roofs[building] and not tags.height then
+        height = math.max(height, tags['building:levels'] and BLD.SHOP.canopy.levels or BLD.SHOP.canopy.height)
+        top = base + height
+      end
+      if BLD.withShops and not distant and not open and height >= 2.2 then
+        local own, points, box = shops.own[building] or BLD.shopCell(nil, tags), {}, ringBounds(rings)
+        for bx = math.floor(box[1] / 100), math.floor(box[3] / 100) do
+          for by = math.floor(box[2] / 100), math.floor(box[4] / 100) do
+            for _, poi in ipairs(shops.points[bx * 65536 + by] or NONE) do
+              if inside(rings, poi.pos[1], poi.pos[2]) then points[#points + 1] = poi end
+            end
+          end
+        end
+        if own or #points > 0 then BLD.shopSigns(scene, building, rings, base, bottom, height, own, points, segmentBins, ground, shops.info[building]) end
+        if shops.venue[building] then BLD.venueSigns(scene, rings, base, bottom, height, shops.venue[building], segmentBins, ground) end
+      end
+      -- Storefront spans (BLD.shopLinks). A lifted block and a wall lower than the band keep
+      -- their walls; a small shop the look dresses as a house takes plain walls under the band.
+      local shopWalls, shopBand = shops.links and shops.links[building.id], nil
+      if shopWalls then
+        shopBand = math.min(BLD.STORE.band, height - .4)
+        local shopNote = lifted and 'building_lifted' or shopBand < BLD.STORE.minBand and 'building_low' or nil
+        if not shopNote and kind:find('hw_', 1, true) == 1 then
+          kind, shopNote = BLD.STORE.hosts[h % #BLD.STORE.hosts + 1], 'house_walls_replaced'
+        end
+        if type(options.poiReport) == 'table' then
+          options.poiReport[#options.poiReport + 1] = {evidence = 'draw', building = tostring(building.id),
+            decision = (shopNote == 'building_lifted' or shopNote == 'building_low') and 'rejected' or 'drawn',
+            reason = shopNote, band = shopBand, tile = key}
+        end
+        if shopNote == 'building_lifted' or shopNote == 'building_low' then shopWalls = nil end
+      end
       -- A plinth under low brick and plaster walls (the photo panels have their own); garage
       -- doors along a row's long walls, or a single garage's short ones.
       local plinth = not lifted and height <= 13 and (kind:find('wall_brk_', 1, true) == 1 or kind:find('wall_pls_', 1, true) == 1)
       -- a house (BLD.house): its plinth colour, windows, door, gables and roof guesses
-      local dress = kind:find('hw_', 1, true) == 1 and BLD.dress(kind, h) or nil
+      local dress = kind:find('hw_', 1, true) == 1 and not BLD.isMonument(tags) and BLD.dress(kind, h) or nil
       if dress then plinth = not lifted and dress.plinth end
       -- Grammar v0, near tiles at Balanced and above: cornice, porch, one balcony, chimney.
       if dress and not options.far and BLD.mass(options.detail) then
@@ -9464,10 +12904,16 @@ local function build(cells, i, j, options)
       -- City grammar, near tiles at Balanced and above. Houses stay on dress.mass.
       -- Flat roofs gain a parapet and a crown; street facades and the long yard side gain canopies.
       BLD.city, BLD.face, BLD.faces = nil, nil, nil
-      BLD.city = (not dress and not options.far and not lifted and BLD.mass(options.detail) and BLD.block(use, height)) or nil
+      BLD.city = (not dress and not open and not tags.e2r_part and not options.far and not lifted and not BLD.isMonument(tags) and BLD.mass(options.detail) and BLD.block(use, height)) or nil
       if BLD.city then BLD.faces = {} end
+      -- a skillion over the walls; wall=no on a part leaves the plane alone (the Eiffel Tower's legs)
+      BLD.plane = not options.far and not open and BLD.skillion(rings, tags, top) or nil
+      BLD.bare = BLD.plane and tags.e2r_part and tags.wall == 'no'
       local doors = (use == 'garage' or use == 'garages') and (h % 3 == 0 and 'door_rust' or 'door_garage')
-      for _, raw in ipairs(rings) do
+      local detailed = options.experimentalDetail and BLD.city and not options.far
+      BLD.report = type(options.detailReport) == 'table' and options.detailReport or nil
+      local acRoom = BLD.DETAIL.acMax
+      for _, raw in ipairs((open or BLD.bare) and NONE or rings) do
         local ring, along = cleanRing(raw), 0
         local signed = 0
         for k, p in ipairs(ring) do local q = ring[k % #ring + 1]; signed = signed + p[1] * q[2] - q[1] * p[2] end
@@ -9488,7 +12934,7 @@ local function build(cells, i, j, options)
           local wallKind = kind
           if length < 16 and (kind:find('wall_pnl_', 1, true) == 1 or kind:find('wall_lgg_', 1, true) == 1 or kind:find('wall_brk_', 1, true) == 1) then wallKind = kind .. '_end' end
           local door = doors and ((use == 'garages' and length >= 8) or (use == 'garage' and length <= 4.5))
-          local scale = facadeScale(wallKind)
+          local scale = BLD.facadeScale(wallKind)
           local seam = plinth and math.min(top, math.max(bottom, base + BLD.plinth)) or bottom
           if seam > bottom then
             scene.polygon(plinthKind, {{a[1], a[2], bottom, along / 3, (bottom - base) / 3},
@@ -9496,10 +12942,38 @@ local function build(cells, i, j, options)
               {b[1], b[2], seam, (along + length) / 3, (seam - base) / 3},
               {a[1], a[2], seam, along / 3, (seam - base) / 3}}, false)
           end
-          scene.polygon(wallKind, {{a[1], a[2], seam, along / scale, (seam - base) / scale},
-            {b[1], b[2], seam, (along + length) / scale, (seam - base) / scale},
+          -- a storefront splits the wall's lower band along the wall: shop spans, the wall
+          -- between them, one wall above (the same UV as unsplit)
+          local spans = shopWalls and raw == rings[1] and length > EPS and shopWalls[BLD.wallKey(a, b)]
+          local upper = spans and base + shopBand > seam and base + shopBand or seam
+          if upper > seam then
+            -- the shop texture's street level is v = 0 and its design 4.2 m high: below the datum
+            -- it stretches a little, under a lower band it is squeezed to fit
+            local function piece(material, s0, s1, sc, shop)
+              local p0 = {a[1] + (b[1] - a[1]) * s0 / length, a[2] + (b[2] - a[2]) * s0 / length}
+              local p1 = {a[1] + (b[1] - a[1]) * s1 / length, a[2] + (b[2] - a[2]) * s1 / length}
+              local squeeze = shop and BLD.STORE.band / shopBand or 1
+              local v0 = shop and math.max(0, seam - base) * squeeze / sc or (seam - base) / sc
+              local v1 = (upper - base) * squeeze / sc
+              scene.polygon(material, {{p0[1], p0[2], seam, (along + s0) / sc, v0},
+                {p1[1], p1[2], seam, (along + s1) / sc, v0},
+                {p1[1], p1[2], upper, (along + s1) / sc, v1},
+                {p0[1], p0[2], upper, (along + s0) / sc, v1}}, false)
+            end
+            local at = 0
+            for _, span in ipairs(spans) do
+              if span[1] > at then piece(wallKind, at, span[1], scale) end
+              piece(span[3], span[1], span[2], 6, true)
+              if detailed then BLD.storeFront(scene, a, b, length, span, upper, top, base, segmentBins) end
+              at = span[2]
+            end
+            if at < length then piece(wallKind, at, length, scale) end
+          end
+          scene.polygon(wallKind, {{a[1], a[2], upper, along / scale, (upper - base) / scale},
+            {b[1], b[2], upper, (along + length) / scale, (upper - base) / scale},
             {b[1], b[2], top, (along + length) / scale, height / scale},
             {a[1], a[2], top, along / scale, height / scale}}, false)
+          if BLD.plane then BLD.skillionWall(scene, wallKind, a, b, top, along, length, base, scale) end
           if door and length > EPS then
             -- one door a bay, 2 cm out from the cement: a row of doors between piers, not one
             -- shutter along the whole row (bld-garages-03)
@@ -9518,10 +12992,15 @@ local function build(cells, i, j, options)
                 {a[1] + dx * s0 + ox, a[2] + dy * s0 + oy, z1, 0, 1}}, false)
             end
           end
+          if detailed and raw == rings[1] then
+            acRoom = acRoom - BLD.acUnits(scene, a, b, length, along, base, height, wallKind, h, spans, acRoom)
+            BLD.windowExtras(scene, a, b, length, along, base, height, wallKind, h, spans)
+            BLD.balconies(scene, a, b, length, along, base, height, wallKind, h, spans)
+          end
           if dress and dress.mass and length > .4 then BLD.cornice(scene, a, b, length, top) end
           if BLD.city and raw == rings[1] and length > 6 and not plinth then BLD.socle(scene, a, b, length, bottom, base) end
           if BLD.city and raw == rings[1] and length >= 6 then
-            BLD.probe = wallPoint(a, b, length, length * .5, 8, 0, 0, 0)
+            BLD.probe = BLD.wallPoint(a, b, length, length * .5, 8, 0, 0, 0)
             BLD.onroad = BLD.street(segmentBins, BLD.probe[1], BLD.probe[2], 18)
             BLD.faces[#BLD.faces + 1] = {a, b, len = length, z = base, road = BLD.onroad and true or false}
           end
@@ -9536,14 +13015,20 @@ local function build(cells, i, j, options)
           if k % 32 == 0 then pause() end
         end
       end
-      if options.far or not pitchedRoof(scene, rings, tags, top, base, kind, height, BLD.roof(tags, h, postsoviet), dress) then
+      if detailed then BLD.downpipes(scene, rings, base, top, height, kind) end
+      if BLD.withShops and options.experimentalDetail and not options.far and not lifted then
+        BLD.addressPlate(scene, rings, tags, base, height, lists.roads)
+      end
+      if options.far or open or not BLD.pitchedRoof(scene, rings, tags, top, base, kind, height, BLD.roof(tags, h, postsoviet, BLD.region(look)), dress) then
         for _, tri in ipairs(triangulate(rings, pause, rect)) do
-          for _, p in ipairs(tri) do p[3] = top end
+          for _, p in ipairs(tri) do p[3] = BLD.plane and BLD.plane(p[1], p[2]) or top end
           scene.polygon('roof', tri, true)
         end
+        if open then BLD.shopCanopy(scene, rings, base, top, shops.roofs[building], ground, pause, rect) end
         if BLD.city then
           BLD.parapets(scene, rings, top, height, h)
           BLD.crown(scene, rings, top, height, h, footprint)
+          if detailed then BLD.roofClutter(scene, rings, top, height, h) end
         end
       elseif dress and dress.mass then
         BLD.chimney(scene, rings[1], top, dress, h, tags)
@@ -9560,16 +13045,12 @@ local function build(cells, i, j, options)
   -- Concrete for walls and concrete/brick/stone fences, chain link for the rest (fast.add_fence).
   local function fence(line)
     local tags = line.tags or NONE
-    local ft = tags.fence_type
-    local concrete = tags.barrier == 'wall' or tags.barrier == 'retaining_wall' or tags.barrier == 'city_wall' or ft == 'concrete'
-      or ft == 'brick' or ft == 'stone'
-    local kind = concrete and 'fence_wall' or 'fence_mesh'
+    local kind, concrete, scale = BLD.fenceKind(tags, hash(tostring(line.id or tags.e2r_of or #(line.points or NONE))), BLD.region(look))
     -- a wall up to its tagged height (a yard's wall to a 6 m retaining wall), a fence to 3 m; an untagged retaining wall
     -- stands 1 m over the drawn ground (the lattice smooths the step it holds)
     local height = math.min((tags.barrier == 'wall' or tags.barrier == 'retaining_wall') and 6 or 3,
       number(tags.height, tags.barrier == 'retaining_wall' and 1 or concrete and 2 or 1.6))
     local half = (concrete and tune.wallThick or tune.fenceThick) / 2
-    local scale = concrete and 2.5 or 2
     local raw, pts, along = line.points or NONE, {}, {}
     for index = 1, #raw - 1 do
       local a, b = raw[index], raw[index + 1]
@@ -9614,7 +13095,7 @@ local function build(cells, i, j, options)
       for _, segment in ipairs(segmentBins[(floor(x / 50) + 32768) * 65536 + floor(y / 50) + 32768] or NONE) do
         local a = segment.a
         local t = math.max(0, math.min(1, ((x - a[1]) * segment.dx + (y - a[2]) * segment.dy) / segment.len2))
-        if (x - a[1] - t * segment.dx) ^ 2 + (y - a[2] - t * segment.dy) ^ 2 < (segment.width / 2 + .5 + half) ^ 2 then return true end
+        if (x - a[1] - t * segment.dx) ^ 2 + (y - a[2] - t * segment.dy) ^ 2 < (segment.width / 2 + .5) ^ 2 then return true end
       end
       return false
     end
@@ -9655,7 +13136,14 @@ local function build(cells, i, j, options)
   end
   -- Far tiles keep fences: the near scene used to be the only copy, so a wall
   -- on a far tile vanished as the camera reached it. Paths stay near-only.
-  -- Horizon draws neither.
+  -- Horizon draws neither. Mapped gates open their fences (BLD.openGates).
+  local gatePoints
+  if not distant then
+    gatePoints = {}
+    for _, p in ipairs(lists.points) do
+      if p.kind == 'gate' and p.pos then gatePoints[#gatePoints + 1] = p end
+    end
+  end
   for _, line in ipairs(options.horizon and NONE or lists.lines) do
     local points, tags = line.points or {}, line.tags or {}
     if line.kind == 'gantry' then
@@ -9666,8 +13154,14 @@ local function build(cells, i, j, options)
     local barrier = (line.kind == 'fence' or line.kind == 'guard_rail') and #points >= 2
       and not (ROADS.noise and ROADS.noise.owns(line))
     -- a long rail's three passes over the strips ran 12 ms in one piece (generator_budget.py): each takes pause
-    for _, run in ipairs(barrier and (ROADS.offDecks(strips, points, ground, pause) or {points}) or NONE) do
-      if #run >= 2 and line.kind == 'fence' then
+    local join = not ROADS.extra(options, 'railsOffDecks')
+    for _, run in ipairs(barrier and (ROADS.offDecks(strips, points, ground, pause, join) or {points}) or NONE) do
+      if join and line.kind == 'guard_rail' then run = ROADS.joinDecks(strips, run, tune.sidewalk) end
+      if #run >= 2 and line.kind == 'fence' and gatePoints then
+        for _, piece in ipairs(BLD.openGates(run, gatePoints, lists.roads)) do
+          fence({tags = line.tags, points = piece})
+        end
+      elseif #run >= 2 and line.kind == 'fence' then
         fence(run == points and line or {tags = line.tags, points = run})
       elseif #run >= 2 then
         for _, piece in ipairs(ROADS.besideRoads(strips, run, tune.sidewalk, pause)) do
@@ -9683,7 +13177,7 @@ local function build(cells, i, j, options)
     end
     if not distant then
       -- a path lifted to a raised road (P1) is walked by its own stations, drawn at their heights where lifted
-      local shelf = pathShelf[line]
+      local shelf = asphaltCut.shelf[line]
       local walked = shelf and shelf.pts or points
       for index = 1, #walked - 1 do
         local a, b = walked[index], walked[index + 1]
@@ -9748,10 +13242,10 @@ local function build(cells, i, j, options)
       -- an underground or rooftop car park keeps its cars off the ground above it
       local surface = tags.parking ~= 'underground' and tags.parking ~= 'rooftop' and tags.location ~= 'underground'
       if cars < maxCars and surface and (tags.amenity == 'parking' or area.kind == 'parking') and ringsTouch(area.rings, rect) then
-        local frame = footprintFrame(cleanRing(area.rings[1]))
+        local frame = BLD.footprintFrame(cleanRing(area.rings[1]))
         if frame.area >= 120 then
           -- the bays' lines (lots.lua), on the lattice the cars below take
-          if ROADS.lots and markKind then
+          if ROADS.lots and markKind and ROADS.extra(options, 'lots') then
             ROADS.lots.bays({frame = frame, rings = area.rings, rect = rect, inside = inside, blocked = buildingAt,
               ground = ground, emit = function(poly) sceneDecor.polygon(markKind, poly, 'flat') end})
           end
@@ -9893,9 +13387,17 @@ local function build(cells, i, j, options)
     static('point_' .. tostring(point.id):gsub('[^%w_]', '_'), BUS_STOP, x, y, ground(x, y) + .25,
       math.atan2(fx, fy) + math.pi)
     -- the stop marked on the carriageway beside it (lots.lua)
-    if ROADS.lots and markKind then
+    if ROADS.lots and markKind and ROADS.extra(options, 'lots') then
       ROADS.lots.stop({points = hit.strip.points, k = hit.k, x = hit.x, y = hit.y, side = side, hw = hit.strip.hw,
         lift = lift, rect = rect, emit = function(poly) sceneDecor.polygon(markKind, poly, 'flat') end})
+    end
+    if options.experimentalDetail and BLD.withShops then
+      -- 3.6 m along the road from the shelter, on its curb side, the plate facing the road
+      local ux, uy = hit.dx / hit.len, hit.dy / hit.len
+      local sx, sy = x + ux * 3.6 - nx * side * .6, y + uy * 3.6 - ny * side * .6
+      -- the plate's front is the right of its line: for side 1 the road is to the right of +u
+      local lx, ly = side == 1 and ux or -ux, side == 1 and uy or -uy
+      BLD.stopSign(scene, sx, sy, ground(sx, sy), lx, ly, (point.tags or NONE).name)
     end
   end
   -- OSM maps many lamps (and some trees) as nodes of the street itself or on its carriageway: from
@@ -9950,7 +13452,7 @@ local function build(cells, i, j, options)
   -- under a flyover stood up through the deck (seen in testing). Tunnels are not over it.
   function OFFROAD.underDeck(x, y, z, top)
     for _, s in ipairs(segmentBins[(floor(x / 50) + 32768) * 65536 + floor(y / 50) + 32768] or NONE) do
-      if not ROADS.tunnel(s.tags) then
+      if ROADS.bridge(s.tags) and not ROADS.tunnel(s.tags) then   -- a deck, not a road on an embankment
         local a = s.a
         local t = math.max(0, math.min(1, ((x - a[1]) * s.dx + (y - a[2]) * s.dy) / s.len2))
         local qx, qy = a[1] + s.dx * t, a[2] + s.dy * t
@@ -9962,12 +13464,12 @@ local function build(cells, i, j, options)
   end
   -- bundle9: a lamp stands beyond the swept surface (the shoulders and the per-side edges are wider than the generator's strip
   -- the lamp was placed against: on a motorway shoulder, in testing). On a drawn surface of about its height or
-  -- within SWEPT_LAMP_CLEAR m of one it is pushed out along nx, ny half a metre at a time (8 m at most); without a direction it goes.
-  local SWEPT_LAMP_CLEAR = 1.2
+  -- within ROADS.sweptLampClear m of one it is pushed out along nx, ny half a metre at a time (8 m at most); without a direction it goes.
+  ROADS.sweptLampClear = 1.2
   function OFFROAD.sweptClear(x, y, z, nx, ny)
     if not SW then return x, y, z end
     for _ = 1, 17 do
-      if not ROADS.sweep.onSurface(SW, x, y, z, SWEPT_LAMP_CLEAR, 2.5) then return x, y, ground(x, y) end
+      if not ROADS.sweep.onSurface(SW, x, y, z, ROADS.sweptLampClear, 2.5) then return x, y, ground(x, y) end
       if not nx then return nil end
       x, y = x + nx * .5, y + ny * .5
     end
@@ -10029,27 +13531,82 @@ local function build(cells, i, j, options)
     if not bridge then return OFFROAD.sweptClear(x, y, z, hit.nx * side, hit.ny * side) end
     return x, y, z
   end
+  if options.experimentalDetail and not distant then
+    local maxCars = math.max(0, math.min(300, options.maxCars or 300))
+    local realCars = (options.parkedCars or 0) > 0
+    local homes = {}
+    for _, building in ipairs(lists.buildings) do
+      if ringsTouch(building.rings, {rect[1] - 10, rect[2] - 10, rect[3] + 10, rect[4] + 10}) then
+        homes[#homes + 1] = {bounds = ringBounds(building.rings), rings = building.rings}
+      end
+    end
+    local bays = ROADS.streetParking(lists.roads, {rect = rect, cutsOf = cutsOf, points = lists.points,
+      nearestOn = OFFROAD.nearestOn, walkAt = OFFROAD.walkAt, ground = ground, pause = pause,
+      clear = function(x, y, yaw)
+        for _, corner in ipairs({{-2.2, -.9}, {2.2, -.9}, {2.2, .9}, {-2.2, .9}}) do
+          local cx = x + corner[1] * math.cos(yaw) - corner[2] * math.sin(yaw)
+          local cy = y + corner[1] * math.sin(yaw) + corner[2] * math.cos(yaw)
+          for _, home in ipairs(homes) do
+            local b = home.bounds
+            if cx >= b[1] and cx <= b[3] and cy >= b[2] and cy <= b[4] and inside(home.rings, cx, cy) then return false end
+          end
+        end
+        return true
+      end})
+    local report = type(options.detailReport) == 'table' and options.detailReport or nil
+    for _, b in ipairs(bays) do
+      if #parking >= maxCars then break end
+      parking[#parking + 1] = {b[1], b[2], b.z, b[3]}
+      local h = hash(b[4])
+      if not realCars and h % 100 < 66 then parkedCar(sceneDecor, b[1], b[2], b.z + .02, b[3], math.floor(h / 100) % 8) end
+      if report then report[#report + 1] = {kind = 'bay_' .. b.where, x = b[1], y = b[2], z = 0,
+        nx = math.cos(b[3]), ny = math.sin(b[3])} end
+    end
+  end
   -- the scene and its decor were finished above: what the stops paint is flushed after the points
   ROADS.lotsFrom = #sceneDecor.items
   for _, point in ipairs(distant and NONE or lists.points) do
     local p = point.pos
     if p and point.kind == 'stop' and wantStops then
       shelter(point, p)
+    elseif p and point.kind == 'lift_gate' and
+        p[1] >= rect[1] and p[1] < rect[3] and p[2] >= rect[2] and p[2] < rect[4] then
+      BLD.liftGate(scene, p, lists.roads, ground)
     elseif p and p[1] >= rect[1] and p[1] < rect[3] and p[2] >= rect[2] and p[2] < rect[4] then
-      local shape = point.kind == 'tree' and VEG.treeFor(point) or (point.kind == 'lamp' and wantLamps) and LAMP
+      local shape = point.kind == 'tree' and VEG.treeFor(point) or (point.kind == 'lamp' and wantLamps) and LAMP or
+        point.kind == 'bench' and BENCH[1] or point.kind == 'waste_basket' and ROUND_BIN[1]
       local x, y, z
       if shape then x, y, z = OFFROAD.offCarriageway(point, p) end
       if x then
-        static('point_' .. tostring(point.id):gsub('[^%w_]', '_'), shape, x, y, z, 0)
+        -- a mapped bench faces the nearest path or road within 8 m (its front is local +y)
+        local yaw = 0
+        if point.kind == 'bench' then
+          local best, fx, fy = 8
+          for _, line in ipairs(lists.lines) do
+            if line.kind == 'path' then
+              local pts = line.points or NONE
+              for q = 1, #pts - 1 do
+                local d, t = segDistance(x, y, pts[q], pts[q + 1])
+                if d < best and d > .3 then
+                  local l = math.max(EPS, math.sqrt((pts[q + 1][1] - pts[q][1]) ^ 2 + (pts[q + 1][2] - pts[q][2]) ^ 2))
+                  best, fx, fy = d, pts[q][1] + (pts[q + 1][1] - pts[q][1]) * t / l, pts[q][2] + (pts[q + 1][2] - pts[q][2]) * t / l
+                end
+              end
+            end
+          end
+          if fx then yaw = math.atan2(fx - x, fy - y) end
+        end
+        static('point_' .. tostring(point.id):gsub('[^%w_]', '_'), shape, x, y, z, yaw)
         local it = scene.items[#scene.items]
         it.prop, it.streetKind, it.collision = true, point.kind, 'Collision Mesh'
       end
     end
     pause()
   end
+  -- (ROADS.extras.signals, off by default; upstream's signals above/below are options.experimentalDetail's)
   -- Traffic signals and speed cameras beside their approaches (signals.lua). Heads and booms are TSStatics
   -- (their lamps take instance colours: in the Forest every lamp lit), poles and cameras solid props.
-  if ROADS.signals and wantStops and not distant then
+  if ROADS.signals and wantStops and not distant and ROADS.extra(options, 'signals') and not options.experimentalDetail then
     ROADS.signals.place({rect = rect, points = lists.points, strips = strips, stars = stars, SW = SW, sweep = ROADS.sweep,
       offroad = OFFROAD, ground = ground, sidewalk = tune.sidewalk, oneway = ROADS.oneway, rankOf = ROADS.rankOf, pause = pause,
       put = function(name, shape, x, y, z, yaw, fields, solid)
@@ -10057,6 +13614,99 @@ local function build(cells, i, j, options)
         local it = scene.items[#scene.items]
         it.fields, it.prop, it.collision = fields, solid, 'Collision Mesh'
       end})
+  end
+  if not distant then
+    BLD.powerLines(lists.lines, rect, scene, ground, OFFROAD.onAsphalt, function(name, shape, x, y, z, yaw)
+      static(name, shape, x, y, z, yaw)
+      local it = scene.items[#scene.items]
+      it.prop, it.streetKind, it.collision = true, 'power', 'Collision Mesh'
+    end, pause)
+  end
+  OFFROAD.signs = {}
+  OFFROAD.signRequests = options.experimentalDetail and not distant and lists.signMouths and
+    SIGNS.plan(lists.roads, lists.signMouths, lists.signOrder, lists.points, cutsOf, pause) or nil
+  if OFFROAD.signRequests and #OFFROAD.signRequests > 0 then
+    OFFROAD.signDecorBefore = #sceneDecor.items
+    local report = type(options.detailReport) == 'table' and options.detailReport or nil
+    -- The small known footprint of a sign/signal must avoid buildings, water, paths and
+    -- surveyed furniture as well as roads. Index once; the same positions are passed to the
+    -- furniture planner, including the halo, so adjacent tiles make the same decision.
+    OFFROAD.signBins = {}
+    function OFFROAD.signIndex(bounds, entry)
+      -- Large water polygons may span whole regions; only the halo can affect this tile.
+      local x0, y0 = math.max(bounds[1] - 1, rect[1] - 40), math.max(bounds[2] - 1, rect[2] - 40)
+      local x1, y1 = math.min(bounds[3] + 1, rect[3] + 40), math.min(bounds[4] + 1, rect[4] + 40)
+      for bx = floor(x0 / 50), floor(x1 / 50) do
+        for by = floor(y0 / 50), floor(y1 / 50) do
+          local key = bx * 65536 + by
+          local bin = OFFROAD.signBins[key] or {}
+          OFFROAD.signBins[key], bin[#bin + 1] = bin, entry
+        end
+      end
+    end
+    for _, b in ipairs(lists.buildings) do
+      OFFROAD.signIndex(ringBounds(b.rings), {rings = b.rings}); pause()
+    end
+    for _, a in ipairs(lists.areas) do
+      if a.kind == 'water' then OFFROAD.signIndex(ringBounds(a.rings), {rings = a.rings}) end
+      pause()
+    end
+    for _, l in ipairs(lists.lines) do
+      if l.kind == 'path' and pathOnGround(l.tags or NONE) then
+        local pts = l.points or NONE
+        for k = 1, #pts - 1 do
+          local a, b = pts[k], pts[k + 1]
+          local radius = (tonumber((l.tags or NONE).width) or 2) / 2 + .3
+          OFFROAD.signIndex({math.min(a[1], b[1]) - radius, math.min(a[2], b[2]) - radius,
+            math.max(a[1], b[1]) + radius, math.max(a[2], b[2]) + radius}, {a = a, b = b, radius = radius})
+          if k % 64 == 0 then pause() end
+        end
+      end
+      pause()
+    end
+    for index, p in ipairs(lists.points) do
+      if p.pos and (p.kind == 'tree' or p.kind == 'lamp' or p.kind == 'bench' or p.kind == 'waste_basket' or p.kind == 'stop') then
+        local q = p.pos
+        OFFROAD.signIndex({q[1], q[2], q[1], q[2]}, {a = q, b = q, radius = p.kind == 'stop' and 3 or 1})
+      end
+      if index % 128 == 0 then pause() end
+    end
+    function OFFROAD.signClear(x, y)
+      for _, e in ipairs(OFFROAD.signBins[floor(x / 50) * 65536 + floor(y / 50)] or NONE) do
+        if e.rings and (inside(e.rings, x, y) or nearEdge(e.rings, x, y, .4)) then return false end
+        if e.a then
+          local dx, dy = e.b[1] - e.a[1], e.b[2] - e.a[2]
+          local length2 = dx * dx + dy * dy
+          local t = length2 > EPS and math.max(0, math.min(1, ((x - e.a[1]) * dx + (y - e.a[2]) * dy) / length2)) or 0
+          if (x - e.a[1] - t * dx) ^ 2 + (y - e.a[2] - t * dy) ^ 2 < (e.radius + .3) ^ 2 then return false end
+        end
+      end
+      return true
+    end
+    local counts
+    counts, OFFROAD.signs = SIGNS.place(OFFROAD.signRequests,
+      {rect = rect, nearAsphalt = OFFROAD.nearAsphalt, nearestOn = OFFROAD.nearestOn, walkAt = OFFROAD.walkAt,
+        ground = ground, clear = OFFROAD.signClear, put = function(name, shape, x, y, z, yaw, kind)
+          if kind == 'signal' then
+            -- Bounded, unlit visual only: 12 cm pole, 40 x 24 cm head. It does not control AI.
+            local T, c = SOLID.frame(x, y, z, -yaw), YARD.cell
+            SOLID.box(sceneDecor, 'yard', c.metal, T, -.06, -.06, 0, .06, .06, 3.5)
+            SOLID.box(sceneDecor, 'yard', c.dark, T, -.20, -.12, 2.65, .20, .12, 3.55)
+            for k, colour in ipairs({c.red, c.yellow, c.green}) do
+              local zc = 3.4 - (k - 1) * .28
+              SOLID.face(sceneDecor, 'yard', colour, T, {{-.10, -.125, zc - .10}, {.10, -.125, zc - .10},
+                {.10, -.125, zc + .10}, {-.10, -.125, zc + .10}})
+            end
+          else
+            static(name, shape, x, y, z, yaw)
+            local it = scene.items[#scene.items]
+            it.prop, it.streetKind, it.collision = true, 'sign', 'Collision Mesh'
+          end
+          -- the face looks at the driver: against travel, (-sin, -cos) of the yaw
+          if report then report[#report + 1] = {kind = 'sign_' .. kind, x = x, y = y, z = z + 2.6,
+            nx = -math.sin(yaw), ny = -math.cos(yaw)} end
+        end}, pause)
+    if report then report.signs = counts end
   end
   sceneDecor.finish()
   for k = ROADS.lotsFrom + 1, #sceneDecor.items do
@@ -10081,7 +13731,7 @@ local function build(cells, i, j, options)
       -- a lamp under a deck or by a swept surface; an inferred street lamp also on or within half a metre of the drawn
       -- asphalt (a junction's plate or mouth, a turning lane: the strip's own width is only its middle). A yard's lamp
       -- stands 0.5 m off its own service road by design (YARD) and keeps that.
-      if kind == 'lamp' and (OFFROAD.underDeck(x, y, z, 11) or (SW and ROADS.sweep.onSurface(SW, x, y, z, SWEPT_LAMP_CLEAR, 2.5))
+      if kind == 'lamp' and (OFFROAD.underDeck(x, y, z, 11) or (SW and ROADS.sweep.onSurface(SW, x, y, z, ROADS.sweptLampClear, 2.5))
         or name:sub(1, 11) == 'streetlamp_' and OFFROAD.nearAsphalt(x, y, VEG.lampRule.kerb)) then return end
       static(name, shape, x, y, z, yaw, scale)
       local it = scene.items[#scene.items]
@@ -10091,7 +13741,8 @@ local function build(cells, i, j, options)
     end
     local _, reserved = VEG.streetProps(strips, lists.lines, lists.buildings, segmentBins, rect,
       options.propSpacing, lift, tune.sidewalk, ground, put, pause,
-      {lamps = true, tree = tree, treeAt = treeAt, areas = lists.areas, points = lists.points, look = look})
+      {lamps = true, tree = tree, treeAt = treeAt, areas = lists.areas, points = lists.points, signs = OFFROAD.signs, look = look,
+        shopLinks = shops.links})
     local yardCtx = {rect = rect, scene = scene, decor = sceneDecor, ground = ground, drapeRings = drapeRings,
       put = put, lists = lists, strips = strips, segmentBins = segmentBins, reserved = reserved,
       spacing = options.propSpacing or 0, pause = pause, have = VEG.have, lamp = LAMP, containers = containers}
@@ -10110,6 +13761,12 @@ local function build(cells, i, j, options)
     scene.streetReservations = reserved
     -- what the yard laid out, for the offline maps and tests (cars and kit are mesh, not items)
     scene.yard = {cars = yardCtx.cars, kit = yardCtx.kit, containers = containers}
+  end
+  if not wantLamps and #OFFROAD.signs > 0 then
+    scene.streetReservations = scene.streetReservations or {}
+    for _, p in ipairs(OFFROAD.signs) do
+      YARD.reserve(scene.streetReservations, {p[1] - .001, p[2]}, {p[1] + .001, p[2]}, 2.6)
+    end
   end
   if decor then
     local WALL = 3
@@ -10704,8 +14361,9 @@ local function build(cells, i, j, options)
               local y = (gy + .5 + (floor(h / 1000) % 1000 / 1000 - .5) * .55) * spacing
               local position = latticeKey(0, gx, gy, code)
               if x >= rect[1] and x < rect[3] and y >= rect[2] and y < rect[4] and not positions[position] then
-                local kind = coverAt(x, y)
-                if spacingOf[kind] == spacing and keyHash(seed + 100, position) % 1000 / 1000 < (chanceOf[kind] or 0) then
+                local kind, where = coverAt(x, y)
+                if spacingOf[kind] == spacing and keyHash(seed + 100, position) % 1000 / 1000 < (chanceOf[kind] or 0)
+                    and not (where and VEG.fields[(where.tags or NONE).leisure]) then
                   positions[position] = true
                   candidates[#candidates + 1] = {x = x, y = y, hash = h, key = position, kind = kind}
                 end
@@ -10787,6 +14445,10 @@ local function build(cells, i, j, options)
       if distant or maxGrass <= 0 then return end
       local cell, step = 8, 2
       local lawn = {ground = true, park = true, meadow = true, residential = true}
+      local function lawnAt(x, y)
+        local kind, where = coverAt(x, y)
+        return lawn[kind] and not (where and VEG.fields[(where.tags or NONE).leisure])
+      end
       local function climate(x, y)
         if not bio.on then return true end
         local p = bio.at(x, y)
@@ -10807,7 +14469,7 @@ local function build(cells, i, j, options)
             for sy = 0, 3 do
               for sx = 0, 3 do
                 local x, y = ox + sx * step + 1, oy + sy * step + 1
-                if x >= rect[1] and x < rect[3] and y >= rect[2] and y < rect[4] and lawn[coverAt(x, y)] then
+                if x >= rect[1] and x < rect[3] and y >= rect[2] and y < rect[4] and lawnAt(x, y) then
                   local z = ground(x, y)
                   local nx, ny, nz = groundNormal(x, y)
                   if nz >= .72 and (not sea or z > sea) and not blocked(x, y, 2.4) then
@@ -10915,6 +14577,21 @@ local function build(cells, i, j, options)
   pause()
   local sceneManifest = manifest(scene, 'scene')
   sceneManifest.parking = parking
+  if not distant then
+    sceneManifest.brandPOIs = {}
+    for _, poi in ipairs(BLD.withShops and lists.points or NONE) do
+      local p, tags = poi.pos, poi.tags or NONE
+      if p and BLD.SHOP.kinds[poi.kind] and SOLID.BRANDS[tags.e2r_brand]
+          and p[1] >= rect[1] and p[1] < rect[3] and p[2] >= rect[2] and p[2] < rect[4] then
+        sceneManifest.brandPOIs[#sceneManifest.brandPOIs + 1] =
+          {id = poi.id, kind = poi.kind, x = p[1], y = p[2], brand = tags.e2r_brand, postType = tags.e2r_post_type}
+      elseif p and poi.kind == 'venue' and BLD.VENUE.types[tags.e2r_venue]
+          and p[1] >= rect[1] and p[1] < rect[3] and p[2] >= rect[2] and p[2] < rect[4] then
+        sceneManifest.brandPOIs[#sceneManifest.brandPOIs + 1] =
+          {id = poi.id, kind = poi.kind, x = p[1], y = p[2], label = tags.name, rgb = BLD.VENUE.types[tags.e2r_venue].rgb}
+      end
+    end
+  end
   if distant then
     sceneManifest.layer = layerName
     for _, item in ipairs(sceneManifest.items) do
@@ -10927,13 +14604,29 @@ end
 
 M.build = build
 M.SWEPT = ROADS.swept
+M.EXTRAS = ROADS.extras
+M.applyExtras = ROADS.applyExtras
+M.CONFORMAL = ROADS.conformal
+M.WING = ROADS.wing      -- (a test can set WING.steep = 90 before the landing to draw no wing walls)
 -- The new height pipeline (native.lua heightPipeline, world.lua heightPipeline): auto = from the region's
 -- manifest; false keeps the runtime height passes and the generic ground pull for every pack.
 M.HEIGHTS = {auto = true}
 M.SECTION = ROADS.section   -- the cross-section rule, for the offline tests
+M.collector = collector     -- the triangle collector (material meshes and UVs), for the offline tests
 M.PATHLIFT = ROADS.pathLift   -- bundle7 (P1): the footway lift beside raised swept roads, for the offline tests
 M.DECKMATERIAL = ROADS.deckMaterial   -- a bridge's material by its tags, for the offline tests
 M.YARD = YARD
+M.BRANDS = SOLID.BRANDS
+M.shopFlat = BLD.shopFlat
+M.VENUE = BLD.VENUE
+M.shopUV = BLD.shopUV
+M.frontFloor = BLD.frontFloor
+M.shopFront_ = BLD.shopFront
+M.FRONT = BLD.FRONT
+M.shopCell = BLD.shopCell
+M.shopMark = BLD.shopMark
+M.shopHeight = BLD.height
+M.shopStyle = BLD.shopStyle
 M.triangulate = triangulate
 M.clip = clip
 M.EDGE_MAPS = EDGE_MAPS

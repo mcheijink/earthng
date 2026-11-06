@@ -29,6 +29,16 @@ end
 M.PATCH = 6
 function M.expand(part, pause)
   local flat = part.flat
+  if not flat and part.patches and #part.patches > 0 then
+    -- a part with a table per patch (the layout before part.flat): the same carpet
+    flat = {}
+    for _, patch in ipairs(part.patches) do
+      local at = #flat
+      flat[at + 1], flat[at + 2], flat[at + 3], flat[at + 4], flat[at + 5] = patch.x, patch.y, patch.shapes, patch.spans, patch.bottoms
+      flat[at + 6] = #patch.samples / 4
+      for k = 1, #patch.samples do flat[at + M.PATCH + k] = patch.samples[k] end
+    end
+  end
   if not flat then return part end
   local out = {tile = part.tile, n = 0, x = {}, y = {}, z = {}, yaw = {}, scale = {}, shape = {}}
   local function put(x,y,z,yaw,scale,shape)

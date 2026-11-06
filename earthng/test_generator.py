@@ -352,6 +352,27 @@ class GeneratorTests(unittest.TestCase):
         tops = [p[1] for t in walls for p in t if all(abs(q[2] - 21.0) < .02 for q in t)]
         self.assertTrue(any(250 < y < 258 for y in tops) and any(272 < y < 280 for y in tops), tops)
 
+    def test_staggered_carriageway_bridges_leave_no_hole_past_the_longer_ones_end(self):
+        # The united slab runs along the host, the longer bridge, and takes the other only where it
+        # runs beside it; a deck sticking out past the host's end had its own asphalt suppressed and
+        # no slab: a hole with the lane markings floating over it (Tallinna ringtee, 59.3126,
+        # 24.7376). Such a pair stays two decks, each whole.
+        def bridge(name, x0, x1, y):
+            return {'id': name, 'nodes': [name + 'a', name + 'b'], 'width': 8,
+                    'tags': {'highway': 'trunk', 'oneway': 'yes', 'bridge': 'yes', 'layer': '1', 'sidewalk': 'no'},
+                    'points': line(x0, y, x1, y, 20)}
+        for south, north in (((0, 300), (120, 420)), ((0, 300), (120, 400)), ((0, 320), (120, 400))):
+            road, walls = self.build([{'roads': [bridge('s', *south, 250), bridge('n', *north, 262)]}])[:2]
+            asphalt = list(self.triangles(road, 'e2rf_road_major'))
+            walls = list(self.triangles(walls, 'e2rf_fence_wall'))
+            for (x0, x1), y in ((south, 250), (north, 262)):
+                for x in (x0 + 10, (x0 + x1) // 2, x1 - 10):
+                    self.assertAlmostEqual(self.surface_at(asphalt, x, y), 20.1, places=2, msg=(south, north, x, y))
+                    self.assertIsNotNone(self.surface_at(walls, x, y), (south, north, x, y))   # and a soffit
+        # beside each other along the whole length they are still one deck
+        road, walls = self.build([{'roads': [bridge('s', 0, 300, 250), bridge('n', 20, 280, 262)]}])[:2]
+        self.assertIsNotNone(self.surface_at(list(self.triangles(walls, 'e2rf_fence_wall')), 150, 256))
+
     def test_a_bridge_line_loses_a_spike_and_keeps_a_bend(self):
         pts = line(0, 250, 400, 250, 20)
         for p in pts:
@@ -393,6 +414,36 @@ class GeneratorTests(unittest.TestCase):
         asphalt = list(self.triangles(self.build([{'roads': roads}])[0], 'e2rf_road_major'))
         for x, y in ((200, 250), (290, 262)):
             self.assertLess(self.surface_at(asphalt, x, y), 21.5, (x, y))
+
+    def test_a_deck_is_not_raised_over_a_slip_road_level_with_it(self):
+        # Kyiv, Mykoly Mikhnovskoho at the Druzhby Narodiv junction: a one-lane link level with the
+        # deck runs beside it under its overhang and joins it through another way. Read as a road
+        # under the deck it threw the deck 12 m up, a wall across the road for the other carriageway.
+        def way(name, nodes, points, width=16, **tags):
+            return {'id': name, 'nodes': nodes, 'width': width, 'points': points,
+                    'tags': dict(tags, highway=tags.pop('highway', 'trunk'), sidewalk='no')}
+        roads = [way('west', ['w', 'a'], line(0, 250, 200, 250, 20)),
+                 way('deck', ['a', 'b'], line(200, 250, 300, 250, 20), bridge='yes', layer='1'),
+                 way('east', ['b', 'e'], line(300, 250, 500, 250, 20)),
+                 way('link', ['l1', 'l2'], line(150, 255, 290, 255, 20), width=5, highway='primary_link')]
+        asphalt = list(self.triangles(self.build([{'roads': roads}])[0], 'e2rf_road_major'))
+        self.assertLess(self.surface_at(asphalt, 250, 248), 21)
+
+    def test_a_parapet_leaves_the_mouth_of_a_slip_road_open(self):
+        # a link leaving a deck at its own height crosses the deck's parapet line over a few metres
+        # of a long segment: judged whole, the parapet stood across the link's mouth
+        main = {'id': 'main', 'nodes': ['m1', 'm2'], 'width': 12, 'points': line(0, 250, 500, 250, 20),
+                'tags': {'highway': 'trunk', 'oneway': 'yes', 'sidewalk': 'no', 'bridge': 'yes', 'layer': '1'}}
+        link = {'id': 'link', 'nodes': ['k1', 'k2'], 'width': 5, 'points': line(250, 256, 350, 275, 20),
+                'tags': {'highway': 'trunk_link', 'oneway': 'yes', 'sidewalk': 'no', 'bridge': 'yes', 'layer': '1'}}
+        def tops(roads):
+            return [t for t in self.triangles(self.build([{'roads': roads}])[1], 'e2rf_fence_wall')
+                    if all(abs(p[2] - 21.0) < .05 for p in t)]
+        def across(found):
+            return [t for t in found if all(255.5 < p[1] < 256.2 for p in t) and any(256 < p[0] < 266 for p in t)]
+        self.assertTrue(across(tops([main])))                     # alone the deck has its parapet there
+        self.assertFalse(across(tops([main, link])))              # the link's mouth is open
+        self.assertTrue([t for t in tops([main, link]) if all(255.5 < p[1] < 256.2 for p in t) and min(p[0] for p in t) > 300])
 
     def test_a_low_pack_bridge_clears_a_truck_and_the_approaches_ramp(self):
         # Installed Ukraine pack, bridge 2149 over road 148723 near 50.45845, 30.42135:
@@ -495,7 +546,8 @@ class GeneratorTests(unittest.TestCase):
             return points
 
         west, deck, east = line(0, 250, 200, 250, 20), line(200, 250, 400, 250, 20), line(400, 250, 500, 250, 20)
-        under = line(300, 0, 300, 500, 20)
+        # 2 m under the stored deck, as an old pack keeps it (a road level with a deck joins it)
+        under = line(300, 0, 300, 500, 18)
 
         def scene(west_pts, deck_pts):
             roads = [
@@ -523,7 +575,7 @@ class GeneratorTests(unittest.TestCase):
                 asphalt, soffit = scene(west_pts, deck_pts)
                 self.assertTrue(soffit, name)
                 lower = self.surface_at(asphalt, 300, 40)
-                self.assertAlmostEqual(lower, 20.1, places=2)
+                self.assertAlmostEqual(lower, 18.1, places=2)
                 headroom = min(p[2] for t in soffit for p in t) - lower
                 self.assertGreaterEqual(headroom, 4.5, name)
                 samples = [(x, self.surface_at(asphalt, x, 250)) for x in range(0, 501, 2)]
@@ -728,10 +780,31 @@ class GeneratorTests(unittest.TestCase):
                     and not all(abs(p[0] - 254.5) < .6 for p in t)]
         self.assertEqual(across_the_road(metal), [])
         self.assertEqual(across_the_road(mesh), [])
-        # the lower road's rail runs on under the deck; the deck's ones go on past its ends
-        self.assertTrue([t for t in metal if all(abs(p[0] - 254.5) < .6 and abs(p[1] - 250) < 3 for p in t)])
+        # the lower road's rail stops at the deck's edges and goes on past them; the deck's ones go on past its ends
+        # and keeps ROADS.onDeck.under m (8) off its edges (the deck is 4 m half width): no rail end in front of the pier
+        self.assertEqual([t for t in metal if all(abs(p[0] - 254.5) < .6 and abs(p[1] - 250) < 11 for p in t)], [])
+        self.assertTrue([t for t in metal if all(abs(p[0] - 254.5) < .6 and 13 < abs(p[1] - 250) < 60 for p in t)])
         self.assertTrue([t for t in metal if all(p[0] < 195 and abs(p[1] - 254.5) < .6 for p in t)])
         self.assertTrue([t for t in mesh if all(p[0] > 300 for p in t)])
+
+    def test_a_rail_running_on_under_a_high_deck_at_a_skew_is_cut_under_it(self):
+        # Tallinna ringtee at Jüri: median and slip road rails OSM carries on under the overpass, 10 m up, at an
+        # angle to it (here 45 degrees), crossing each other at the pier: left out under the deck, kept past it
+        bridge = {'id': 'b', 'nodes': ['a', 'b'], 'width': 8, 'points': [[200, 250, 20], [300, 250, 20]],
+                  'tags': {'highway': 'tertiary', 'bridge': 'yes', 'layer': '1', 'sidewalk': 'no'}}
+        under = {'id': 'u', 'nodes': ['s', 'n'], 'width': 8, 'points': [[100, 100, 10], [400, 400, 10]],
+                 'tags': {'highway': 'trunk', 'sidewalk': 'no'}}
+        west = {'id': 'w', 'nodes': ['w', 'a'], 'width': 8, 'points': [[100, 250, 20], [200, 250, 20]],
+                'tags': {'highway': 'tertiary', 'sidewalk': 'no'}}
+        east = {'id': 'e', 'nodes': ['b', 'e'], 'width': 8, 'points': [[300, 250, 20], [400, 250, 20]],
+                'tags': {'highway': 'tertiary', 'sidewalk': 'no'}}
+        d = 5 / 2 ** .5           # 5 m off the carriageway's line, on its right
+        rail = {'id': 'g', 'kind': 'guard_rail', 'tags': {'barrier': 'guard_rail'},
+                'points': [[150 + d, 150 - d, 0], [350 + d, 350 - d, 0]]}
+        metal = list(self.triangles(self.build([{'roads': [bridge, under, west, east], 'lines': [rail]}])[1], 'e2rf_clad_metal'))
+        self.assertEqual([t for t in metal if all(abs(p[1] - 250) < 4 and abs(p[0] - 255) < 8 for p in t)], [])
+        self.assertTrue([t for t in metal if all(10 < p[1] - 250 < 60 and abs(p[0] - p[1] - 0) < 9 for p in t)])
+        self.assertTrue([t for t in metal if all(-60 < p[1] - 250 < -10 for p in t)])
 
     def test_fences_across_a_carriageway_or_under_a_low_deck_are_cut_there(self):
         # OSM: a fence across a road at grade (a gate the pack does not carry), a fence under a
@@ -1109,6 +1182,37 @@ class GeneratorTests(unittest.TestCase):
         for item in inferred:
             self.assertTrue(all(math.hypot(item.pos[1] - x, item.pos[2] - y) > 12 for x, y in at))
         self.assertTrue(all(item.pos[1] > 242 for item in inferred))
+
+    def test_surveyed_lamps_on_the_carriageway_go_to_its_edge(self):
+        # OSM maps many lamps as nodes of the street or in its lanes: ~3,700 stood in central Kyiv's roads
+        road = {'id': 'street', 'width': 7, 'points': [[0, 250, 10], [500, 250, 10]],
+                'tags': {'highway': 'residential', 'sidewalk': 'both'}}
+        points = [{'id': 'axis', 'kind': 'lamp', 'tags': {}, 'pos': [100, 250, 10]},
+                  {'id': 'north', 'kind': 'lamp', 'tags': {}, 'pos': [200, 252, 10]},
+                  {'id': 'south', 'kind': 'lamp', 'tags': {}, 'pos': [300, 247.5, 10]},
+                  {'id': 'beside', 'kind': 'lamp', 'tags': {}, 'pos': [400, 244, 10]},
+                  {'id': 'lane', 'kind': 'tree', 'tags': {}, 'pos': [150, 251, 10]},
+                  {'id': 'pit', 'kind': 'tree', 'tags': {}, 'pos': [450, 245.5, 10]}]
+        scene = self.build([{'roads': [road], 'points': points}], terrainStep=100)[1]
+        placed = {item.name.split('_point_')[1]: item for item in scene['items'].values()
+                  if item.kind == 'static' and '_point_' in item.name}
+        self.assertEqual(set(placed), {'axis', 'north', 'south', 'beside', 'pit'})
+        for name in ('axis', 'north', 'south'):
+            self.assertGreaterEqual(abs(placed[name].pos[2] - 250), 3.5 + .5, name)
+        self.assertGreater(placed['north'].pos[2], 250)
+        self.assertLess(placed['south'].pos[2], 250)
+        self.assertEqual((placed['north'].pos[1], placed['south'].pos[1]), (200, 300))
+        self.assertEqual((placed['beside'].pos[1], placed['beside'].pos[2]), (400, 244))
+        self.assertEqual((placed['pit'].pos[1], placed['pit'].pos[2]), (450, 245.5))
+
+    def test_a_surveyed_lamp_on_a_deck_stands_on_its_parapet(self):
+        deck = {'id': 'deck', 'nodes': ['a', 'b'], 'width': 8, 'points': line(0, 250, 500, 250, 20),
+                'tags': {'highway': 'primary', 'sidewalk': 'no', 'bridge': 'yes', 'layer': '1'}}
+        lamp = {'id': 'l', 'kind': 'lamp', 'tags': {}, 'pos': [250, 251, 5]}
+        scene = self.build([{'roads': [deck], 'points': [lamp]}], terrainStep=100)[1]
+        item = next(item for item in scene['items'].values() if item.kind == 'static' and '_point_' in item.name)
+        self.assertAlmostEqual(item.pos[2], 254 - .15, places=3)     # in the parapet, 0.3 m thick
+        self.assertAlmostEqual(item.pos[3], 20 + .1 + .9, places=2)  # its top, over the deck
 
     def test_street_props_line_sidewalks_and_footways_but_not_carriageways(self):
         # four arms meeting at a junction node (250, 250)
@@ -2091,8 +2195,9 @@ class GeneratorTests(unittest.TestCase):
             scene = self.build([{'buildings': houses}], terrainStep=100, tileSize=1000, country=country)[1]
             roofs = {m.material for _i, m in self.meshes(scene) if str(m.material).startswith('e2rf_roof_')}
             kinds.add(frozenset(roofs))
-            if country == 'germany':
-                self.assertEqual(roofs, {'e2rf_roof_tile'})
+            if country == 'germany':     # a pack from before looks: its country stands for the block
+                self.assertLessEqual(roofs, {'e2rf_roof_clay', 'e2rf_roof_concrete', 'e2rf_roof_slate', 'e2rf_roof_zinc'})
+                self.assertGreater(len(roofs), 1)
             else:
                 self.assertTrue({'e2rf_roof_sheet', 'e2rf_roof_mtile_red'} <= roofs, roofs)
                 # u along the 12 m ridge (x), v down the 4 m half width: the corrugation runs downhill
@@ -2104,6 +2209,34 @@ class GeneratorTests(unittest.TestCase):
         tagged = dict(houses[0], tags={'building': 'house', 'roof:colour': 'green'})
         scene = self.build([{'buildings': [tagged]}], terrainStep=100)[1]
         self.assertTrue(list(self.triangles(scene, 'e2rf_roof_mtile_green')))
+
+    def materials_of(self, buildings, look=None, fences=()):
+        scene = self.build([{'buildings': buildings, 'scenery': list(fences)}], terrainStep=100, tileSize=1000, look=look)[1]
+        return {str(m.material) for _i, m in self.meshes(scene)}
+
+    def test_a_block_builds_in_its_own_materials(self):
+        houses = [{'id': f'h{k}', 'height': 4, 'tags': {'building': 'house'},
+                   'rings': [[[k * 30, 100, 10], [k * 30 + 12, 100, 10], [k * 30 + 12, 108, 10], [k * 30, 108, 10]]]}
+                  for k in range(30)]
+        blocks = [{'id': f'b{k}', 'height': 18, 'tags': {'building': 'apartments'},
+                   'rings': [[[k * 40, 200, 10], [k * 40 + 30, 200, 10], [k * 40 + 30, 214, 10], [k * 40, 214, 10]]]}
+                  for k in range(20)]
+        american = self.materials_of(houses + blocks, {'block': 'north-america'})
+        self.assertTrue(any(m.startswith(('e2rf_hw_vinyl', 'e2rf_hw_clapboard')) for m in american), american)
+        self.assertIn('e2rf_roof_shingle', american)
+        self.assertTrue(any('_d_' in m for m in american), american)
+        ukrainian = self.materials_of(houses + blocks, {'block': 'postsoviet'})
+        self.assertTrue(any('_d_' in m for m in ukrainian), ukrainian)
+        self.assertFalse(any(m.startswith('e2rf_hw_vinyl') for m in ukrainian), ukrainian)
+        # a pack without a look keeps the older walls
+        self.assertFalse(any('_d_' in m for m in self.materials_of(houses + blocks)))
+
+    def test_tags_outrank_a_region(self):
+        house = {'id': 'h', 'height': 4, 'tags': {'building': 'house', 'roof:material': 'thatch', 'building:material': 'adobe'},
+                 'rings': [[[0, 100, 10], [12, 100, 10], [12, 108, 10], [0, 108, 10]]]}
+        found = self.materials_of([house], {'block': 'africa'})
+        self.assertIn('e2rf_roof_thatch', found)
+        self.assertIn('e2rf_hw_adobe', found)
 
     def test_garage_rows_get_doors_and_houses_a_plinth(self):
         row = {'id': 'row', 'height': 9, 'tags': {'building': 'garages'},
@@ -2298,6 +2431,40 @@ class GeneratorTests(unittest.TestCase):
         self.assertGreater(len(trees), 40)
         self.assertLessEqual(len(trees), 800)
         self.assertTrue(all(item.decor and item.layer == 'far' for item in trees))
+
+    def test_far_tiles_draw_the_roads_that_the_guard_rails_beside_them_stand_by(self):
+        # Past the near radius the car's surroundings are far tiles. They kept the rails and fences
+        # but drew no road, so from a free camera the ringtee was grass between two lines of
+        # guard rail. A far tile draws each road's surface, as plain decoration without collision;
+        # service streets and parking aisles stay out (the far ring's triangle budget).
+        def road(name, highway, y, width):
+            return {'id': name, 'nodes': [name + 'a', name + 'b'], 'width': width,
+                    'tags': {'highway': highway, 'sidewalk': 'no'}, 'points': [[0, y, 30], [500, y, 30]]}
+        trunk, lane = road('t', 'trunk', 150, 12), road('s', 'service', 350, 4)
+        terrain = {'rect': [0, 0, 500, 500], 'nx': 2, 'ny': 2, 'heights': [30] * 4}
+        cell = {'roads': [trunk, lane], 'terrain': terrain}
+        far = self.build([cell], far=True)[2]
+        asphalt = [t for m in ('e2rf_road', 'e2rf_road_major', 'e2rf_road_worn') for t in self.triangles(far, m)]
+        self.assertTrue(asphalt)
+        ys = [p[1] for t in asphalt for p in t]
+        self.assertAlmostEqual(min(ys), 144, delta=.3)                  # the trunk road's width
+        self.assertAlmostEqual(max(ys), 156, delta=.3)
+        self.assertGreater(min(p[2] for t in asphalt for p in t), 30)    # over the ground, not in it
+        self.assertTrue(all(item.decor and item.layer == 'far' for item in far['items'].values()))
+        horizon = self.build([cell], horizon=True)[2]
+        self.assertFalse([t for m in ('e2rf_road', 'e2rf_road_major') for t in self.triangles(horizon, m)])
+        # in a 10 m cutting the coarse far terrain (100 m triangles) stands over the road: the far
+        # road is lifted to just over it, never hidden under it (Laagna tee: ground 4 m over the road)
+        cutting = {'roads': [trunk], 'terrain': {'rect': [0, 0, 500, 500], 'nx': 2, 'ny': 2, 'heights': [40] * 4}}
+        far = self.build([cutting], far=True)[2]
+        asphalt = [t for m in ('e2rf_road', 'e2rf_road_major', 'e2rf_road_worn') for t in self.triangles(far, m)]
+        ground = list(self.triangles(far, 'e2rf_ground'))
+        self.assertTrue(asphalt and ground)
+        for x in (60, 150, 250, 350, 440):
+            for y in (146, 150, 154):
+                road_z, ground_z = self.surface_at(asphalt, x, y), self.surface_at(ground, x, y)
+                self.assertIsNotNone(road_z, (x, y))
+                self.assertGreaterEqual(road_z, ground_z - .005, (x, y, road_z, ground_z))
 
     def test_far_tiles_keep_fences_and_horizon_does_not(self):
         cell = {'lines': [{'id': 'w', 'kind': 'fence', 'tags': {'barrier': 'wall'},
