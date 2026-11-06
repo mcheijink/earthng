@@ -1242,7 +1242,8 @@ do
 end
 ROADS.swept = {on = true, mode = 'fast', scale = COVER_SCALE.road}
 -- Fork additions that change what an existing pack draws, all off so that a pack draws as upstream's
--- generator draws it (set per call in options, or for the session with world.lua's extras()):
+-- generator draws it (set per call in options, for the session with world.lua's extras(), or by a pack:
+-- the region manifest's `extras` is applied by native.lua when the landing starts):
 --   signals       static traffic signals and speed cameras on stock poles (signals.lua); upstream's own
 --                 signals are options.experimentalDetail's, and with that on these stay out
 --   lots          bay lines on car parks and the zig-zag at bus stops (lots.lua)

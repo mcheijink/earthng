@@ -59,7 +59,7 @@ class NativeTests(unittest.TestCase):
             mod.update(.016, 2)
         self.assertTrue(set(mod.status().stream.ready.keys()))
 
-    def make(self, files=None, real_generator=False):
+    def make(self, files=None, real_generator=False, extras=None):
         lua = LuaRuntime()
 
         def convert(value):
@@ -105,6 +105,19 @@ class NativeTests(unittest.TestCase):
             return road,{items={},mats={}},far,nav
           end}
         ''')
+        if extras is not None:
+            # a generator with switches (generator.lua EXTRAS / applyExtras); the stub notes them at every build
+            lua.globals().extrasStart = convert(extras)
+            lua.execute("""
+              applied=0; extrasSeen=nil
+              stubGenerator.EXTRAS=extrasStart
+              stubGenerator.applyExtras=function() applied=applied+1 end
+              local build=stubGenerator.build
+              stubGenerator.build=function(...)
+                if not extrasSeen then extrasSeen={appliedAtBuild=applied}; for k,v in pairs(stubGenerator.EXTRAS) do extrasSeen[k]=v end end
+                return build(...)
+              end
+            """)
         if real_generator:
             lua.globals().stubGenerator = lua.execute((ROOT / 'mod/lua/ge/extensions/e2r/generator.lua').read_text(encoding='utf8'))
         lua.globals().countries = lua.execute((ROOT / 'mod/lua/ge/extensions/e2r/countries.lua').read_text(encoding='utf8'))
@@ -124,6 +137,61 @@ class NativeTests(unittest.TestCase):
             if job and job.state != 'working':
                 return job
         self.fail('native landing did not finish')
+
+    def landed(self, mod, cv, files, tile=1750):
+        lat, lon = geographic(tile, tile)
+        mod.land(cv(dict(seq=1, lat=lat, lon=lon)))
+        self.pump(mod)
+
+    def test_pack_extras_are_set_before_the_first_tile_is_built(self):
+        defaults = dict(signals=False, lots=False, roadProfiles=False, lampRows=False, openSea=False)
+        files = fixture()
+        files['/earthng/countries/demo/regions/sample.json']['extras'] = dict(signals=True, lots=True, lampRows=True,
+                                                                                openSea=True, unknown=True)
+        lua, mod, cv = self.make(files, extras=defaults)
+        self.landed(mod, cv, files)
+        seen = lua.globals().extrasSeen
+        self.assertEqual((seen.signals, seen.lots, seen.lampRows, seen.openSea), (True, True, True, True))
+        self.assertEqual(seen.roadProfiles, False)          # a key the pack leaves out keeps the default
+        self.assertEqual(seen.appliedAtBuild, 1)             # applyExtras ran before the build
+        self.assertIsNone(lua.globals().stubGenerator.EXTRAS.unknown)
+
+    def test_a_pack_without_extras_restores_the_defaults(self):
+        defaults = dict(signals=False, lots=False, roadProfiles=False, lampRows=False, openSea=False)
+        with_extras = fixture()
+        with_extras['/earthng/countries/demo/regions/sample.json']['extras'] = dict(signals=True, openSea=True, roadProfiles=True)
+        lua, mod, cv = self.make(with_extras, extras=defaults)
+        self.landed(mod, cv, with_extras)
+        gen = lua.globals().stubGenerator
+        self.assertTrue(gen.EXTRAS.signals and gen.EXTRAS.openSea and gen.EXTRAS.roadProfiles)
+        # the next landing reads a pack that has no `extras`: the switches go back
+        lua.globals().files['/earthng/countries/demo/regions/sample.json'].extras = None
+        mod.refresh()
+        mod.unload()
+        lua.execute('extrasSeen=nil')
+        self.landed(mod, cv, with_extras)
+        seen = lua.globals().extrasSeen
+        self.assertEqual([seen[k] for k in ('signals', 'lots', 'roadProfiles', 'lampRows', 'openSea')], [False] * 5)
+        self.assertEqual(lua.globals().applied, 2)
+
+    def test_pack_extras_reach_the_real_generator_switches(self):
+        files = fixture()
+        files['/earthng/countries/demo/regions/sample.json']['extras'] = dict(signals=True, lots=True, roadProfiles=True,
+                                                                                lampRows=True, openSea=True)
+        lua, mod, cv = self.make(files, real_generator=True)
+        gen = lua.globals().stubGenerator
+        self.assertEqual([gen.EXTRAS[k] for k in ('signals', 'lots', 'roadProfiles', 'lampRows', 'openSea')], [False] * 5)
+        lat, lon = geographic(1750, 1750)
+        mod.land(cv(dict(seq=1, lat=lat, lon=lon)))
+        self.assertEqual([gen.EXTRAS[k] for k in ('signals', 'lots', 'roadProfiles', 'lampRows', 'openSea')], [True] * 5)
+
+    def test_a_pack_without_extras_leaves_hand_set_switches_alone(self):
+        defaults = dict(signals=False, lots=False, roadProfiles=False, lampRows=False, openSea=False)
+        lua, mod, cv = self.make(extras=defaults)
+        lua.execute('stubGenerator.EXTRAS.lots = true')      # e.g. world.lua extras({lots = true}) before the landing
+        self.landed(mod, cv, None)
+        self.assertEqual(lua.globals().extrasSeen.lots, True)
+        self.assertEqual(lua.globals().applied, 0)
 
     def test_section_places_are_counties_not_grid_tiles(self):
         _, mod, cv = self.make()

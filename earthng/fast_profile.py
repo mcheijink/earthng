@@ -22,6 +22,8 @@ import os
 
 import numpy as np
 
+import region_profile
+
 STEP = 20.0            # station spacing, m
 ALPHA = 40.0 ** 2      # grade smoothing length 40 m
 BETA = 50.0 ** 4       # grade-change smoothing length 50 m
@@ -115,6 +117,7 @@ def set_road_rules(on):
 #    (GROUND_LENGTH: a masked stretch is bridged by that curve, under GRADE_MAX and CURVE_MIN below);
 # 2. the profile solve then takes the ground line as its target instead of the raw DEM; near structures
 #    its data weight is lowered to RAMP_W so the decks' clearance and grade rules shape the ramps.
+region_profile.apply_env()      # EARTHNG_PROFILE=fork: the road rules default to on
 RULES = os.environ.get('EARTHNG_DEM_RULES', '0').strip() not in ('', '0', 'off', 'no', 'false')
 SIGNATURE = f'profile-rules:{"on" if RULES else "off"}'
 set_road_rules(os.environ.get('EARTHNG_ROAD_RULES', '0').strip().lower() not in ('', '0', 'off', 'no', 'false'))

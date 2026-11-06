@@ -164,7 +164,8 @@ end
 
 -- Fork additions that change what an existing pack draws, all off (generator.lua ROADS.extras): static
 -- traffic signals and speed cameras (signals), bay lines and bus stop paint (lots), the runtime vertical
--- alignment of roads (roadProfiles), German practice for inferred lamps (lampRows), polder land kept dry under the sea plane (openSea). Set them before the landing. Console:
+-- alignment of roads (roadProfiles), German practice for inferred lamps (lampRows), polder land kept dry under the sea plane (openSea). Set them before the landing
+-- (a pack whose region manifest has `extras` sets them itself, native.lua). Console:
 --   extensions.e2r_world.extras({signals = true, lots = true, roadProfiles = true, lampRows = true, openSea = true})
 function M.extras(set)
   local x = require('ge/extensions/e2r/generator').EXTRAS

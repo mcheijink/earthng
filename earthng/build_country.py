@@ -35,6 +35,7 @@ import fast_sources as sources
 import looks
 import nature
 import power
+import region_profile
 import venues
 
 
@@ -885,6 +886,10 @@ def _region_end(archive, ctx, emit, cover_meta=None, vegetation=None, look=None,
             manifest['heights'] = pipeline
         if experiments:
             manifest['experiments'] = experiments
+        profile_extras = region_profile.extras()
+        if profile_extras:
+            # the Lua generator's switches for this pack (native.lua applies them at the landing)
+            manifest['extras'] = profile_extras
         path = f'{base}/manifest.json'
         _write_json(archive, path, manifest)
         if record is not None:
@@ -1042,7 +1047,7 @@ def build_country(country_id, title, version, regions, out, bbox=None, emit=prin
             # index did not change. Never resume a baseline part for a data-rich export.
             import fast_style
             settings = (bbox, look, include, cover_meta, vegetation, [str(p) for p in landcover or ()],
-                        bool(fast_style.POIS), experiments)
+                        bool(fast_style.POIS), experiments, region_profile.extras())
 
             def end(region, ctx):
                 part = parts / _part_key(region, *settings)

@@ -783,12 +783,33 @@ local function clampTune(tune)
   return quality.clamp(tune)
 end
 
+-- Switches a pack carries in its region manifest: `extras` = {signals, lots, roadProfiles, lampRows, openSea},
+-- the fields of generator.EXTRAS. They are applied when the landing starts, before the first tile is built.
+-- A key a pack leaves out stays at the generator's default, and a pack without `extras` restores the
+-- defaults an earlier pack changed (nothing leaks from one pack into the next). Values set by hand
+-- (world.lua extras()) before a landing stay when the pack carries no `extras` and none was applied before.
+local EXTRAS_DEFAULT, extrasFromPack = {}, false
+for name, on in pairs(type(generator.EXTRAS) == 'table' and generator.EXTRAS or {}) do EXTRAS_DEFAULT[name] = on end
+
+local function applyPackExtras(data)
+  local x = generator.EXTRAS
+  if type(x) ~= 'table' then return end
+  local set = type(data) == 'table' and type(data.extras) == 'table' and data.extras or nil
+  if not set and not extrasFromPack then return end
+  for name, default in pairs(EXTRAS_DEFAULT) do
+    if set and set[name] ~= nil then x[name] = set[name] == true else x[name] = default end
+  end
+  extrasFromPack = set ~= nil
+  if type(generator.applyExtras) == 'function' then generator.applyExtras() end
+end
+
 local function land(req)
   ensure()
   req = type(req) == 'table' and req or {}
   state.job = {seq = req.seq, lat = req.lat, lon = req.lon, state = 'working', stage = 'source', progress = 0}
   local country, descriptor, x, y, r = at(req.lat, req.lon)
   if not r then fail('no_data: this point has no complete mounted source neighbourhood'); return state.job end
+  applyPackExtras(r.data)
   active = {region = r, cells = {}, blocks = {}, tiles = {}, horizon = {}, failed = {}, clock = 0, everBuilt = {}, desired = {}, evicted = {}, epoch = 1,
     parked = {},   -- tile key -> {co}: a near tile whose road is out and whose scene waits (update)
     lows = {},   -- cell key -> its lowest ground (world z), for the vista's relief
@@ -1971,6 +1992,7 @@ M.refresh = refresh
 M.mapRoads = mapRoads
 M.at = at
 M.land = land
+M.applyPackExtras = applyPackExtras
 M.update = update
 M.pose = pose
 M.manifest = manifest

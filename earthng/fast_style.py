@@ -4,6 +4,7 @@ surface kind, and a facade per building. No textures are shipped; all paths are 
 import math
 import os
 import zlib
+import region_profile
 import nature
 import power as _power
 import fast_signals
@@ -15,6 +16,8 @@ import retail
 #   EARTHNG_NOISE=1   noise barriers as their own kind (a wall of its tagged height beside the carriageway);
 #                     off, a noise barrier is a fence or a wall as before
 #   EARTHNG_CAMERAS=1 speed cameras (signal nodes are kept either way)
+# EARTHNG_PROFILE=fork defaults all of them to on (region_profile.py); a variable set by hand wins.
+region_profile.apply_env()
 def _switch(name):
     return os.environ.get(name, '0').strip().lower() not in ('', '0', 'off', 'no', 'false')
 
