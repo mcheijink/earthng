@@ -1,0 +1,47 @@
+name: niedersachsen checks
+# Every PR into niedersachsen: the Python tests (earthng/*_test.py; lua_compile_test.py among them compiles every Lua file
+# of the mod under LuaJIT) and the top-down renders of earthng/render_plan.py, uploaded as the `renders` artifact so a
+# review can look at surfaces, rails, lamps and props without the game.
+on:
+  pull_request:
+    branches: [niedersachsen]
+  push:
+    branches: [niedersachsen]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: niedersachsen-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-fast.txt
+      - name: Install
+        # the builders' packages, LuaJIT for the Lua checks (lupa), rasterio for dtm_test.py
+        run: python -m pip install -r requirements-fast.txt lupa rasterio
+      - name: LuaJIT
+        run: python -c "import lupa.luajit21 as l; print(l.LuaRuntime().eval('jit.version'))"
+      - name: Tests
+        working-directory: earthng
+        run: python -m unittest discover -p '*_test.py' -v
+      - name: Renders
+        if: success() || failure()
+        run: python earthng/render_plan.py --out out/render
+      - uses: actions/upload-artifact@v4
+        if: success() || failure()
+        with:
+          name: renders
+          path: out/render/
+          if-no-files-found: warn
+          retention-days: 14

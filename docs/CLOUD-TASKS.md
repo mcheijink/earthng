@@ -12,7 +12,7 @@ EarthNG builds a drivable BeamNG.drive world from real map data. A Python export
 2. **Branch:** one branch per task, `fix/<task-name>`, from `niedersachsen`.
 3. **PR:** into `niedersachsen` of `mcheijink/earthng`. Not into `Alezx311/earthng`: GitHub offers upstream as the default target, so change it.
 4. **You cannot run BeamNG here.** The pack, the downloaded data and the game are not in this repo. Say plainly in the PR what was tested and what needs a test in the game. Never write that something works in the game.
-5. **Tests:** run the `earthng/*_test.py` files that apply. If a test needs local data, say so and skip it. Compile every changed Lua file with LuaJIT or `luac -p` if available.
+5. **Tests:** run the `earthng/*_test.py` files that apply. If a test needs local data, say so and skip it. Compile every changed Lua file with LuaJIT or `luac -p` if available (`earthng/lua_compile_test.py` compiles them all). For a change you could see in the game, run `python earthng/render_plan.py` and look at its top-down images of the real generator's output on synthetic scenes (`--list` shows them). The workflow `niedersachsen checks` runs the tests and the renders on every PR into `niedersachsen` and uploads the images as the `renders` artifact.
 6. **Lua:** keep CRLF line endings. `build()` in `generator.lua` is at LuaJIT's limit of 200 locals: add no local there, put helpers in a table as the code already does (`OFFROAD`, `ROADS`).
 7. **Style:** match the surrounding code and its comment density. Comments give the measured reason for a value.
 8. **Privacy:** this repo is public. Never add coordinates, addresses, personal routes, trip data or screenshots of them.
