@@ -12,6 +12,14 @@ import fast_signals as fs  # noqa: E402
 import fast_style  # noqa: E402
 import looks  # noqa: E402
 
+
+def setUpModule():
+    fast_style.CAMERAS = True      # speed cameras are off in the exporter unless EARTHNG_CAMERAS is set
+
+
+def tearDownModule():
+    fast_style.CAMERAS = False
+
 LON, LAT = .5, .5
 D = .0005   # about 55 m
 
@@ -103,6 +111,18 @@ class Reader(unittest.TestCase):
         self.assertEqual(points[7][1]['maxspeed'], '50')
         self.assertAlmostEqual(float(points[7][1][fs.HEADING]), 0., delta=.5)
         self.assertAlmostEqual(float(points[8][1][fs.HEADING]), 180., delta=.5)
+
+    def test_without_the_camera_switch_no_tracker_runs(self):
+        nodes = [(1, LON - D, LAT, {}), (2, LON, LAT, {'highway': 'traffic_signals', 'traffic_signals:direction': 'forward'}),
+                 (3, LON + D, LAT, {})]
+        ways = [(10, [1, 2, 3], {'highway': 'residential'})]
+        fast_style.CAMERAS = False
+        try:
+            points = scenery(osm(nodes, ways))
+        finally:
+            fast_style.CAMERAS = True
+        self.assertEqual(points[2][0], 'signal')
+        self.assertNotIn(fs.HEADING, points[2][1])
 
     def test_a_camera_direction_stays_as_mapped(self):
         nodes = [(1, LON, LAT, {'highway': 'speed_camera', 'direction': 'W'})]

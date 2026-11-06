@@ -20,7 +20,7 @@ decided here and written into the pack; the game only sweeps it (phase 2):
 - structures: bridges, tunnels, embankments and cuttings as runs, with the waterway clearance a deck
   over navigable water was given (bridge_floors, a lower bound in fast_profile).
 
-Off unless EARTHNG_PACK >= 3; bridge_floors (the profile fix) is always on. Never prints positions.
+Off unless EARTHNG_PACK >= 3; bridge_floors (the profile fix) acts with EARTHNG_BRIDGE_FLOORS=1 (EARTHNG_PROFILE=fork). Never prints positions.
 """
 import hashlib
 import math
@@ -30,6 +30,9 @@ from collections import defaultdict
 
 import numpy as np
 
+import region_profile
+
+region_profile.apply_env()      # EARTHNG_PROFILE=fork: the deck floors default to on
 PACK = int(os.environ.get('EARTHNG_PACK', '2') or 2)
 ENABLED = PACK >= 3
 FORMAT = 'earthng-roads-v3'
@@ -38,7 +41,9 @@ VERSION = 3                   # the section's version in the manifest: 2 adds th
                               # the exits' and entries' added lanes (the game shapes its lane marks to match)
 # phase 3 junction surfaces (fast_junctions) in pack v3: EARTHNG_JUNCTIONS=0 leaves them out
 JUNCTIONS = ENABLED and os.environ.get('EARTHNG_JUNCTIONS', '1') != '0'
-SIGNATURE = f'roads-v3.6:{"on" if ENABLED else "off"}{":junctions" if JUNCTIONS else ""}'
+# decks over navigable water get a lower bound (bridge_floors): off unless EARTHNG_BRIDGE_FLOORS=1
+FLOORS = region_profile.switch('EARTHNG_BRIDGE_FLOORS', False)
+SIGNATURE = f'roads-v3.6:{"on" if ENABLED else "off"}{":junctions" if JUNCTIONS else ""}{":floors" if FLOORS else ""}'
 
 CHUNK = 200.0                 # m of stroke per chunk (the game's unit of creation and streaming)
 MAX_STATION = 10.0            # m between stations on a straight (z is linear between them: <= 1.3 cm at R 1,000 m)

@@ -22,7 +22,7 @@ package.path = REPO_ROOT .. '/mod/lua/?.lua;' .. package.path
 GENERATOR = require('ge/extensions/e2r/generator')
 function BUILD(cells, statics)
   local opts = {tileSize = 500, regionId = 'test', far = false, horizon = false, farStep = 100, horizonStep = 100,
-    latitude = 52.5, seaLevel = -100, country = 'germany', heightPipeline = true, detail = 50,
+    latitude = 52.5, seaLevel = -100, country = 'germany', heightPipeline = true, lots = true, detail = 50,
     look = {statics = statics}, maxTrees = 0, maxGrass = 0, maxRocks = 0, maxFarTrees = 0, parkedCars = 1, maxCars = 300}
   local _, scene = GENERATOR.build(cells, 0, 0, opts)
   local out = {}
