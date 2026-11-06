@@ -8,6 +8,7 @@ import random
 import zlib
 from PIL import Image, ImageDraw
 
+import fast_facade
 import fast_photo as photo
 import fast_style as style
 
@@ -125,6 +126,15 @@ def surface(kind):
     return im.resize((1024, 1024), Image.Resampling.NEAREST)
 
 
+def sheet_source(kind):
+    """The older pixel surface that stands in for a plain sheet's kind."""
+    if kind.startswith('roof_'):
+        return 'roof_metal' if 'prof' in kind or kind in ('roof_tin', 'roof_zinc') else 'roof_tile'
+    if kind.startswith('fence_'):
+        return 'fence_wall'
+    return 'road' if kind == 'road_sett' else 'wall_plaster'
+
+
 def pixel_source(kind):
     """Every kind needs a png. Natural classes reuse an authored pixel surface."""
     alias = {'meadow': 'ground', 'orchard': 'park', 'scrub': 'forest', 'heath': 'ground',
@@ -142,6 +152,8 @@ def build(root):
     out = root / 'pixel'
     out.mkdir(parents=True, exist_ok=True)
     for kind in style.KINDS:
+        if kind in style.SHEET_KINDS or kind.startswith('wall_') and fast_facade.like(kind[5:]) != kind[5:]:
+            continue                                # fields() points them at an older kind's art
         if kind.startswith('wall_'):
             facade(kind[5:]).save(out / f'{kind}.color.png')
         else:
@@ -177,6 +189,7 @@ def fields(base):
                    'roof_sheet': 'roof_metal', 'roof_mtile_red': 'roof_tile', 'roof_mtile_brown': 'roof_tile',
                    'roof_mtile_green': 'roof_tile', 'roof_slate_dark': 'roof_metal', 'door_garage': 'wall_block', 'door_rust': 'wall_block',
                    'clad_metal': 'wall_block', 'clad_tin': 'wall_block', 'plinth': 'paved',
+                   'pipe': 'wall_block', 'ac_unit': 'wall_block', 'dish': 'wall_block', 'manhole': 'road', 'drain': 'road', 'patch': 'road', 'wire': 'wall_block', 'roof_gold': 'roof_metal', 'plate': 'wall_block', 'glyphs': 'mark', 'paint_red': 'wall_block', 'fascia': 'wall_block',
                    'gable': 'wall_plaster', 'hw_white': 'wall_stucco', 'hw_yellow': 'wall_plaster',
                    'hw_blue': 'wall_pls_blue', 'hw_green': 'wall_pls_green', 'hw_pink': 'wall_pls_peach',
                    'hw_aged': 'wall_plaster', 'hw_brick_red': 'wall_brick_red', 'hw_silicate': 'wall_brick_white',
@@ -186,8 +199,14 @@ def fields(base):
                    'door_house': 'wall_block', 'plinth_brown': 'paved',
                    'chimney': 'wall_brick_red', 'yard': 'car', 'sand': 'trodden', 'railing_blue': 'fence_mesh',
                    'railing_green': 'fence_mesh', 'railing_dark': 'fence_mesh'}.get(kind, kind)
+        if kind.startswith('wall_'):
+            texture = 'wall_' + fast_facade.like(kind[5:])
+        elif kind in style.SHEET_KINDS:
+            texture = sheet_source(kind)
         f.update(baseColorMap=f'{base}/pixel/{texture}.color.png', baseColorFactor='1 1 1 1',
                  emissiveFactor='0 0 0', roughnessFactor=.9, metallicFactor=0)
+        if kind in ('brand_sign', 'brand_photo', 'storefront'):
+            f['baseColorMap'] = f'{base}/real/{kind}.color.png'
         if kind == 'mark_yellow':
             f['baseColorFactor'] = '0.95 0.75 0.12 1'
         fast_art.stylised_decal(kind, f)

@@ -144,9 +144,10 @@ class Buildings(unittest.TestCase):
         lean = self.near(tris, 149., 399., 161., 407., ROOFS)
         self.assertEqual(len(lean), 2)
         zs = sorted({round(q[2], 2) for _, p in lean for q in p})
-        # facing north: low on the north side (y = 406), high on the south
-        north = [q for _, p in lean for q in p if q[1] > 406]
-        south = [q for _, p in lean for q in p if q[1] < 400]
+        # facing north: low on the north side (y = 406), high on the south (one plane over the
+        # walls, no eaves: the lean-to is the generic skillion plane, BLD.skillion)
+        north = [q for _, p in lean for q in p if q[1] > 405]
+        south = [q for _, p in lean for q in p if q[1] < 401]
         self.assertLess(max(q[2] for q in north), min(q[2] for q in south))
         self.assertEqual(len(zs), 2)
 

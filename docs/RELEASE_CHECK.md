@@ -1,5 +1,58 @@
 # Release verification
 
+## Planet 0.7.0 and Map Builder — 2026-11-02
+
+The `EarthNG` player release gets a new `earthng_planet.zip` (manifest 0.7.0, 267 MB) and
+`EarthNG-MapBuilder.zip`, both from cf13482; release title and notes updated.
+`earthng_albania.zip` stays the published 0.4.0 file. The previous two assets and the
+old notes are kept in `out/release/player-0.7.0-backup`.
+
+Since 0.6.4: navigation and routing past the landing region, the GC stutter guard, shop
+fronts, retail signs and logos, roadside services, facade and street details, traffic
+lights and mapped signs, regional textures, landmark rules, sea-level harbours, bridges
+split over water, routing graphs in every pack. Packs need a rebuild for everything that
+comes from pack data (index version fast-19); the packs on the old links are not rebuilt.
+
+- Full unit suite before packaging: 638 tests OK (`.venv`), on master at aa3d7cd; cf13482
+  adds only notes.
+- Map Builder ZIP unpacked into `out/release/test 0.7.0` (a folder with a space), the tests
+  copied in, since the ZIP ships none: `test_country` 28, `test_country_setup` 25,
+  `test_mapbuilder` 40, `test_tiles` 6, all OK.
+- In game, the release ZIP in a disposable profile with the Kyiv spot pack, quality 60,
+  1920x1080 (`out/release/smoke-0.7.0`): landed, drove 25 m into a wall with real damage,
+  functional status passed, no Lua errors. Performance status failed on 2 frames over
+  100 ms: mean 18 ms, p99 54.5 ms, 42 frames over 33 ms of 1,643.
+- Landmark stills ran on planets with a raised geometry cache and draw distance; those
+  planets are not released. Not run on BeamNG 0.39 for this release. Streaming at 200-250
+  km/h through the dense cities is not proven.
+- Tokyo Tower's body is a plain `building:part` 150 m high and keeps office windows; only
+  its upper sections are metal.
+
+## Planet 0.6.4 and Map Builder — 2026-10-26, afternoon
+
+The `EarthNG` player release gets a new `earthng_planet.zip` (manifest 0.6.4) and
+`EarthNG-MapBuilder.zip`, both from 26b7be9; release title and notes updated.
+`earthng_albania.zip` stays the published 0.4.0 file. The previous two assets and the
+old notes are kept in `out/release/player-0.6.4-backup`. Country packs are not rebuilt:
+the changes are Lua only.
+
+Since 0.6.3: the road ahead streams first (a tile's road before its scene, tiles by
+arrival time along the heading, urgent budgets), OSM lamps off the carriageway, decks
+not raised over a level slip road, parapets open at slip road mouths; merged PRs #18
+(Map Builder memory for whole countries at 10 m) and #19 (far-tile roads, staggered
+decks, rails under decks, road audit).
+
+- Full unit suite before packaging: 423 tests OK (`.venv`).
+- Offline: `bench_native.py` across Kyiv at 83 m/s, road lead min 0 -> 7.3 s;
+  `road_audit.py` over Kyiv 50.40-50.48 N, 30.45-30.65 E: lamps on a carriageway
+  3,705 -> 6, deck walls on asphalt 23 -> 3, steps 25 -> 7; Lviv centre lamps 43 -> 1.
+- Map Builder ZIP unpacked into `out/release/test 0.6.4` (a folder with a space):
+  `test_country` 23, `test_country_setup` 25, `test_mapbuilder` 37, `test_tiles` 6, all
+  OK; the window's modules import from that folder with `python -I`.
+- In game: the user drove this planet code (the same Lua, built with `--lang en`) in
+  Kyiv at high speed and confirmed the road ahead, the lamps and the bridge joints. The
+  release ZIP itself was not run in a disposable profile.
+
 ## Map Builder — 2026-10-26, morning
 
 Only `EarthNG-MapBuilder.zip` on the `EarthNG` release is replaced, built from e8e2285.

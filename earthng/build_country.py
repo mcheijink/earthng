@@ -35,6 +35,8 @@ import fast_sources as sources
 import looks
 import nature
 import power
+import region_profile
+import venues
 
 
 FORMAT = 'earthng-features-v2'
@@ -248,12 +250,14 @@ def compile_cell(store, rect, include=None):
                 cell['junctions'].append({'id': f'{fid}:{n}',
                                           'rings': _rings(store, part, height), 'height': height})
     seen.clear()
-    pending, points, wires = [], [], []
+    pending, points, wires, tidal = [], [], [], []
     for fid, kind, data, geometry in _scenery(store, padded):
         if kind == 'coastline' or (kind, fid) in seen or not looks.keep_scenery(kind, include):
             continue
         seen.add((kind, fid))
         tags = data.get('tags', {})
+        if TIDAL and kind == 'water' and tags.get('water') == 'harbour' and _at_sea_level(store, geometry):
+            tidal.append(geometry)
         # power lines keep whole spans and their towers' facts (power.py); a tower is no point of its own
         if kind == 'power_line':
             wires.append((fid, tags, geometry))
@@ -262,7 +266,8 @@ def compile_cell(store, rect, include=None):
             continue
         if kind == 'wind_turbine':
             tags = power.keep(tags, power.TURBINE_TAGS)
-        if kind != 'building' and not shapely.box(*padded).contains(geometry):
+        # a street's own power line stays whole: its nodes are its poles, a cut end would be a wire to nowhere
+        if kind not in ('building', 'power') and not shapely.box(*padded).contains(geometry):
             # A forest or field spans dozens of cells; whole, it was copied into each of them
             # (4/5 of a rural cell). Lua clips to the tile anyway, and the tile lies inside
             # this padded cell, so the cut 100 m outside the cell never shows.
@@ -272,7 +277,8 @@ def compile_cell(store, rect, include=None):
             if kind == 'building':
                 height = max(2.5, min(850., sources.number(tags.get('height'),
                              sources.number(tags.get('building:levels'), 3) * 3)))
-                feature.update(height=height, minHeight=max(0., sources.number(tags.get('min_height'), 0.)))
+                feature.update(height=height, minHeight=max(0., sources.number(tags.get('min_height'),
+                               sources.number(tags.get('building:min_level'), 0.) * 3)))
                 cell['buildings'].append(feature)
             else:
                 cell['areas'].append(feature)
@@ -304,7 +310,8 @@ def compile_cell(store, rect, include=None):
         # Detailed mapped footprints win over satellite classes. Raster areas
         # carry no sampled Z: runtime drapes them on the shared final surface.
         overrides = [shapely.Polygon(f['rings'][0], f['rings'][1:])
-                     for f in cell['areas'] + cell['buildings'] if f.get('rings')]
+                     for f in cell['areas'] + cell['buildings']
+                     if f.get('rings') and f.get('kind') not in ('fuel_site', 'grocery_site', 'fast_food_site', 'post_site', 'service_site')]
         for n, (kind, geometry, tags) in enumerate(cover.areas(rect, overrides)):
             if not looks.keep_scenery(kind, include):
                 continue
@@ -328,8 +335,8 @@ def compile_cell(store, rect, include=None):
         heights = np.asarray(store.terrain.sample(np.array([(x, y) for y in ys for x in xs])), dtype=float)
     if not np.isfinite(heights).all():
         raise ValueError('non-finite terrain grid')
-    heights = _coast(store, rect, xs, ys, heights)
-    cell['terrain'] = {'rect': list(rect), 'nx': len(xs), 'ny': len(ys), 'heights': heights.tolist()}
+    heights = _flood(xs, ys, _coast(store, rect, xs, ys, heights), tidal)
+    cell['terrain'] ={'rect': list(rect), 'nx': len(xs), 'ny': len(ys), 'heights': heights.tolist()}
     return cell
 
 
@@ -425,6 +432,32 @@ def _coast(store, rect, xs, ys, heights):
     dry = (side > 0) & (distance <= COAST_DRY)
     out[wet] = np.minimum(out[wet], level - 1.0 - 0.01 * np.minimum(distance[wet], 600))
     out[dry] = np.maximum(out[dry], level + 0.6)
+    return out
+
+
+# EARTHNG_TIDAL=0: harbour water is left at the DEM's height (the fork's result; EARTHNG_PROFILE=fork); on by default (upstream)
+region_profile.apply_env()
+TIDAL = region_profile.switch('EARTHNG_TIDAL', True)
+HARBOUR_RISE = 12.  # a water=harbour is the sea's when the DEM keeps it this close to sea level
+HARBOUR_FLOOR = 2.  # metres its ground lies under the sea plane
+
+
+def _at_sea_level(store, geometry):
+    """An inland river port is water=harbour too: its own level, no pit under it. The polygon's
+    one inner point answers, so every cell of it agrees."""
+    point = geometry.representative_point()
+    return float(np.ravel(store.terrain.sample(np.array([(point.x, point.y)])))[0]) <= sources.LIFT + HARBOUR_RISE
+
+
+def _flood(xs, ys, heights, waters):
+    """Port Jackson: the coastline stops at the Heads and the harbour is natural=water, so _coast
+    does not reach it and the water lay on the DEM's blur, a hump over the Opera House."""
+    if not waters:
+        return heights
+    gx, gy = np.meshgrid(xs, ys)
+    wet = shapely.contains_xy(shapely.union_all(waters), gx.ravel(), gy.ravel())
+    out = np.asarray(heights, dtype=float).copy()
+    out[wet] = np.minimum(out[wet], sources.LIFT - HARBOUR_FLOOR)
     return out
 
 
@@ -744,7 +777,8 @@ def _worker_run(tasks):
     return [_worker_block(task) for task in tasks]
 
 
-def _region_end(archive, ctx, emit, cover_meta=None, vegetation=None, look=None, cancel=None, record=None):
+def _region_end(archive, ctx, emit, cover_meta=None, vegetation=None, look=None, cancel=None, record=None,
+                experiments=None):
     """Write a begun region's blocks as they finish, then its manifest. record (a list) also
     collects every written member, for _save_part."""
     store, core, region_id, frame, base = ctx['store'], ctx['core'], ctx['region_id'], ctx['frame'], ctx['base']
@@ -853,6 +887,12 @@ def _region_end(archive, ctx, emit, cover_meta=None, vegetation=None, look=None,
             # the generator keeps these profiles as exported and fits the ground to them by cross-section
             # (generator.lua ROADS.section); without it, its runtime height passes and generic pull as before
             manifest['heights'] = pipeline
+        if experiments:
+            manifest['experiments'] = experiments
+        profile_extras = region_profile.extras()
+        if profile_extras:
+            # the Lua generator's switches for this pack (native.lua applies them at the landing)
+            manifest['extras'] = profile_extras
         path = f'{base}/manifest.json'
         _write_json(archive, path, manifest)
         if record is not None:
@@ -871,8 +911,8 @@ def _region_end(archive, ctx, emit, cover_meta=None, vegetation=None, look=None,
 
 
 # What a finished region of an export depends on besides its source index: the exporter's own code.
-_PART_CODE = ('build_country', 'country_format', 'fast_sources', 'fast_roads', 'fast_junctions', 'fast_style', 'nature', 'looks', 'landcover', 'dtm',
-              'fast_profile', 'power')
+_PART_CODE = ('build_country', 'country_format', 'fast_sources', 'fast_roads', 'fast_junctions', 'fast_style', 'retail', 'nature', 'looks',
+              'landcover', 'dtm', 'fast_profile', 'power')
 HEIGHTS_FORMAT = 'earthng-heights-1'
 
 
@@ -899,6 +939,11 @@ def _part_key(region, *settings):
     directory, core, region_id = _region_spec(region)
     digest.update(json.dumps([directory.name, core, region_id, FORMAT, nature.VERSION, fast_roads.SIGNATURE, *settings],
                              sort_keys=True, default=str).encode())
+    outline = region.get('shape') if isinstance(region, dict) else None
+    if outline is not None:
+        if isinstance(outline, dict):
+            outline = shapely.geometry.shape(outline)
+        digest.update(shapely.to_wkb(outline, byte_order=1))
     label = re.sub(r'[^A-Za-z0-9-]+', '-', region_id or directory.name)
     return f'{label}-{digest.hexdigest()[:16]}.part'
 
@@ -939,7 +984,7 @@ def _export_region(archive, country_id, region, bbox, emit, jobs=1, landcover=()
 
 
 def build_country(country_id, title, version, regions, out, bbox=None, emit=print, jobs=1, landing=None, landcover=(), vegetation=None,
-                  look=None, include=None, cancel=None, map_data=None, section=None, credits=()):
+                  look=None, include=None, cancel=None, map_data=None, section=None, credits=(), experiments=None):
     """Stream source blocks to ZIP64 and atomically replace the completed archive.
     section: {'id', 'title'}: one region, written as a section of the country
     (earthng_<country>_<section>.zip with sections/<id>/section.json and no country manifest),
@@ -1001,13 +1046,18 @@ def build_country(country_id, title, version, regions, out, bbox=None, emit=prin
             # Each finished region is kept beside the pack until the pack is complete: a stopped
             # or failed export (an hour and a half for Ukraine) resumes with the regions it lacks.
             parts = output / f'.{target.stem}.parts'
-            settings = (bbox, look, include, cover_meta, vegetation, [str(p) for p in landcover or ()])
+            # The point switch changes the actual data, even when the Python source and region
+            # index did not change. Never resume a baseline part for a data-rich export.
+            import fast_style
+            settings = (bbox, look, include, cover_meta, vegetation, [str(p) for p in landcover or ()],
+                        bool(fast_style.POIS), experiments, region_profile.extras())
 
             def end(region, ctx):
                 part = parts / _part_key(region, *settings)
                 members = []
                 try:
-                    result = _region_end(archive, ctx, emit, cover_meta, vegetation, look, cancel, members)
+                    result = _region_end(archive, ctx, emit, cover_meta, vegetation, look, cancel, members,
+                                         experiments=experiments)
                 except ValueError as exc:
                     skipped(region, exc)
                     _save_part(part, None, [('skip', str(exc))])
@@ -1085,6 +1135,11 @@ def build_country(country_id, title, version, regions, out, bbox=None, emit=prin
             if include:
                 manifest['include'] = include
             manifest['credits'] = [*CREDITS, *(credits or ()), *region_credits]
+            # the register's places in this pack, for missions and the map (docs/VENUES.md)
+            places = venues.catalogue(manifest['coverage'])
+            if places:
+                manifest['venues'] = len(places)
+                manifest['credits'].extend(venues.credits(places))
             if section is None:
                 folder = f'earthng/countries/{country_id}'
                 _write_json(archive, f'{folder}/manifest.json', manifest)
@@ -1097,15 +1152,45 @@ def build_country(country_id, title, version, regions, out, bbox=None, emit=prin
                 _write_json(archive, f'{folder}/section.json', manifest)
             label = title.strip() + (f" - {section['title']}" if section else '')
             _write(archive, f'{folder}/CREDITS.txt', _credits_text(label, manifest['credits']))
+            if places:
+                _write_json(archive, f'{folder}/venues.json', places)
             # the offline map is the country's: a section's zip leaves it to the country pack
             if map_data is not None and section is None:
                 from build_map import write_archive
                 write_archive(archive, map_data, f'earthng/countries/{country_id}/map')
+        _add_routing(temporary, jobs, emit, cancel)
         os.replace(temporary, target)
         shutil.rmtree(output / f'.{target.stem}.parts', ignore_errors=True)
     finally:
         Path(temporary).unlink(missing_ok=True)
     return target
+
+
+def _add_routing(pack, jobs, emit, cancel=None):
+    """The navigation's graph of every region (docs/NAVIGATION.md), from the pack's own roads, so
+    the route a player picks works in the pack as it comes. Ukraine: 101 regions, ~40 min at 3 jobs."""
+    import build_routing
+    from concurrent.futures import ProcessPoolExecutor
+    with zipfile.ZipFile(pack) as archive:
+        regions = build_routing.regions_of(archive)
+    tasks = [(str(pack), region, prefix) for region, prefix in sorted(regions.items())]
+    if not tasks:
+        return
+    built, workers = [], min(jobs or 1, len(tasks))
+    pool = ProcessPoolExecutor(workers) if workers > 1 else None
+    try:
+        for done, (region, data, info) in enumerate((pool.map if pool else map)(build_routing.build_region, tasks), 1):
+            if _stopped(cancel):
+                raise InterruptedError('build stopped')
+            built.append((region, data))
+            emit(f"routing {done}/{len(tasks)}: {region}, {info['nodes']} nodes")
+    finally:
+        if pool:
+            pool.shutdown(cancel_futures=True)
+    with zipfile.ZipFile(pack, 'a', zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+        for region, data in built:
+            country = regions[region].split('/')[2]
+            archive.writestr(f'earthng/countries/{country}/routing/{region}.bin', data)
 
 
 def section_region(source, dem, work, core, region_id, outline=None, emit=print):
@@ -1240,12 +1325,26 @@ def run_job(path):
         destination.write_text(json.dumps([_region_record(region) for region in regions]), encoding='utf-8')
         return
     if command == 'export':
-        archive = build_country(
-            job['id'], job['title'], job['version'],
-            [_revive_region(region) for region in job['regions']], job['out'],
-            jobs=job.get('jobs') or 1, landing=job.get('landing'), look=job.get('look'),
-            include=job.get('include'), map_data=job.get('map_data'), section=job.get('section'),
-            credits=job.get('credits') or ())
+        import fast_style
+        previous_pois = fast_style.POIS
+        previous_env = os.environ.get('EARTHNG_POIS')
+        try:
+            if job.get('rich_data'):
+                # Spawned export workers import fast_style afresh and inherit this environment.
+                os.environ['EARTHNG_POIS'] = '1'
+                fast_style.POIS = True
+            archive = build_country(
+                job['id'], job['title'], job['version'],
+                [_revive_region(region) for region in job['regions']], job['out'],
+                jobs=job.get('jobs') or 1, landing=job.get('landing'), look=job.get('look'),
+                include=job.get('include'), map_data=job.get('map_data'), section=job.get('section'),
+                credits=job.get('credits') or (), experiments=job.get('experiments'))
+        finally:
+            fast_style.POIS = previous_pois
+            if previous_env is None:
+                os.environ.pop('EARTHNG_POIS', None)
+            else:
+                os.environ['EARTHNG_POIS'] = previous_env
         destination.write_text(str(archive), encoding='utf-8')
         return
     raise ValueError(f'unknown build job {command}')

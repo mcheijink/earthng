@@ -37,6 +37,11 @@ M.TUNE = {
   railBehind = {2, 4}, -- m behind a rail where another carriageway makes it a median rail (rule:median: edges under
                        -- 6 m apart, the rail in the middle; a mapped one up to 4 m out); 2 m apart, so a lane of 3 m
                        -- whose near edge lies within 4 m is never missed
+  -- Where a rail meets a bridge deck it joins the deck's parapet (M.railPaths): a rail that stops within railJoin m of the
+  -- bridge's end runs on to it, its last railTaper m (at least 8 x the sideways step) draw in to the parapet, and it ends
+  -- railOverrun m inside it, its face railJoinOffset m (a concrete barrier: railJoinJersey) from the parapet's inner face, so
+  -- there is no gap and no rail end toward the traffic. railJoin = 0: off, a rail ends where it is mapped.
+  railJoin = 14, railTaper = 6, railOverrun = .3, railJoinOffset = .08, railJoinJersey = .15,
   navStep = 80,        -- m between nav knots at most (generator navSegment)
   spawnStep = 1,
   -- Transitions along a road (own choice, NOT from a guideline): where two strokes meet straight on
@@ -142,10 +147,76 @@ M.MARKS = {
   taperRows = 8,
 }
 
+-- material: the look of the beam and the posts, a stock game material by name. The game loads the common art
+-- (art/shapes/objects/main.materials.json among it) for every level, a level's own materials only with that level.
+-- M.railLook picks what the game can draw: 1 the stock material by name; 2 our own e2rf_guardrail, defined at runtime
+-- from the stock sheet's texture paths, if only the stock definition is missing; 3 `fallback`, our own kind
+-- (e2rf_<kind>). material = nil, or = fallback: always 3. jerseyMaterial: our own kind for the concrete barriers
+-- (the stock material is a W-beam sheet).
+-- stock: the layout of that sheet (t_italy_guardrails_b: 1024 x 1024 px, 341 px a metre, v down the image as the engine
+-- reads it): a beam panel is `panel` m of u, its bolts at the panel's start: the post spacing, so a joint sits on every
+-- post (the stock mesh stretches it over 3 m; 4 m stretches the sheet by a third, which its bolt rows take); its W strip is image
+-- rows 350-451, v0 at the beam's foot and v0 + dv at its top; the posts sample the plain patch post = {u0, v top, u1, v bottom}.
 M.RAIL = {height = .75, beam = .32, thick = .10, depth = .06, post = .14, posts = 4, sink = .3,
-  material = 'clad_metal', kinds = {guard_rail = 'beam', cable_barrier = 'beam', jersey_barrier = 'jersey'},
+  material = 'italy_guardrails', fallback = 'clad_metal', jerseyMaterial = 'clad_metal',
+  stock = {panel = 4, v0 = .441, dv = -.099, post = {.39, .285, .63, .332},
+    define = {name = 'e2rf_guardrail', dir = '/assets/materials/trim/metal/m_italy_guardrails/', metallicFactor = .75,
+      maps = {baseColorMap = 't_italy_guardrails_b.color.png', normalMap = 't_italy_guardrails_nm.normal.png',
+        metallicMap = 't_italy_guardrails_m.data.png', roughnessMap = 't_italy_guardrails_r.data.png'}}},
+  kinds = {guard_rail = 'beam', cable_barrier = 'beam', jersey_barrier = 'jersey'},
   jersey = {height = .81, base = .61, top = .15}, postSource = 'memory (Pfostenabstand 4 m einfache Schutzplanke)'}
 M.DECK = {parapet = .9, thick = .3, material = 'fence_wall', piece = 2, clear = .3}
+
+-- What the game can draw for a rail (see M.RAIL). Asks the engine through guarded globals (scenetree, FS, log,
+-- jsonWriteFile, loadJsonMaterialsFile); without them (offline) the stock material is taken. Once per setting, logged once.
+-- Returns {tier, stock, name (the engine's material), kind (the generator's: '=' .. name for a stock material, else the
+-- e2rf_ kind) and, with stock, panel, v0, dv, post}.
+local railLooks = {}
+local function inGame(name)
+  if not scenetree or not scenetree.findObject then return true end
+  return scenetree.findObject(name) ~= nil
+end
+local function defineRail(d)
+  if not (FS and scenetree and jsonWriteFile and loadJsonMaterialsFile) then return false end
+  local stage = {metallicFactor = d.metallicFactor}
+  for field, file in pairs(d.maps) do
+    local path = d.dir .. file
+    if not (FS:fileExists(path) or FS:fileExists(path:sub(1, -5) .. '.dds')) then return false end
+    stage[field] = path
+  end
+  if not scenetree.findObject(d.name) then
+    jsonWriteFile('e2r_world/rail_material.json', {[d.name] = {name = d.name, mapTo = d.name, class = 'Material',
+      Stages = {stage, {}, {}, {}}, annotation = 'GUARD_RAIL', groundType = 'METAL', dynamicCubemap = true,
+      translucentBlendOp = 'None', version = 1.5}}, false)
+    loadJsonMaterialsFile('/e2r_world/rail_material.json')
+  end
+  return true
+end
+function M.railLook(R)
+  R = R or M.RAIL
+  local key = tostring(R.material) .. '>' .. tostring(R.fallback)
+  local look = railLooks[key]
+  if look then return look end
+  local S = R.stock or M.RAIL.stock
+  look = {tier = 3, stock = false, kind = R.fallback, name = 'e2rf_' .. R.fallback}
+  if R.material and R.material ~= R.fallback and S then
+    local function stockLook(tier, name, kind)
+      return {tier = tier, stock = true, kind = kind, name = name, panel = S.panel, v0 = S.v0, dv = S.dv, post = S.post}
+    end
+    local def = S.define
+    if inGame(R.material) then
+      look = stockLook(1, R.material, '=' .. R.material)
+      if log then log('I', 'e2r', 'guard rails: stock material ' .. R.material) end
+    elseif def and defineRail(def) then
+      look = stockLook(2, def.name, (def.name:gsub('^e2rf_', '')))
+      if log then log('W', 'e2r', 'guard rails: stock material ' .. R.material .. ' is not loaded, ' .. def.name .. ' made from its texture paths') end
+    elseif log then
+      log('W', 'e2r', 'guard rails: stock material ' .. R.material .. ' is not in the game, using ' .. R.fallback)
+    end
+  end
+  railLooks[key] = look
+  return look
+end
 local SPEED = {motorway = 110, trunk = 90, primary = 60, secondary = 60, tertiary = 50, unclassified = 50,
   residential = 40, living_street = 20, service = 20}
 local DRIVE = {motorway = 1, trunk = 1, primary = 1, secondary = 1, tertiary = .9, unclassified = .7,
@@ -660,7 +731,7 @@ function M.plan(data, opts)
   local rect = opts.rect
   local classes = opts.classes or M.CLASSES.fast
   local plan = {strokes = {}, segments = {}, covered = {}, plated = {}, stats = {chunks = 0, owned = 0, plates = 0},
-    rect = rect, opts = opts, lift = opts.lift or T.lift}
+    rect = rect, opts = opts, lift = opts.lift or T.lift, conformal = opts.conformal}
   local tick = pacer(plan)
   -- strokes
   for sid, byIndex in pairs(data.byStroke) do
@@ -1293,7 +1364,9 @@ function M.point(plan, S, row, u)
   -- where the row lies in the host's plane (w = 0: a fork's or merge's lower-ranked branch, a stroke ending on another) it
   -- sits TUNE.planeSep under it, fading out with the blend: two coplanar surfaces over one stretch z-fought (in testing,
   -- 15.3, 37.5, 50.6; the cut leaves the rows near a nose over the host's lanes), now the host's is always the upper
-  return {x, y, hz + (own - hz) * row.w - M.TUNE.planeSep * (1 - row.w)}
+  -- (conformal ground: none, the host's surface is not drawn twice there, see M.forkPieces)
+  local sep = plan.conformal and plan.conformal[S.base] and 0 or M.TUNE.planeSep
+  return {x, y, hz + (own - hz) * row.w - sep * (1 - row.w)}
 end
 
 -- the surface z of a row at u, from its vertices (piecewise linear R-M-L, extended past the edges)
@@ -1323,10 +1396,10 @@ end
 -- Footprint index: is (x, y) on a drawn surface (and at what height)?
 -- ---------------------------------------------------------------------------------------------------
 
-local function addQuad(plan, poly, S, s)
+local function addQuad(plan, poly, S, s, c)
   local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
   for _, p in ipairs(poly) do x0, y0, x1, y1 = min(x0, p[1]), min(y0, p[2]), max(x1, p[1]), max(y1, p[2]) end
-  local entry = {poly = poly, S = S, s = s, box = {x0, y0, x1, y1}}
+  local entry = {poly = poly, S = S, s = s, box = {x0, y0, x1, y1}, c = c}
   for bx = floor(x0 / BIN), floor(x1 / BIN) do
     for by = floor(y0 / BIN), floor(y1 / BIN) do
       local k = binKey(bx, by)
@@ -1341,8 +1414,8 @@ function M.index(plan, S, c)
   for _, list in ipairs(c.rows) do
     for k = 1, #list - 1 do
       local a, b = list[k], list[k + 1]
-      if a.eR + a.uM > 1e-4 or b.eR + b.uM > 1e-4 then addQuad(plan, {a.R, b.R, b.M, a.M}, S, a.s) end
-      if a.eL - a.uM > 1e-4 or b.eL - b.uM > 1e-4 then addQuad(plan, {a.M, b.M, b.L, a.L}, S, a.s) end
+      if a.eR + a.uM > 1e-4 or b.eR + b.uM > 1e-4 then addQuad(plan, {a.R, b.R, b.M, a.M}, S, a.s, c) end
+      if a.eL - a.uM > 1e-4 or b.eL - b.uM > 1e-4 then addQuad(plan, {a.M, b.M, b.L, a.L}, S, a.s, c) end
     end
   end
 end
@@ -2079,7 +2152,118 @@ function M.reversedAt(S, s)
   return false
 end
 
-function M.surfaceMesh(plan, S, c, meshOf, o, lift, uv)
+-- Conformal ground, forks and merges: a slip road's rows in its host's plane lay over the host's own rows (the host's
+-- surface drawn twice, apart by TUNE.planeSep to keep them from z-fighting). With plan.conformal the branch's quad
+-- keeps only the pieces outside the host's drawn quads, and a piece corner on the host's edge takes the host's height
+-- there: the gore between the two is one surface bounded by shared edges, no road lies on a road.
+-- (The same for a stroke that ends on another or runs over it, TUNE.endJoin and overlapEase: its rows in the other's
+-- plane are cut by the other's quads.)
+-- H: the stroke whose plane the quad's rows are in (hostOf); poly: the quad's four corners ({x, y, z}, lifted, in the
+-- order the mesh fans them from the first); -> {pieces: lists of corners {x, y, z}} (the quad itself when no host
+-- row covers it)
+local Conf
+do
+  local ok, mod = pcall(require, 'ge/extensions/e2r/conformal')
+  Conf = ok and type(mod) == 'table' and mod or nil
+end
+-- the stroke the rows a, b of S lie in the plane of (they blend to it: w < 1), when S cuts the ground
+local function hostOf(plan, S, a, b)
+  if not (plan.conformal and plan.conformal[S.base]) then return nil end
+  if a.w < 1 then return a.endHost or S.host end
+  if b.w < 1 then return b.endHost or S.host end
+end
+function M.forkPieces(plan, S, H, poly)
+  if not (Conf and H and plan.conformal and plan.conformal[S.base]) then return {poly} end
+  local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
+  for _, p in ipairs(poly) do x0, y0, x1, y1 = min(x0, p[1]), min(y0, p[2]), max(x1, p[1]), max(y1, p[2]) end
+  ensureAt(plan, (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0 + y1 - y0) / 2 + 1)
+  local hosts, seen = {}, {}
+  for bx = floor(x0 / BIN), floor(x1 / BIN) do
+    for by = floor(y0 / BIN), floor(y1 / BIN) do
+      for _, e in ipairs(plan.bins[binKey(bx, by)] or NONE) do
+        local b = e.box
+        -- (only a host that is drawn here: its chunk is this tile's own or inside its ground margin)
+        if e.S == H and e.c and (e.c.owned or e.c.ground) and not seen[e] and b[1] <= x1 and b[3] >= x0 and b[2] <= y1 and b[4] >= y0 then
+          seen[e] = true
+          hosts[#hosts + 1] = e
+        end
+      end
+    end
+  end
+  if #hosts == 0 then return {poly} end
+  local ring = Conf.ring(poly)
+  if not ring then return NONE end
+  local pieces = {ring}
+  for _, e in ipairs(hosts) do
+    local out = {}
+    for _, cutter in ipairs(Conf.parts(e.poly)) do
+      for _, piece in ipairs(pieces) do
+        local after = {}
+        Conf.subtract(piece, cutter, after)
+        for _, r in ipairs(after) do out[#out + 1] = r end
+      end
+      pieces, out = out, {}
+      if #pieces == 0 then return NONE end
+    end
+  end
+  -- the corners: the quad's own keep their height, a corner cut on a host quad takes that quad's, else the branch's
+  local function branchZ(x, y)
+    local z = triZ(poly[1], poly[2], poly[3], x, y, 1e-6)
+    if not z and poly[4] then z = triZ(poly[1], poly[3], poly[4], x, y, 1e-6) end
+    return z
+  end
+  local lift = plan.lift
+  local function hostZ(x, y)
+    for _, e in ipairs(hosts) do
+      local p = e.poly
+      local z = triZ(p[1], p[2], p[3], x, y, 1e-6)
+      if not z and #p == 4 then z = triZ(p[1], p[3], p[4], x, y, 1e-6) end
+      if z then return z + lift end
+    end
+  end
+  for _, piece in ipairs(pieces) do
+    for k, p in ipairs(piece) do
+      if not p[3] then
+        local z = hostZ(p[1], p[2]) or branchZ(p[1], p[2])
+        piece[k] = {p[1], p[2], z or poly[1][3]}
+      end
+    end
+  end
+  return pieces
+end
+
+local function drawPieces(mesh, o, pieces, uv)
+  for _, piece in ipairs(pieces) do
+    for k = 2, #piece - 1 do tri(mesh, o, piece[1], piece[k], piece[k + 1], uv, UP) end
+  end
+end
+
+-- a convex polygon ({x, y, z, ...}) clipped to rect, z interpolated: the same intersections whichever tile clips it
+local function clipRect(poly, rect)
+  for side = 1, 4 do
+    local axis, bound, greater = (side == 1 or side == 3) and 1 or 2, rect[side], side < 3
+    local out, n = {}, #poly
+    for k = 1, n do
+      local p, q = poly[k], poly[k % n + 1]
+      local ip = greater and p[axis] >= bound or not greater and p[axis] <= bound
+      local iq = greater and q[axis] >= bound or not greater and q[axis] <= bound
+      if ip then out[#out + 1] = p end
+      if ip ~= iq then
+        local t = (bound - p[axis]) / (q[axis] - p[axis])
+        local r = {p[1] + (q[1] - p[1]) * t, p[2] + (q[2] - p[2]) * t, p[3] + (q[3] - p[3]) * t}
+        r[axis] = bound
+        out[#out + 1] = r
+      end
+    end
+    poly = out
+    if #poly < 3 then return NONE end
+  end
+  return poly
+end
+
+-- clip: the tile's rect when the stroke cuts the ground (conformal): every tile draws the carriageway inside its own rect,
+-- so its ground never depends on the neighbour that holds the chunk's middle
+function M.surfaceMesh(plan, S, c, meshOf, o, lift, uv, clip)
   local tick = pacer(plan)
   for _, list in ipairs(c.rows) do
     for k = 1, #list - 1 do
@@ -2087,8 +2271,29 @@ function M.surfaceMesh(plan, S, c, meshOf, o, lift, uv)
       tick()
       local mesh = meshOf(M.partTags(S, (a.s + b.s) / 2))
       local Ra, Ma, La, Rb, Mb, Lb = lifted(a.R, lift), lifted(a.M, lift), lifted(a.L, lift), lifted(b.R, lift), lifted(b.M, lift), lifted(b.L, lift)
-      tri(mesh, o, Ra, Rb, Mb, uv, UP); tri(mesh, o, Ra, Mb, Ma, uv, UP)
-      tri(mesh, o, Ma, Mb, Lb, uv, UP); tri(mesh, o, Ma, Lb, La, uv, UP)
+      local H = hostOf(plan, S, a, b)
+      if clip then
+        local x0, x1 = min(a.x, b.x) - max(a.eL, a.eR, b.eL, b.eR), max(a.x, b.x) + max(a.eL, a.eR, b.eL, b.eR)
+        local y0, y1 = min(a.y, b.y) - max(a.eL, a.eR, b.eL, b.eR), max(a.y, b.y) + max(a.eL, a.eR, b.eL, b.eR)
+        if x1 >= clip[1] and x0 <= clip[3] and y1 >= clip[2] and y0 <= clip[4] then
+          for _, quad in ipairs({{Ra, Rb, Mb, Ma}, {Ma, Mb, Lb, La}}) do
+            for _, piece in ipairs(H and M.forkPieces(plan, S, H, quad) or {quad}) do
+              local inside = true
+              for _, p in ipairs(piece) do
+                if p[1] < clip[1] or p[1] > clip[3] or p[2] < clip[2] or p[2] > clip[4] then inside = false; break end
+              end
+              drawPieces(mesh, o, {inside and piece or clipRect(piece, clip)}, uv)
+            end
+          end
+        end
+      elseif H then
+        -- rows in another stroke's plane: the quads without what that stroke's surface already is
+        if a.eR + a.uM > 1e-4 or b.eR + b.uM > 1e-4 then drawPieces(mesh, o, M.forkPieces(plan, S, H, {Ra, Rb, Mb, Ma}), uv) end
+        if a.eL - a.uM > 1e-4 or b.eL - b.uM > 1e-4 then drawPieces(mesh, o, M.forkPieces(plan, S, H, {Ma, Mb, Lb, La}), uv) end
+      else
+        tri(mesh, o, Ra, Rb, Mb, uv, UP); tri(mesh, o, Ra, Mb, Ma, uv, UP)
+        tri(mesh, o, Ma, Mb, Lb, uv, UP); tri(mesh, o, Ma, Lb, La, uv, UP)
+      end
     end
   end
 end
@@ -2338,15 +2543,55 @@ local function structureAt(S, s, kind)
 end
 M.structureAt = structureAt
 
--- rails: the mapped runs in chunk c's range, sampled at its rows, cut where they reach a drawn surface
-function M.railPaths(plan, S, c)
+-- Does the deck of S have a parapet on `side` at s, as deckMesh decides it: on an outer edge (no lane boundary) with no other
+-- surface at about its height within DECK.clear outside it. s is clamped into chunk c, depth is the deck's.
+function M.parapetStands(plan, S, c, s, side, depth)
+  local D = M.DECK
+  s = max(c.s[1], min(c.s[c.n], s))
+  local row = M.row(plan, S, c, s)
+  local e = side > 0 and row.eL or row.eR
+  if e <= .05 or M.sharedSide(S, s, side) then return false end
+  local own = function(hit) return hit.S == S and abs(hit.s - s) < 40 end
+  local z = M.rowZ(row, side * e)
+  for _, du in ipairs({.05, D.thick, D.thick + D.clear}) do
+    local u = side * (e + du)
+    if M.onSurface(plan, row.x + row.nx * u, row.y + row.ny * u, z - depth / 2, .02, depth / 2 + 2.0, own) then return false end
+  end
+  return true
+end
+
+-- The bridges a mapped rail run (f.s0..f.s1) ends at: the one that begins just past its end (hi) and the one that ends just
+-- before its start (lo), each within TUNE.railJoin m. A rail starting or ending on a bridge is left as mapped.
+local function railJoins(S, f, T)
+  if not (T.railJoin and T.railJoin > 0) then return nil, nil end
+  local lo, hi
+  for _, r in ipairs(S.structures or NONE) do
+    if r.kind == 'bridge' then
+      if r.s0 >= f.s1 - 1e-6 and r.s0 - f.s1 <= T.railJoin and (not hi or r.s0 < hi.s0) then hi = r end
+      if r.s1 <= f.s0 + 1e-6 and f.s0 - r.s1 <= T.railJoin and (not lo or r.s1 > lo.s1) then lo = r end
+    end
+  end
+  return lo, hi
+end
+
+-- rails: the mapped runs in chunk c's range, sampled at its rows, cut where they reach a drawn surface. A run that ends
+-- within TUNE.railJoin m of a bridge deck runs on to it and joins its parapet (railJoins, TUNE.railTaper); depth: the deck's.
+function M.railPaths(plan, S, c, depth)
   local T = M.TUNE
   local tick = pacer(plan)
   local out = {}
   local c0, c1 = c.s[1], c.s[c.n]
   for _, f in ipairs(S.furniture) do
     local kind = M.RAIL.kinds[f.kind]
-    local a, b = max(f.s0, c0, S.D0), min(f.s1, c1, S.D1)
+    local lo, hi = nil, nil
+    if kind then lo, hi = railJoins(S, f, T) end
+    local jo = kind == 'jersey' and T.railJoinJersey or T.railJoinOffset
+    -- the parapet must stand at that end of the deck, else the rail is left as mapped
+    if lo and not M.parapetStands(plan, S, c, lo.s1 - 1, f.side, depth or 1.5) then lo = nil end
+    if hi and not M.parapetStands(plan, S, c, hi.s0 + 1, f.side, depth or 1.5) then hi = nil end
+    local f0 = lo and lo.s1 - T.railOverrun or f.s0
+    local f1 = hi and hi.s0 + T.railOverrun or f.s1
+    local a, b = max(f0, c0, S.D0), min(f1, c1, S.D1)
     if kind and b - a > 1e-3 then
       -- sample s: the stations and rows inside, the ends; skip the fan junctions (+ railStop)
       local stops = {}
@@ -2363,13 +2608,29 @@ function M.railPaths(plan, S, c)
       -- and the rows (bundle5: an added lane's S-shaped taper lies between two stations; the beam cut its corner)
       for _, list in ipairs(c.rows) do for _, r in ipairs(list) do add(r.s) end end
       for _, r in ipairs(stops) do add(r[1]); add(r[2]) end
+      -- a joined end draws in to the parapet: the samples there are 1.5 m apart (and at the bridge's end itself)
+      local reach = T.railTaper + 8 * max(0, max(f.offset, T.railMinOffset) - jo)
+      if lo then add(lo.s1); for d = 1.5, reach, 1.5 do add(lo.s1 + d) end end
+      if hi then add(hi.s0); for d = 1.5, reach, 1.5 do add(hi.s0 - d) end end
       table.sort(ss)
+      -- the sideways offset at s from the paved edge: as mapped, drawn in to the parapet within reach of a joined end
+      local function offsetAt(s, full)
+        local d = math.huge
+        if hi then d = min(d, hi.s0 - s) end
+        if lo then d = min(d, s - lo.s1) end
+        local len = max(T.railTaper, 8 * (full - jo))
+        if d >= len or full <= jo then return full end
+        return jo + (full - jo) * smooth(d / len)
+      end
       local run = {}
       local function close()
         local length = 0
         for k = 2, #run do length = length + sqrt((run[k][1] - run[k - 1][1]) ^ 2 + (run[k][2] - run[k - 1][2]) ^ 2) end
         if #run >= 2 and length >= T.railMin then
-          out[#out + 1] = {kind = kind, side = f.side, points = run, a = run.a, b = run.b, double = run.double}
+          local join = {}
+          if lo and run.a <= lo.s1 + 1e-6 then join.a = lo.s1 end
+          if hi and run.b >= hi.s0 - 1e-6 then join.b = hi.s0 end
+          out[#out + 1] = {kind = kind, side = f.side, points = run, a = run.a, b = run.b, double = run.double, join = join}
         end
         run = {}
       end
@@ -2378,12 +2639,18 @@ function M.railPaths(plan, S, c)
         if insideAny(stops, s) then close() else
           local row = M.row(plan, S, c, s)
           local e = f.side > 0 and row.eL or row.eR
-          local u = f.side * (e + max(f.offset, T.railMinOffset))
+          local full = max(f.offset, T.railMinOffset)
+          local u = f.side * (e + full)
           local x, y = row.x + row.nx * u, row.y + row.ny * u
           local zEdge = M.rowZ(row, f.side * e)
           local own = function(hit) return hit.S == S and abs(hit.s - s) < 40 end
-          -- a carriageway behind: a median rail, two-faced (or drawn by the other carriageway: 2)
+          -- a carriageway behind: a median rail, two-faced (or drawn by the other carriageway: 2). It runs on to the bridge as
+          -- it is (the decks stand apart, and a two-faced rail ends level with their parapets); a single rail draws in
           local median = kind == 'beam' and M.railBehind(plan, S, x, y, zEdge, row.nx * f.side, row.ny * f.side) or 0
+          if median == 0 and (lo or hi) then
+            u = f.side * (e + offsetAt(s, full))
+            x, y = row.x + row.nx * u, row.y + row.ny * u
+          end
           if median == 2 or M.onSurface(plan, x, y, zEdge, T.railClear + M.RAIL.thick, 2.5, own) then close() else
             if #run > 0 and run.double ~= (median == 1) then close() end
             if #run == 0 then run.a, run.double = s, median == 1 end
@@ -2431,8 +2698,10 @@ end
 -- a W-beam (two folds on the road side, a flat back, a top) and posts, or a concrete barrier profile; a median rail
 -- (path.double) mirrors the beam about the posts and centres them on the rail's line
 local ONE, BOTH = {1}, {1, -1}
-function M.railMesh(plan, S, c, path, mesh, o, lift)
+function M.railMesh(plan, S, c, path, mesh, o, lift, look)
   local R = M.RAIL
+  -- the stock sheet's UVs (M.RAIL.stock) for a beam and its posts; a concrete barrier keeps ours
+  local K = look and look.stock and path.kind ~= 'jersey' and look
   local pts = path.points
   local side = path.side
   local c0, c1 = c.s[1], c.s[c.n]
@@ -2465,6 +2734,10 @@ function M.railMesh(plan, S, c, path, mesh, o, lift)
     local rx, ry = ty * side, -tx * side
     local q = prof[i]
     local u = m * (q[1] + shift)
+    if K then
+      return {p[1] + rx * u, p[2] + ry * u, p[3] + lift + q[2], (p[4] or 0) / K.panel,
+        K.v0 + (q[2] - (R.height - R.beam)) / R.beam * K.dv}
+    end
     return {p[1] + rx * u, p[2] + ry * u, p[3] + lift + q[2], (p[4] or 0) / 3, q[2] / 3}
   end
   local closed = path.kind == 'jersey'
@@ -2517,13 +2790,16 @@ function M.railMesh(plan, S, c, path, mesh, o, lift)
       local cx, cy = x - rx * back, y - ry * back
       local h = R.post / 2
       local z0, z1 = z + lift - R.sink, z + lift + R.height - .02
+      -- (u0, v0) the post's foot corner, (u1, v1) its top corner: its own metres, or the stock sheet's plain patch
+      local u0, v0, u1, v1 = 0, 0, R.post, R.height
+      if K then u0, v1, u1, v0 = K.post[1], K.post[2], K.post[3], K.post[4] end
       local corners = {{cx + tx * h + rx * h, cy + ty * h + ry * h}, {cx - tx * h + rx * h, cy - ty * h + ry * h},
         {cx - tx * h - rx * h, cy - ty * h - ry * h}, {cx + tx * h - rx * h, cy + ty * h - ry * h}}
       for i = 1, 4 do
         local a, b = corners[i], corners[i % 4 + 1]
         local mx, my = (a[1] + b[1]) / 2 - cx, (a[2] + b[2]) / 2 - cy
-        local A, B = {a[1], a[2], z0, 0, 0}, {b[1], b[2], z0, R.post, 0}
-        local C, D = {b[1], b[2], z1, R.post, R.height}, {a[1], a[2], z1, 0, R.height}
+        local A, B = {a[1], a[2], z0, u0, v0}, {b[1], b[2], z0, u1, v0}
+        local C, D = {b[1], b[2], z1, u1, v1}, {a[1], a[2], z1, u0, v1}
         tri(mesh, o, A, B, C, uv, {mx, my, 0}); tri(mesh, o, A, C, D, uv, {mx, my, 0})
       end
     end
@@ -2568,11 +2844,18 @@ M.sharedSide = sharedSide
 M.DROP = {height = 3, probe = 8, run = 30, step = 4, offset = .5}
 local function mappedSide(S, s, side)
   for _, f in ipairs(S.furniture) do
-    if f.side == side and s >= f.s0 - 3 and s <= f.s1 + 3 then return true end
+    if f.side == side then
+      -- a mapped run that ends short of a bridge runs on to it (railPaths): the stretch up to it is mapped too
+      local lo, hi = railJoins(S, f, M.TUNE)
+      local a, b = lo and lo.s1 - M.TUNE.railOverrun or f.s0, hi and hi.s0 + M.TUNE.railOverrun or f.s1
+      if s >= a - 3 and s <= b + 3 then return true end
+    end
   end
   return false
 end
-function M.dropRails(plan, S, c, dem)
+-- A rule rail that ends at a bridge runs on to it like a mapped one (TUNE.railJoin, railPaths): samples just outside the
+-- bridge's start and end, every 1.5 m over the draw-in, and one `railOverrun` m inside the bridge, at the parapet. depth: the deck's.
+function M.dropRails(plan, S, c, dem, depth)
   local D, T = M.DROP, M.TUNE
   local out = {}
   if not dem or (S.tags or NONE)['e2r:rails'] == 'register' then return out end
@@ -2583,16 +2866,57 @@ function M.dropRails(plan, S, c, dem)
   local ss = {}
   for k = math.ceil(lo / D.step), floor(hi / D.step) do ss[#ss + 1] = k * D.step end
   ss[#ss + 1] = max(c0, lo); ss[#ss + 1] = min(c1, hi)
+  -- the bridges whose ends lie in the range: the samples that join a rail to them (and the stretch of the draw-in)
+  local joins, inside = {}, {}
+  if T.railJoin and T.railJoin > 0 then
+    local reach = T.railTaper + 8 * max(0, D.offset - T.railJoinOffset)
+    for _, r in ipairs(S.structures or NONE) do
+      if r.kind == 'bridge' then
+        for _, e in ipairs({{r.s0, -1}, {r.s1, 1}}) do
+          local s, away = e[1], e[2]
+          if s >= lo and s <= hi then
+            joins[#joins + 1] = {s = s, away = away, reach = reach}
+            ss[#ss + 1] = s + away * 1e-3
+            for d = 1.5, reach, 1.5 do ss[#ss + 1] = s + away * d end
+            local deep = s - away * T.railOverrun
+            ss[#ss + 1] = deep
+            inside[floor(deep * 1000 + .5)] = joins[#joins]
+          end
+        end
+      end
+    end
+  end
   table.sort(ss)
+  -- the sideways offset at s: D.offset, drawn in to the parapet within reach of a bridge's end where one stands on `side`
+  local function offsetAt(s, side, standing)
+    local off = D.offset
+    for _, j in ipairs(joins) do
+      local d = (s - j.s) * j.away
+      if standing[j] and d < j.reach then
+        local w = smooth(max(0, d) / j.reach)
+        off = min(off, T.railJoinOffset + (D.offset - T.railJoinOffset) * w)
+      end
+    end
+    return off
+  end
   for _, side in ipairs({1, -1}) do
+    -- the bridge ends with a parapet on this side
+    local standing = {}
+    for _, j in ipairs(joins) do
+      local cc = j.s >= c0 - 1e-6 and j.s <= c1 + 1e-6 and c or S:chunkAt(j.s)
+      if cc and M.parapetStands(plan, S, cc, j.s - j.away, side, depth or 1.5) then standing[j] = true end
+    end
     -- per sample: its rail point when the edge stands over a drop, else false
     local at = {}
     for i, s in ipairs(ss) do
       tick()
       local cc = s >= c0 - 1e-6 and s <= c1 + 1e-6 and c or S:chunkAt(s)
       at[i] = false
-      if cc and not structureAt(S, s, 'bridge') and not structureAt(S, s, 'tunnel') and not sharedSide(S, s, side)
-          and not mappedSide(S, s, side) then
+      -- a sample inside a bridge is the overrun of a joined rail, only where the parapet stands
+      local deep = inside[floor(s * 1000 + .5)]
+      deep = deep and standing[deep]
+      if cc and (deep or not structureAt(S, s, 'bridge')) and not structureAt(S, s, 'tunnel') and not sharedSide(S, s, side)
+          and (deep or not mappedSide(S, s, side)) then
         local row = M.row(plan, S, cc, s)
         local e = side > 0 and row.eL or row.eR
         local zEdge = M.rowZ(row, side * e)
@@ -2604,7 +2928,7 @@ function M.dropRails(plan, S, c, dem)
           local other = M.surfaceWhere(plan, px, py, .05, behindTest) or M.surfaceWhere(plan, mx, my, .05, behindTest)
           BEHIND.S = nil
           if not other then
-            local u = side * (e + D.offset)
+            local u = side * (e + offsetAt(s, side, standing))
             local x, y = row.x + row.nx * u, row.y + row.ny * u
             local own = function(hit) return hit.S == S and abs(hit.s - s) < 40 end
             if not M.onSurface(plan, x, y, zEdge, T.railClear + M.RAIL.thick, 2.5, own) then at[i] = {x, y, zEdge, s, row.h} end
@@ -2873,6 +3197,7 @@ function M.items(plan, opts)
   local pause = opts.pause or function() end
   local scale = opts.roadScale or 30
   local uv = planUV(scale)
+  local look = opts.railLook or M.railLook(M.RAIL)
   local materials = {}
   local stats = {tris = 0, markTris = 0, railTris = 0, items = 0}
   local function item(meshes, name, decor, stroke)
@@ -2896,7 +3221,22 @@ function M.items(plan, opts)
   local n = 0
   for _, S in pairs(plan.strokes) do
     if S.swept then
+      local cuts = plan.conformal and plan.conformal[S.base] and rect
       for _, c in ipairs(S.list) do
+        -- a stroke that cuts the ground: a chunk near the tile that another tile holds is drawn here too, inside the rect
+        -- (its rows can lie past the box of its stations: surfaceMesh leaves out the quads off the rect)
+        if cuts and not c.owned and c.ground and #c.rows > 0 then
+          n = n + 1
+          local byMat, list = {}, {}
+          M.surfaceMesh(plan, S, c, function(tags)
+            local mat = 'e2rf_' .. (opts.material and opts.material(tags) or 'road_major')
+            if not byMat[mat] then byMat[mat] = newMesh(mat); list[#list + 1] = byMat[mat] end
+            return byMat[mat]
+          end, o, lift, uv, cuts)
+          table.sort(list, function(p, q) return p.material < q.material end)
+          stats.tris = stats.tris + item(list, n .. 's', nil, S.id)
+          pause()
+        end
         if c.owned and #c.rows > 0 then
           n = n + 1
           local byMat, list = {}, {}
@@ -2904,7 +3244,7 @@ function M.items(plan, opts)
             local mat = 'e2rf_' .. (opts.material and opts.material(tags) or 'road_major')
             if not byMat[mat] then byMat[mat] = newMesh(mat); list[#list + 1] = byMat[mat] end
             return byMat[mat]
-          end, o, lift, uv)
+          end, o, lift, uv, cuts)
           table.sort(list, function(p, q) return p.material < q.material end)
           stats.tris = stats.tris + item(list, n .. 's', nil, S.id)
           pause()
@@ -2920,17 +3260,19 @@ function M.items(plan, opts)
             stats.markTris = stats.markTris + item({marks}, n .. 'm', true)
             pause()
           end
-          local rail = newMesh('e2rf_' .. M.RAIL.material)
-          local paths = M.railPaths(plan, S, c)
+          local rail = newMesh(look.name)
+          -- a stock look is a W-beam sheet: a concrete barrier gets a mesh of its own kind (else the same mesh)
+          local jersey = look.stock and newMesh('e2rf_' .. M.RAIL.jerseyMaterial) or rail
+          local paths = M.railPaths(plan, S, c, opts.deckDepth and opts.deckDepth(S.tags) or 1.5)
           -- and the rule rails at a drop (opts.dem: the generator's raw DEM)
-          for _, path in ipairs(M.dropRails(plan, S, c, opts.dem)) do paths[#paths + 1] = path end
-          for _, path in ipairs(paths) do M.railMesh(plan, S, c, path, rail, o, lift) end
+          for _, path in ipairs(M.dropRails(plan, S, c, opts.dem, opts.deckDepth and opts.deckDepth(S.tags) or 1.5)) do paths[#paths + 1] = path end
+          for _, path in ipairs(paths) do M.railMesh(plan, S, c, path, path.kind == 'jersey' and jersey or rail, o, lift, look) end
           c.railPaths = paths
           pause()
           -- the deck's material by its tags (generator ROADS.deckMaterial: material=*, bridge:structure=*)
           local deck = newMesh('e2rf_' .. (opts.deckMaterial and opts.deckMaterial(M.deckTags(S, c)) or M.DECK.material))
           M.deckMesh(plan, S, c, deck, o, lift, opts.deckDepth and opts.deckDepth(S.tags) or 1.5)
-          stats.railTris = stats.railTris + item({rail, deck}, n .. 'f', nil, S.id)
+          stats.railTris = stats.railTris + item(jersey ~= rail and {rail, deck, jersey} or {rail, deck}, n .. 'f', nil, S.id)
           pause()
         end
       end
@@ -3336,10 +3678,12 @@ function M.footprints(plan, fn)
             local sm = (a.s + b.s) / 2
             local bridge, tunnel = structureAt(S, sm, 'bridge') ~= nil, structureAt(S, sm, 'tunnel') ~= nil
             if a.eR + a.uM > 1e-4 or b.eR + b.uM > 1e-4 then
-              fn({lifted(a.R, lift), lifted(b.R, lift), lifted(b.M, lift), lifted(a.M, lift)}, S, a.s, bridge, tunnel, c)
+              local quad = {lifted(a.R, lift), lifted(b.R, lift), lifted(b.M, lift), lifted(a.M, lift)}
+              for _, piece in ipairs(M.forkPieces(plan, S, hostOf(plan, S, a, b), quad)) do fn(piece, S, a.s, bridge, tunnel, c) end
             end
             if a.eL - a.uM > 1e-4 or b.eL - b.uM > 1e-4 then
-              fn({lifted(a.M, lift), lifted(b.M, lift), lifted(b.L, lift), lifted(a.L, lift)}, S, a.s, bridge, tunnel, c)
+              local quad = {lifted(a.M, lift), lifted(b.M, lift), lifted(b.L, lift), lifted(a.L, lift)}
+              for _, piece in ipairs(M.forkPieces(plan, S, hostOf(plan, S, a, b), quad)) do fn(piece, S, a.s, bridge, tunnel, c) end
             end
           end
         end
@@ -3351,15 +3695,16 @@ function M.footprints(plan, fn)
   end
 end
 
--- press(x, y, z): the generator's lattice press; samples every TUNE.press m and across each row
+-- press(x, y, z): the generator's lattice press; samples every TUNE.press m and across each row. skip(S): strokes
+-- that cut the ground instead (conformal.lua) are not pressed
 local ACROSS = {0, .25, .5, .75, 1}
-function M.press(plan, press, margin)
+function M.press(plan, press, margin, skip)
   margin = margin or M.TUNE.margin
   local lift = plan.lift
   local tick = pacer(plan)
   local ax, ay, az, bx, by, bz = {}, {}, {}, {}, {}, {}
   for _, S in pairs(plan.strokes) do
-    if S.swept then
+    if S.swept and not (skip and skip(S)) then
       for _, c in ipairs(S.list) do
         for _, list in ipairs(c.ground and c.rows or NONE) do
           for k = 1, #list - 1 do
@@ -3439,6 +3784,18 @@ function M.verges(plan, shoulder, sink, fn)
             tick()
             local sm = (a.s + b.s) / 2
             if not structureAt(S, sm, 'bridge') and not structureAt(S, sm, 'tunnel') then
+              -- conformal ground: a band next to a bridge or a tunnel has an open end there (endA, endB), closed by a wall
+              local endA, endB
+              if plan.conformal and plan.conformal[S.base] then
+                if k > 1 then
+                  local s0 = (list[k - 1].s + a.s) / 2
+                  endA = structureAt(S, s0, 'bridge') ~= nil or structureAt(S, s0, 'tunnel') ~= nil
+                end
+                if k < #list - 1 then
+                  local s1 = (b.s + list[k + 2].s) / 2
+                  endB = structureAt(S, s1, 'bridge') ~= nil or structureAt(S, s1, 'tunnel') ~= nil
+                end
+              end
               for _, side in ipairs({1, -1}) do
                 local ea, eb = side > 0 and a.eL or -a.eR, side > 0 and b.eL or -b.eR
                 local pa, pb = side > 0 and a.L or a.R, side > 0 and b.L or b.R
@@ -3447,6 +3804,7 @@ function M.verges(plan, shoulder, sink, fn)
                   {a.x + a.nx * oa, a.y + a.ny * oa, pa[3]}, {b.x + b.nx * ob, b.y + b.ny * ob, pb[3]},
                   {pb[1], pb[2], pb[3] + lift - sink}}
                 quad[2][9], quad[3][9] = 1, 1
+                quad.endA, quad.endB = endA, endB
                 fn(quad, S, sm)
               end
             end
