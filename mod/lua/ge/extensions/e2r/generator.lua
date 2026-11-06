@@ -1102,7 +1102,8 @@ local function collector(rect, key, layer, pause, mixed)
     local n = normalIndex(mesh, nx, ny, nz)
     -- BeamNG ProceduralMesh expects clockwise face indices and zero-based indices.
     local axis
-    if plain or kind == 'bare_rock' or kind == 'scree' then
+    -- hooks.box (the section bands, ROADS.section.box): a face steeper than that is box mapped like rock, whatever its kind
+    if plain or kind == 'bare_rock' or kind == 'scree' or (hooks.box and math.abs(nz) < hooks.box) then
       local ax, ay, az = math.abs(nx), math.abs(ny), math.abs(nz)
       if ax > az and ax >= ay then axis = 'x' elseif ay > az then axis = 'y' end
     end
@@ -9330,7 +9331,7 @@ ROADS.seaFloor = {cut = 1, span = 200,
 -- a street class, or maxspeed <= urbanSpeed) always the gentle blend, flush with the sidewalk or kerb top.
 ROADS.section = {bank = {motorway = 1.5, trunk = 1.5, primary = 1.5, secondary = 1.5, tertiary = 1, unclassified = 1},
   bankOther = .5, fall = .12, slope = 1.5, roundMax = 3, roundHeight = 2, reach = 30, bands = 4, press = 2, clear = 0,
-  soft = {.5, 1}, gentle = 6, gentleMin = 2, urbanSpeed = 60, margin = .03,
+  soft = {.5, 1}, gentle = 6, gentleMin = 2, urbanSpeed = 60, margin = .03, box = math.cos(math.rad(45)),
   urbanClasses = {residential = true, living_street = true, service = true, pedestrian = true, road = true}}
 -- a street in a built-up area (no embankment or cutting faces beside it)
 function ROADS.section.urbanOf(tags)
@@ -12331,6 +12332,8 @@ local function build(cells, i, j, options)
   end
   end  -- the edge decals' helpers go out of scope here (build() is at LuaJIT's 200 locals)
 
+  -- a band steeper than ROADS.section.box is drawn box mapped (a flat top-down mapping streaks a steep face)
+  for _, c in ipairs({roads, scene}) do c.hooks.box = ROADS.section.box end
   for _, item in ipairs(SW and SW.skirts or NONE) do
     local quad, S, s = item[1], item[2], item[3]
     if vergeWanted(ringBounds({quad})) then
@@ -12379,6 +12382,7 @@ local function build(cells, i, j, options)
       elseif distant then scene.polygon(vergeKind, quad, true) end
     end
   end
+  for _, c in ipairs({roads, scene}) do c.hooks.box = nil end
   if tune.cf then
     -- and the fast roads' carriageway rows (bridge decks and tunnels are other levels: the ground stays under them)
     -- the bridge decks' and tunnels' rows go to a second index: the walls between stacked footprints keep out of them
@@ -14594,6 +14598,7 @@ M.WING = ROADS.wing      -- (a test can set WING.steep = 90 before the landing t
 -- manifest; false keeps the runtime height passes and the generic ground pull for every pack.
 M.HEIGHTS = {auto = true}
 M.SECTION = ROADS.section   -- the cross-section rule, for the offline tests
+M.collector = collector     -- the triangle collector (material meshes and UVs), for the offline tests
 M.PATHLIFT = ROADS.pathLift   -- bundle7 (P1): the footway lift beside raised swept roads, for the offline tests
 M.DECKMATERIAL = ROADS.deckMaterial   -- a bridge's material by its tags, for the offline tests
 M.YARD = YARD

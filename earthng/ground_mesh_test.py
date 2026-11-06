@@ -303,6 +303,49 @@ class Ground(unittest.TestCase):
         self.assertEqual(sorted([got[0][0], got[0][2]]), [1., 3.])
 
 
+@unittest.skipIf(G.lupa is None, 'lupa.luajit21 not installed')
+class BandUV(unittest.TestCase):
+    """A band face steeper than 45 degrees is box mapped (the generator collector's hooks.box, set while the section bands are drawn):
+    the flat top-down mapping of the ground streaks a steep face, the texture runs down it along a metre or two of plan"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rt = G.Runtime()
+        cls.face = cls.rt.L.eval('''function(box, z0, run)
+          local C = GEN.collector({0, 0, 100, 100}, 't', 'road', function() end, false)
+          if box then C.hooks.box = GEN.SECTION.box end
+          C.polygon('ground', {{10, 10, z0}, {20, 10, z0}, {20, 10 + run, 0}, {10, 10 + run, 0}}, true)
+          C.finish()
+          local m = C.items[1].meshes[1]
+          local o = C.items[1].pos
+          local out = {}
+          for _, f in ipairs(m.faces) do
+            local v, uv = m.verts[f.v + 1], m.uvs[f.u + 1]
+            out[#out + 1] = {v.x + o[1], v.y + o[2], v.z + o[3], uv.u, uv.v}
+          end
+          return out
+        end''')
+
+    def rows(self, box, z0, run):
+        return [[float(c) for c in r.values()] for r in self.face(box, z0, run).values()]
+
+    def test_a_steep_face_is_mapped_along_its_height(self):
+        # 6 m of height over 3 m of plan: 63 degrees. The ground's texture repeats every 24 m
+        for x, y, z, u, v in self.rows(True, 6., 3.):
+            self.assertAlmostEqual(u * 24., x, 3)
+            self.assertAlmostEqual(v * 24., z, 3)
+
+    def test_without_the_hook_a_steep_face_keeps_the_plan_mapping(self):
+        for x, y, z, u, v in self.rows(False, 6., 3.):
+            self.assertAlmostEqual(v * 24., y, 3)
+
+    def test_a_gentle_face_keeps_the_plan_mapping(self):
+        # 3 m over 10 m: 17 degrees
+        for x, y, z, u, v in self.rows(True, 3., 10.):
+            self.assertAlmostEqual(u * 24., x, 3)
+            self.assertAlmostEqual(v * 24., y, 3)
+
+
 @unittest.skipUnless(os.environ.get('E2R_TEST_PACK') and G.lupa, 'set E2R_TEST_PACK (and E2R_TEST_TILES) to run real tiles')
 class StagedPack(unittest.TestCase):
     def test_gate_on_real_tiles(self):
