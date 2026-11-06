@@ -16,6 +16,10 @@ Numbers are LEB128 varints, signed ones zigzagged (country_format). Coordinates 
 region-local decimetres; a ref is 1 + string index, 0 for none. Edges run from a to b, the
 direction of travel of a one-way road, and are sorted by (a, b). Inner points are the edge's
 bends after RDP at SIMPLIFY m, as deltas from the previous point (the first from node a).
+
+Node ids are unsigned. A pack road may name a joint of its own that is no OSM node (a way cut into
+pieces carries a negative ref, pack v3): node_id() maps it to SYNTHETIC - ref, a range above every OSM
+id, the same in every region, so the pieces stay joined in the graph.
 """
 import math
 
@@ -31,6 +35,14 @@ SPEED = {'motorway': 110, 'trunk': 90, 'primary': 60, 'secondary': 60, 'tertiary
          'unclassified': 50, 'residential': 40, 'living_street': 20}
 NO_ONEWAY = {'no', 'false', '0', 'reversible', 'alternating'}
 LINK, ONEWAY, RING = 8, 16, 32          # flags above the 3-bit class
+SYNTHETIC = 10 ** 14                    # a road's own joint (ref <= 0) is SYNTHETIC - ref: above any OSM node id, far under 2^53
+
+
+def node_id(ref):
+    """The graph's unsigned node id of a road's node ref: an OSM id as it is, a non-positive ref (a joint
+    the exporter made inside a way) moved into the range from SYNTHETIC up."""
+    value = int(ref)
+    return value if value > 0 else SYNTHETIC - value
 
 
 def _number(value, default):
@@ -79,7 +91,7 @@ def edge_of(road):
         return None
     one, flip = oneway(tags)
     xy = [(float(p[0]), float(p[1])) for p in points]
-    a, b = str(nodes[0]), str(nodes[-1])
+    a, b = str(node_id(nodes[0])), str(node_id(nodes[-1]))
     if flip:
         xy.reverse()
         a, b = b, a

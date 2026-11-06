@@ -86,6 +86,23 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(len(avenue['inner']), 1)                             # the 8 m bend stays
         self.assertAlmostEqual(avenue['length'], 2 * math.hypot(8, 50), places=1)
 
+    def test_a_roads_own_joint_with_a_negative_ref_encodes_and_stays_joined(self):
+        # pack v3 cuts a way into pieces at joints that are no OSM node: refs <= 0, shared by the two pieces
+        roads = [road(1, 500, -7001, [(0, 0), (100, 0)]), road(2, -7001, -7002, [(100, 0), (200, 0)]),
+                 road(3, -7002, 600, [(200, 0), (300, 0)]), road(4, 0, 500, [(0, 100), (0, 0)])]
+        g = rf.graph(roads + roads)
+        decoded = rf.decode(rf.encode(g))                       # raised "negative unsigned varint" before
+        ids = [n[0] for n in decoded['nodes']]
+        self.assertEqual(ids, sorted(ids))
+        self.assertEqual(ids, [500, 600, rf.SYNTHETIC, rf.SYNTHETIC + 7001, rf.SYNTHETIC + 7002])
+        self.assertTrue(all(i > 0 for i in ids))
+        self.assertEqual(len(decoded['edges']), 4)
+        index = {n[0]: k for k, n in enumerate(decoded['nodes'])}
+        want = dijkstra(decoded, index[rf.SYNTHETIC], index[600])   # the pieces are one chain: 0 -> 500 -> 7001 -> 7002 -> 600
+        self.assertAlmostEqual(want, 400 / (40 / 3.6), places=3)
+        self.assertEqual(rf.node_id('123'), 123)
+        self.assertEqual(rf.node_id(-5), rf.SYNTHETIC + 5)
+
     def test_simplify_drops_points_on_a_straight_line(self):
         line = [(x, 0.) for x in range(0, 101, 20)] + [(100., 50.)]
         self.assertEqual(rf.simplify(line), [(0, 0.), (100, 0.), (100., 50.)])
@@ -158,6 +175,17 @@ class RouterTests(unittest.TestCase):
         whole = rf.decode(rf.encode(rf.graph(grid())))
         index = {str(n[0]): k for k, n in enumerate(whole['nodes'])}
         self.assertAlmostEqual(lua.eval('route.time'), dijkstra(whole, index['1000'], index['1035']), places=3)
+
+    def test_route_over_synthetic_joints_reads_in_lua_without_a_change(self):
+        roads = [road(1, 500, -7001, [(0, 0), (100, 0)]), road(2, -7001, -7002, [(100, 0), (200, 0)]),
+                 road(3, -7002, 600, [(200, 0), (300, 0)])]
+        lua = self.load(rf.encode(rf.graph(roads)))
+        lua.execute('''
+          route = routing.route(graph, routing.nearest(graph, 0, 0), routing.nearest(graph, 300, 0), 'en')''')
+        route = lua.eval('route')
+        ids = [route.ids[k] for k in range(1, len(route.ids) + 1)]
+        self.assertEqual(ids, ['500', str(rf.SYNTHETIC + 7001), str(rf.SYNTHETIC + 7002), '600'])
+        self.assertAlmostEqual(route.length, 300, places=0)
 
     def test_unreachable_target_gives_no_route(self):
         roads = [road(1, 1, 2, [(0, 0), (100, 0)]), road(2, 3, 4, [(500, 0), (600, 0)])]
