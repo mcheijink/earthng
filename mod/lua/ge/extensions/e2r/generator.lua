@@ -1253,7 +1253,15 @@ ROADS.swept = {on = true, mode = 'fast', scale = COVER_SCALE.road}
 --   lampRows      German lamp practice for the inferred street lamps (rows by street width, lit only in towns)
 --   roadProfiles  the runtime vertical alignment of roads: floors over water, class grades and radii
 --                 (German design limits), humps, carriageway pairs
-ROADS.extras = {signals = false, lots = false, roadProfiles = false, lampRows = false, openSea = false}
+--   shops         (default ON, upstream's) shop and brand signs, storefronts, fuel and venue dressing, open
+--                 canopies (building=roof) and the glyph letters of address plates and stop signs: all drawn in
+--                 the planet's brand_sign, storefront, brand_photo and glyphs materials, which only upstream's
+--                 newer planet ships. Off, none of them is requested and a building=roof is a plain building
+--   landmarks     (default ON, upstream's) hw_ashlar walls for churches, monuments and towers, wall and roof
+--                 choices of the places of worship, roof_gold domes. Off, those buildings take the walls and
+--                 roofs of any other building, with materials every planet has
+ROADS.extras = {signals = false, lots = false, roadProfiles = false, lampRows = false, openSea = false,
+  shops = true, landmarks = true}
 function ROADS.extra(options, name)
   local v = options and options[name]
   if v == nil then v = ROADS.extras[name] end
@@ -4448,7 +4456,9 @@ BLD.worship = {church = true, cathedral = true, chapel = true, monastery = true,
 BLD.monuments = {ruins = true, triumphal_arch = true, amphitheatre = true, gate = true, monument = true, memorial = true,
   archaeological_site = true, city_gate = true, citywalls = true, castle_wall = true, aqueduct = true, fort = true}
 
+BLD.withShops, BLD.withLandmarks = true, true   -- the extras of the tile being built (build() sets them)
 function BLD.isMonument(tags)
+  if not BLD.withLandmarks then return false end
   return BLD.monuments[tags.building or ''] or BLD.monuments[tags.historic or ''] or BLD.worship[tags.building or '']
     or tags.amenity == 'place_of_worship' or tags.man_made == 'tower' or false
 end
@@ -4467,16 +4477,16 @@ local function wallMaterial(building, look, height, footprint)
   if b == 'industrial' or b == 'warehouse' or b == 'factory' then return h % 2 == 0 and 'clad_metal' or 'wall_block' end
   -- a church in plaster, not in a panel block's photo facade; a cathedral's towers and a mapped
   -- church's parts in stone (window rows made the Sagrada Familia a block of flats)
-  if BLD.worship[b or ''] or tags.amenity == 'place_of_worship' then
+  if BLD.withLandmarks and (BLD.worship[b or ''] or tags.amenity == 'place_of_worship') then
     return (tags.e2r_part or height > 30) and 'hw_ashlar' or 'wall_pls_cream'
   end
   -- a steel tower is no office: its parts take the outline's building=tower (link_parts)
-  if (tags.man_made == 'tower' and not material) or (material == 'steel' and (b == 'tower' or tags.man_made == 'tower')) then return 'clad_metal' end
+  if BLD.withLandmarks and ((tags.man_made == 'tower' and not material) or (material == 'steel' and (b == 'tower' or tags.man_made == 'tower'))) then return 'clad_metal' end
   -- a slim block hanging with nothing under it is a mast's section (Tokyo Tower is a stack of
   -- building=yes with min_height); a squat one, the observation deck, keeps its windows, and a
   -- building:part stands on the rest of its building
   local lifted = building.minHeight or number(tags.min_height, 0)
-  if lifted >= 20 and footprint and not tags.e2r_part and height - lifted > 2.5 * math.sqrt(footprint) then return 'clad_metal' end
+  if BLD.withLandmarks and lifted >= 20 and footprint and not tags.e2r_part and height - lifted > 2.5 * math.sqrt(footprint) then return 'clad_metal' end
   if BLD.isMonument(tags) then return 'hw_ashlar' end
   local region = BLD.region(look)
   local house = not tags.e2r_part and BLD.house(tags, height, h, region)
@@ -6018,7 +6028,7 @@ end
 function BLD.dome(scene, ring, tags, top, material)
   local spec, r, cx, cy = BLD.domes[tags['roof:shape']], BLD.domeRadius(ring)
   local rise = number(tags['roof:height'], r * spec.rise)
-  if BLD.domeGold[tostring(tags['roof:colour'] or ''):lower()] then material = 'roof_gold'
+  if BLD.withLandmarks and BLD.domeGold[tostring(tags['roof:colour'] or ''):lower()] then material = 'roof_gold'
   elseif BLD.isMonument(tags) then material = 'roof_metal' end -- lead, not the street's tiles
   material = material or 'roof_metal'
   local sides, steps = BLD.DOME.sides, #spec.profile - 1
@@ -10143,6 +10153,7 @@ ROADS.liftDecks, ROADS.walkSides = liftDecks, walkSides
 
 local function build(cells, i, j, options)
   options = options or {}
+  BLD.withShops, BLD.withLandmarks = ROADS.extra(options, 'shops'), ROADS.extra(options, 'landmarks')
   local pause = options.pause or options.yield or function() end
   local size = options.tileSize or 500
   -- far: the 3 km ring. horizon: DEM-only past it. Both shape the ground like near (so the
@@ -12487,8 +12498,8 @@ local function build(cells, i, j, options)
   -- Shops and fuel stations (BLD.SHOP): the mapped points by bin, the buildings their sites
   -- hold, the roofs over pumps, the pylons
   local shops = {points = {}, own = {}, info = {}, roofs = {}, venue = {}, stands = {}}
-  if decor and not distant then BLD.shopSites(shops, lists, rect, scene, ground, segmentBins, pause) end
-  shops.links = decor and options.experimentalShopfront and not options.far and BLD.shopLinks(lists, options, pause) or nil
+  if decor and not distant and BLD.withShops then BLD.shopSites(shops, lists, rect, scene, ground, segmentBins, pause) end
+  shops.links = decor and BLD.withShops and options.experimentalShopfront and not options.far and BLD.shopLinks(lists, options, pause) or nil
   for _, building in ipairs(decor and lists.buildings or NONE) do
     local rings, tags = building.rings or {}, building.tags or {}
     local exterior = cleanRing(rings[1])
@@ -12515,12 +12526,12 @@ local function build(cells, i, j, options)
       local top, kind = base + height, BLD.wallMaterial(building, look, height, footprint)
       -- building=roof stands open on columns (BLD.shopCanopy); a canopy over pumps clears a
       -- lorry unless OSM gives its height
-      local open = tags.building == 'roof' and not options.far
+      local open = BLD.withShops and tags.building == 'roof' and not options.far
       if open and shops.roofs[building] and not tags.height then
         height = math.max(height, tags['building:levels'] and BLD.SHOP.canopy.levels or BLD.SHOP.canopy.height)
         top = base + height
       end
-      if not distant and not open and height >= 2.2 then
+      if BLD.withShops and not distant and not open and height >= 2.2 then
         local own, points, box = shops.own[building] or BLD.shopCell(nil, tags), {}, ringBounds(rings)
         for bx = math.floor(box[1] / 100), math.floor(box[3] / 100) do
           for by = math.floor(box[2] / 100), math.floor(box[4] / 100) do
@@ -12676,7 +12687,7 @@ local function build(cells, i, j, options)
         end
       end
       if detailed then BLD.downpipes(scene, rings, base, top, height, kind) end
-      if options.experimentalDetail and not options.far and not lifted then
+      if BLD.withShops and options.experimentalDetail and not options.far and not lifted then
         BLD.addressPlate(scene, rings, tags, base, height, lists.roads)
       end
       if options.far or open or not BLD.pitchedRoof(scene, rings, tags, top, base, kind, height, BLD.roof(tags, h, postsoviet, BLD.region(look)), dress) then
@@ -13049,7 +13060,7 @@ local function build(cells, i, j, options)
       ROADS.lots.stop({points = hit.strip.points, k = hit.k, x = hit.x, y = hit.y, side = side, hw = hit.strip.hw,
         lift = lift, rect = rect, emit = function(poly) sceneDecor.polygon(markKind, poly, 'flat') end})
     end
-    if options.experimentalDetail then
+    if options.experimentalDetail and BLD.withShops then
       -- 3.6 m along the road from the shelter, on its curb side, the plate facing the road
       local ux, uy = hit.dx / hit.len, hit.dy / hit.len
       local sx, sy = x + ux * 3.6 - nx * side * .6, y + uy * 3.6 - ny * side * .6
@@ -14237,7 +14248,7 @@ local function build(cells, i, j, options)
   sceneManifest.parking = parking
   if not distant then
     sceneManifest.brandPOIs = {}
-    for _, poi in ipairs(lists.points) do
+    for _, poi in ipairs(BLD.withShops and lists.points or NONE) do
       local p, tags = poi.pos, poi.tags or NONE
       if p and BLD.SHOP.kinds[poi.kind] and SOLID.BRANDS[tags.e2r_brand]
           and p[1] >= rect[1] and p[1] < rect[3] and p[2] >= rect[2] and p[2] < rect[4] then

@@ -165,15 +165,18 @@ end
 -- Fork additions that change what an existing pack draws, all off (generator.lua ROADS.extras): static
 -- traffic signals and speed cameras (signals), bay lines and bus stop paint (lots), the runtime vertical
 -- alignment of roads (roadProfiles), German practice for inferred lamps (lampRows), polder land kept dry under the sea plane (openSea). Set them before the landing
--- (a pack whose region manifest has `extras` sets them itself, native.lua). Console:
---   extensions.e2r_world.extras({signals = true, lots = true, roadProfiles = true, lampRows = true, openSea = true})
+-- (a pack whose region manifest has `extras` sets them itself, native.lua). Two more are upstream's behaviour and default ON: shops (shop and
+-- brand signs, storefronts, canopies, glyph letters) and landmarks (hw_ashlar and roof_gold for churches, monuments, towers); a planet
+-- without those materials turns them off. Console:
+--   extensions.e2r_world.extras({signals = true, lots = true, roadProfiles = true, lampRows = true, openSea = true, shops = false, landmarks = false})
 function M.extras(set)
   local x = require('ge/extensions/e2r/generator').EXTRAS
   for name, on in pairs(type(set) == 'table' and set or {}) do
     if x[name] ~= nil then x[name] = on == true end
   end
   require('ge/extensions/e2r/generator').applyExtras()
-  return {signals = x.signals, lots = x.lots, roadProfiles = x.roadProfiles, lampRows = x.lampRows, openSea = x.openSea}
+  return {signals = x.signals, lots = x.lots, roadProfiles = x.roadProfiles, lampRows = x.lampRows, openSea = x.openSea,
+    shops = x.shops, landmarks = x.landmarks}
 end
 
 -- Packs whose road and ground heights come from the exporter's new pipeline (a national DTM or the DEM

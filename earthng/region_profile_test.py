@@ -17,6 +17,7 @@ import region_profile
 import test_country as fixture
 
 SWITCHES = ('signals', 'lots', 'roadProfiles', 'lampRows', 'openSea')
+OFF_SWITCHES = ('shops', 'landmarks')       # upstream's art the fork's planet does not ship: default on, off in the profile
 
 
 def without_profile():
@@ -39,8 +40,9 @@ class ProfileTests(unittest.TestCase):
     def test_fork_profile_names_the_five_switches_and_defaults_the_exporter_switches(self):
         with without_profile(), patch.dict(os.environ, {'EARTHNG_PROFILE': ' Fork ', 'EARTHNG_NOISE': '0'}):
             got = region_profile.extras()
-            self.assertEqual(sorted(got), sorted(SWITCHES))
-            self.assertTrue(all(v is True for v in got.values()))
+            self.assertEqual(sorted(got), sorted(SWITCHES + OFF_SWITCHES))
+            self.assertTrue(all(got[k] is True for k in SWITCHES))
+            self.assertTrue(all(got[k] is False for k in OFF_SWITCHES))
             got['signals'] = False                                   # a copy: the profile itself is unchanged
             self.assertTrue(region_profile.extras()['signals'])
             region_profile.apply_env()
@@ -100,7 +102,7 @@ class ManifestTests(unittest.TestCase):
     def test_fork_profile_writes_extras_into_the_region_manifest(self):
         with without_profile(), patch.dict(os.environ, {'EARTHNG_PROFILE': 'fork'}):
             region = self.manifest('fork')
-        self.assertEqual(region['extras'], dict.fromkeys(SWITCHES, True))
+        self.assertEqual(region['extras'], dict(dict.fromkeys(SWITCHES, True), **dict.fromkeys(OFF_SWITCHES, False)))
 
     def test_a_pack_without_a_profile_has_no_extras(self):
         with without_profile():

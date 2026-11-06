@@ -185,6 +185,21 @@ class NativeTests(unittest.TestCase):
         mod.land(cv(dict(seq=1, lat=lat, lon=lon)))
         self.assertEqual([gen.EXTRAS[k] for k in ('signals', 'lots', 'roadProfiles', 'lampRows', 'openSea')], [True] * 5)
 
+    def test_pack_extras_turn_upstreams_art_off_and_a_pack_without_them_restores_it(self):
+        files = fixture()
+        files['/earthng/countries/demo/regions/sample.json']['extras'] = dict(shops=False, landmarks=False)
+        lua, mod, cv = self.make(files, real_generator=True)
+        gen = lua.globals().stubGenerator
+        self.assertEqual((gen.EXTRAS.shops, gen.EXTRAS.landmarks), (True, True))          # upstream's behaviour by default
+        lat, lon = geographic(1750, 1750)
+        mod.land(cv(dict(seq=1, lat=lat, lon=lon)))
+        self.assertEqual((gen.EXTRAS.shops, gen.EXTRAS.landmarks), (False, False))
+        lua.globals().files['/earthng/countries/demo/regions/sample.json'].extras = None
+        mod.refresh()
+        mod.unload()
+        mod.land(cv(dict(seq=2, lat=lat, lon=lon)))
+        self.assertEqual((gen.EXTRAS.shops, gen.EXTRAS.landmarks), (True, True))
+
     def test_a_pack_without_extras_leaves_hand_set_switches_alone(self):
         defaults = dict(signals=False, lots=False, roadProfiles=False, lampRows=False, openSea=False)
         lua, mod, cv = self.make(extras=defaults)
