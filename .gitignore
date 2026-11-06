@@ -1,13 +1,9 @@
-out/
+# downloaded and generated data (GBs), local environment
 data/
+out/
+.venv/
+.claude/
 __pycache__/
 *.pyc
-launcher.json
-country_setup.json
-.venv/
-.venv-linux/
-python/
-graphify-out/
-research_notes/
-%LOCALAPPDATA%/
-reports/cleanup-*/
+# local screenshots stay out of the repository
+patches/images/
