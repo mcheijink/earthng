@@ -9,7 +9,8 @@ EARTHNG_PROFILE=fork
   * every region manifest carries `extras`, the Lua generator's switches for this pack
     (generator.lua ROADS.extras; native.lua applies them when the landing starts): signals, lots,
     roadProfiles and lampRows on, and openSea on (the sea plane then floods only the sea joined to a
-    seed, so marsh and polder land below the sea level stays dry); shops and landmarks off (upstream's
+    seed, so marsh and polder land below the sea level stays dry); conformal on (conformal.lua: the
+    swept fast roads cut the ground lattice, no ground under the road); shops and landmarks off (upstream's
     shop signs, storefronts, glyph letters and hw_ashlar / roof_gold landmark walls and domes, which this
     region's planet has no materials for), and railsOffDecks off (upstream keeps a mapped guard rail 8 m off a
     high bridge deck and a few metres short of any deck end; here the rail runs on to the deck and joins its parapet).
@@ -24,7 +25,7 @@ import os
 FORK_ENV = {'EARTHNG_ROAD_RULES': '1', 'EARTHNG_POWER': '1', 'EARTHNG_NOISE': '1', 'EARTHNG_CAMERAS': '1',
             'EARTHNG_BRIDGE_FLOORS': '1', 'EARTHNG_PCG': '1', 'EARTHNG_SPANS': '0', 'EARTHNG_TIDAL': '0'}
 FORK_EXTRAS = {'signals': True, 'lots': True, 'roadProfiles': True, 'lampRows': True, 'openSea': True,
-               'shops': False, 'landmarks': False, 'railsOffDecks': False}
+               'shops': False, 'landmarks': False, 'railsOffDecks': False, 'conformal': True}
 
 
 def switch(variable, default):

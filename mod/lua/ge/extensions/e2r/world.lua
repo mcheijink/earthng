@@ -169,7 +169,7 @@ end
 -- brand signs, storefronts, canopies, glyph letters) and landmarks (hw_ashlar and roof_gold for churches, monuments, towers); a planet
 -- without those materials turns them off. A third is upstream's too (railsOffDecks, default ON: a mapped guard rail stays off
 -- a bridge deck, 8 m off a high one); off, the rail runs on to the deck's end and joins its parapet. Console:
---   extensions.e2r_world.extras({signals = true, lots = true, roadProfiles = true, lampRows = true, openSea = true, shops = false, landmarks = false, railsOffDecks = false})
+--   extensions.e2r_world.extras({signals = true, lots = true, roadProfiles = true, lampRows = true, openSea = true, shops = false, landmarks = false, railsOffDecks = false, conformal = true})
 function M.extras(set)
   local x = require('ge/extensions/e2r/generator').EXTRAS
   for name, on in pairs(type(set) == 'table' and set or {}) do
@@ -177,7 +177,24 @@ function M.extras(set)
   end
   require('ge/extensions/e2r/generator').applyExtras()
   return {signals = x.signals, lots = x.lots, roadProfiles = x.roadProfiles, lampRows = x.lampRows, openSea = x.openSea,
-    shops = x.shops, landmarks = x.landmarks, railsOffDecks = x.railsOffDecks}
+    shops = x.shops, landmarks = x.landmarks, railsOffDecks = x.railsOffDecks, conformal = x.conformal}
+end
+
+-- Conformal ground (conformal.lua; patches/GROUND-MESH-DESIGN.md, phase 1): the swept fast roads cut the ground lattice
+-- instead of lying on it, and the lift and ground drop shrink. Off by default; set it before the landing (built tiles
+-- keep their ground). Needs the swept roads and a pack with the new height pipeline. The same switch is the
+-- extras field `conformal` (a pack's manifest sets it, native.lua). Console:
+--   extensions.e2r_world.conformalGround(true)
+--   extensions.e2r_world.conformalGround(false)
+function M.conformalGround(on)
+  local c = require('ge/extensions/e2r/generator').CONFORMAL
+  if not c then return {on = false, error = 'conformal.lua is not installed'} end
+  if on ~= nil then
+    c.on = on and true or false
+    local x = require('ge/extensions/e2r/generator').EXTRAS
+    if type(x) == 'table' then x.conformal = c.on end
+  end
+  return {on = c.on}
 end
 
 -- Packs whose road and ground heights come from the exporter's new pipeline (a national DTM or the DEM

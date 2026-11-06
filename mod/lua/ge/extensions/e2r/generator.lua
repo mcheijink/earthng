@@ -1272,8 +1272,10 @@ ROADS.swept = {on = true, mode = 'fast', scale = COVER_SCALE.road}
 --                 and ends of a deck `clear` m or more over the ground, and `reach` m round a deck's ends (ROADS.onDeck),
 --                 so a rail stops short of the bridge. Off, the rail runs on to the deck's end and joins its parapet
 --                 (ROADS.joinDecks; the plain approach rail of ROADS.substructure draws in to it too)
+--   conformal     (default off) the conformal ground of conformal.lua, see below: the swept fast roads cut the
+--                 ground lattice instead of lying on it. Needs swept roads and a pack with the height pipeline
 ROADS.extras = {signals = false, lots = false, roadProfiles = false, lampRows = false, openSea = false,
-  shops = true, landmarks = true, railsOffDecks = true}
+  shops = true, landmarks = true, railsOffDecks = true, conformal = false}
 function ROADS.extra(options, name)
   local v = options and options[name]
   if v == nil then v = ROADS.extras[name] end
@@ -1281,6 +1283,7 @@ function ROADS.extra(options, name)
 end
 function ROADS.applyExtras()
   ROADS.shoulders.motorway = ROADS.extras.roadProfiles and {.25, 3.3} or {.75, 2.5}
+  if ROADS.conformal then ROADS.conformal.on = ROADS.extras.conformal == true end
 end
 -- Power lines and wind turbines (power.lua): near scene and far layer, never the horizon
 do
@@ -1291,6 +1294,14 @@ end
 do
   local ok, mod = pcall(require, 'ge/extensions/e2r/lots')
   ROADS.lots = ok and type(mod) == 'table' and mod or nil
+end
+-- Conformal ground (conformal.lua; patches/GROUND-MESH-DESIGN.md, phase 1): off unless its switch is on (the extras
+-- switch `conformal`, a pack's manifest `extras` or world.lua extras(); world.lua conformalGround sets both it and
+-- M.CONFORMAL.on, and options.conformal overrides it for one build). The swept fast roads then cut the ground lattice: no ground under the carriageway or its
+-- verge bands, the toe of a band split at the lattice lines and meeting the ground there, smaller lift and ground drop.
+do
+  local ok, mod = pcall(require, 'ge/extensions/e2r/conformal')
+  ROADS.conformal = ok and type(mod) == 'table' and mod or nil
 end
 
 -- A generator way with no bridge of its own that runs on a swept road's surface at grade leaves it: its
@@ -10333,7 +10344,10 @@ local function build(cells, i, j, options)
   -- leaves the swept roads' furniture corridor (their own rails stand in) or at least their surface.
   local SW = ROADS.sweep and ROADS.swept.on and options.roads3 and not options.horizon and not options.vista
     and ROADS.sweep.plan(options.roads3, {rect = rect, classes = ROADS.sweep.CLASSES[ROADS.swept.mode] or ROADS.sweep.CLASSES.fast,
-      tileKey = key, lift = ROAD_LIFT, pause = pause}) or nil
+      tileKey = key, pause = pause,
+      -- conformal ground (ROADS.conformal): the swept fast roads cut the ground, with their own lift and ground drop
+      lift = ROADS.conformal and ROADS.conformal.wanted(options, terrain, FINE_DEM.grid) and ROADS.conformal.TUNE.lift or ROAD_LIFT,
+      conformal = ROADS.conformal and ROADS.conformal.wanted(options, terrain, FINE_DEM.grid) and ROADS.conformal.TUNE.classes or nil}) or nil
   if SW then
     local copy, kept, lines = {}, {}, {}
     for name, list in pairs(lists) do copy[name] = list end
@@ -10455,10 +10469,17 @@ local function build(cells, i, j, options)
   -- the cross-section (ROADS.section) instead of the pull: a fine grid from the new height pipeline
   tune.section = options.heightPipeline and gridStep <= FINE_DEM.grid and not options.vista or false
   if options.terrainStep then tune.terrainStep = options.terrainStep end
+  tune.conformal = ROADS.conformal ~= nil and ROADS.conformal.wanted(options, terrain, FINE_DEM.grid)
+  if tune.conformal then
+    -- the road lies lower and the ground higher: no ground under the roads that z-fights with them any more
+    tune.groundDrop, tune.roadLift = ROADS.conformal.TUNE.drop, ROADS.conformal.TUNE.lift
+  end
   for name, value in pairs(options.tune or NONE) do tune[name] = value end
   if tune.section then tune.pullZero = math.max(tune.pullZero, ROADS.section.reach) end
   tune.sectionClear = tune.sectionClear or ROADS.section.clear
   local lift, step = tune.roadLift, tune.terrainStep
+  -- the footprints that cut the lattice (near tiles; ROADS.conformal.new), filled once the roads are drawn
+  tune.cf = tune.conformal and SW and not distant and ROADS.conformal.new(step, rect) or nil
   -- A road shapes the ground up to pullZero from its edge, and the ground lattice reaches one
   -- step past the tile (its border nodes are lowered for roads in the neighbour's cells too).
   local reach = tune.pullZero + step + 5
@@ -10504,7 +10525,8 @@ local function build(cells, i, j, options)
       local road = SW.road[p.S]
       if not road then road = {id = 'sw:' .. p.S.id, tags = p.S.tags, width = p.width, swept = true}; SW.road[p.S] = road end
       local segment = {a = a, b = b, dx = dx, dy = dy, len2 = len2, width = p.width, road = road, tags = p.S.tags, surface = p.surface,
-        bank = ROADS.section.bankOf(p.S.tags), urban = ROADS.section.urbanOf(p.S.tags)}
+        bank = ROADS.section.bankOf(p.S.tags), urban = ROADS.section.urbanOf(p.S.tags),
+        conformal = tune.conformal and ROADS.conformal.stroke(p.S) or nil}
       segments[#segments + 1] = segment
       local margin = p.width / 2 + tune.pullZero
       for by = math.floor((bounds[2] - margin) / 50), math.floor((bounds[4] + margin) / 50) do
@@ -10579,10 +10601,11 @@ local function build(cells, i, j, options)
     local nearby = segmentBins[(floor(x / 50) + 32768) * 65536 + floor(y / 50) + 32768] or NONE
     if tune.section then
       -- the cross-section of every ground road round the point: on a road's footprint its height (the nearest
-      -- centre line), else the highest embankment, else the deepest cutting, else the natural ground
+      -- centre line), else the highest embankment, else the deepest cutting, else the natural ground. A conformal
+      -- road shapes nothing here: its bands are drawn, the ground is cut by them and stays the natural ground.
       local fill, cut, inside, insideD = 0, 0, nil, math.huge
       for _, segment in ipairs(nearby) do
-        if segment.surface then
+        if segment.surface and not segment.conformal then
           local a = segment.a
           local t = math.max(0, math.min(1, ((x - a[1]) * segment.dx + (y - a[2]) * segment.dy) / segment.len2))
           local px, py = a[1] + t * segment.dx, a[2] + t * segment.dy
@@ -10613,7 +10636,7 @@ local function build(cells, i, j, options)
     end
     local sa, sz, pull = 0, 0, 0
     for _, segment in ipairs(nearby) do
-      if segment.surface then
+      if segment.surface and not segment.conformal then
         local a = segment.a
         local t = math.max(0, math.min(1, ((x - a[1]) * segment.dx + (y - a[2]) * segment.dy) / segment.len2))
         local px, py = a[1] + t * segment.dx, a[2] + t * segment.dy
@@ -10694,6 +10717,12 @@ local function build(cells, i, j, options)
   -- The ground as drawn: each lattice cell is two triangles split along its (x0, y0)-(x1, y1)
   -- diagonal (the collector fans a quad from its first corner).
   local function ground(x, y)
+    local cf = tune.cf
+    if cf and cf.ready then
+      -- conformal ground, after the road layer: on a swept fast road or its bands the surface drawn there
+      local z = cf:surface(x, y)
+      if z then return z end
+    end
     local k, u, v = lattice(x, y)
     if k then
       local a, b, c, d = nodes[k], nodes[k + 4096], nodes[k + 1], nodes[k + 4097]
@@ -11757,6 +11786,8 @@ local function build(cells, i, j, options)
   local cutOps = 0
   local function subtract(poly, skip, bins)
     bins = bins or asphaltBins
+    -- a piece under 1e-4 m2 is dropped; where the ground is cut by the roads (conformal) nothing under a band may be lost
+    local minArea = tune.cf and ROADS.conformal.TUNE.sliver or 2e-4
     local pieces = {poly}
     local box = ringBounds({poly})
     local pccw = area2(poly) > 0
@@ -11778,9 +11809,9 @@ local function build(cells, i, j, options)
                 for k = 1, #c do
                   local a, b = c[k], c[k % #c + 1]
                   local inner, outer = split(rest, a[1], a[2], b[1], b[2], ccw)
-                  if #outer >= 3 and math.abs(area2(outer)) > 2e-4 then out[#out + 1] = outer end
+                  if #outer >= 3 and math.abs(area2(outer)) > minArea then out[#out + 1] = outer end
                   rest = inner
-                  if #rest < 3 or math.abs(area2(rest)) <= 2e-4 then break end
+                  if #rest < 3 or math.abs(area2(rest)) <= minArea then break end
                 end
               end
               cutOps = cutOps + 1
@@ -12036,7 +12067,7 @@ local function build(cells, i, j, options)
       press((p[1] + q[1] + c[1]) / 3, (p[2] + q[2] + c[2]) / 3, (p[3] + q[3] + c[3]) / 3 - tune.margin)
     end
   end
-  if SW then ROADS.sweep.press(SW, press, tune.margin) end
+  if SW then ROADS.sweep.press(SW, press, tune.margin, tune.conformal and ROADS.conformal.stroke or nil) end
   asphaltCut.shelf = {}   -- bundle7 (P1): the footways and cycleways lifted to a raised swept road (ROADS.pathShelves)
   if tune.section then
     -- the swept roads' verges and slopes, once (pressed here, drawn with the other verges)
@@ -12045,7 +12076,7 @@ local function build(cells, i, j, options)
       ROADS.sweep.verges(SW, 1, tune.vergeSink, function(quad, S, s)
         local bank = ROADS.section.bankOf(S and S.tags)
         for band, poly in ipairs(ROADS.section.sweptSkirt(quad, bank, asphaltCut.dem, tune.sectionClear, ROADS.section.urbanOf(S and S.tags))) do
-          SW.skirts[#SW.skirts + 1] = {poly, S, s, band = band}
+          SW.skirts[#SW.skirts + 1] = {poly, S, s, band = band, endA = quad.endA, endB = quad.endB}
         end
       end)
     end
@@ -12077,7 +12108,9 @@ local function build(cells, i, j, options)
     for _, strip in ipairs(strips) do
       for _, item in ipairs(strip.verges or NONE) do pressPoly(item[1]) end
     end
-    for _, item in ipairs(SW and SW.skirts or NONE) do pressPoly(item[1]) end
+    for _, item in ipairs(SW and SW.skirts or NONE) do
+      if not (tune.conformal and ROADS.conformal.stroke(item[2])) then pressPoly(item[1]) end
+    end
     -- bundle7 (P1): the paths beside raised swept roads, their fill to the road and their banks: drawn with the
     -- skirts, pressed like them (after every other press: the paths read the ground as it now is)
     if SW and not distant and not options.horizon then
@@ -12127,9 +12160,14 @@ local function build(cells, i, j, options)
           local upper, lower2 = split(piece, cx, cy, cx + step, cy + step, true)
           for _, half in ipairs({upper, lower2}) do
             if #half >= 3 and math.abs(area2(half)) > 2e-4 then
-              local out = {}
-              for n, q in ipairs(half) do out[n] = {q[1], q[2], ground(q[1], q[2]) + above} end
-              scene.polygon(kind, out, true)
+              -- conformal ground: nothing is draped over the fast roads and their bands (no ground there)
+              local cf = tune.cf
+              local ring = cf and cf:cell(gx, gy) and ROADS.conformal.ring(half)
+              for _, part in ipairs(ring and cf:cut(ring, gx, gy) or {half}) do
+                local out = {}
+                for n, q in ipairs(part) do out[n] = {q[1], q[2], ground(q[1], q[2]) + above} end
+                scene.polygon(kind, out, true)
+              end
             end
           end
         end
@@ -12269,6 +12307,7 @@ local function build(cells, i, j, options)
   -- verge, slope and edge pieces emitted since the last pause point: each is cut by the asphalt round it
   -- and shaded from the ground, and the 64 collector triangles between pause points were up to 32 ms of
   -- them on a far tile, 6 ms on a near one (generator_budget.py)
+  tune.endWalls = {}
   for _, strip in ipairs(strips) do
     local kind = edgeKind(strip)
     for _, item in ipairs(strip.verges or NONE) do
@@ -12301,11 +12340,62 @@ local function build(cells, i, j, options)
         quad[2][3], quad[3][3] = ground(quad[2][1], quad[2][2]), ground(quad[3][1], quad[3][2])
         quad[2][9], quad[3][9] = 1, 1
       end
+      if tune.cf and ROADS.conformal.stroke(S) then
+        -- a fast road's band cuts the ground. Its toe edge gets a corner at every lattice line it crosses, on the
+        -- ground there, so the ground pieces beside it end on the band's own vertices
+        if quad.toe then
+          quad = ROADS.conformal.withToe(quad, step)
+          for k = 3, #quad - 2 do quad[k][3] = ground(quad[k][1], quad[k][2]) end
+        end
+      end
       local skip = S and function(entry) return entry.road == S and entry.index and math.abs(entry.index - s) < 25 end or nil
-      if tune.vergeCut > 0 then emit(distant and scene or roads, vergeKind, quad, skip, true, true)
+      if tune.vergeCut > 0 then
+        -- (a twisted conformal band is cut as the two triangles it is drawn as)
+        local cuts = tune.cf and ROADS.conformal.stroke(S)
+        for _, part in ipairs(cuts and ROADS.conformal.pieces(quad) or {quad}) do
+          local drawn = emit(distant and scene or roads, vergeKind, part, skip, true, true)
+          -- the ground is cut by what is drawn of the band (the rest lies under a road or a sidewalk that is drawn)
+          if cuts then for _, piece in ipairs(drawn) do tune.cf:add(piece) end end
+          if cuts and ROADS.conformal.TUNE.walls and (item.endA or item.endB) and not distant then
+            -- the band ends at a bridge or a tunnel: the ground goes on past it at its own height, so a wall closes the
+            -- end, from the band down or up to what lies below. Only along the DRAWN band: the part of the end line that
+            -- lies under another road (an embankment that a road passes under) is no end, and a wall there would stand
+            -- in it. Collected here, built when every footprint is known (ROADS.conformal.buildWalls below)
+            local n = #quad
+            local mid = function(a, b) return {(a[1] + b[1]) / 2, (a[2] + b[2]) / 2} end
+            local ma, mb = mid(quad[1], quad[2]), mid(quad[n], quad[n - 1])
+            for _, e in ipairs({{item.endA, quad[1], quad[2], ma, mb}, {item.endB, quad[n], quad[n - 1], mb, ma}}) do
+              if e[1] then
+                for _, piece in ipairs(drawn) do
+                  for _, span in ipairs(ROADS.conformal.endSpans(piece, e[2], e[3])) do
+                    tune.endWalls[#tune.endWalls + 1] = {span[1], span[2], e[4][1] - e[5][1], e[4][2] - e[5][2]}
+                  end
+                end
+              end
+            end
+          end
+        end
       elseif visualRoads then roads.polygon(vergeKind, quad, true)
       elseif distant then scene.polygon(vergeKind, quad, true) end
     end
+  end
+  if tune.cf then
+    -- and the fast roads' carriageway rows (bridge decks and tunnels are other levels: the ground stays under them)
+    -- the bridge decks' and tunnels' rows go to a second index: the walls between stacked footprints keep out of them
+    tune.cfDecks = ROADS.conformal.new(step, rect, true)
+    ROADS.sweep.footprints(SW, function(poly, S, s, bridge, tunnel)
+      if ROADS.conformal.stroke(S) or (S and S.swept) then
+        if bridge or tunnel then tune.cfDecks:add(poly)
+        elseif ROADS.conformal.stroke(S) then tune.cf:add(poly, true) end
+      end
+    end)
+  end
+  if tune.cf and #tune.endWalls > 0 then
+    -- the end walls of the bands, now that every footprint (carriageways, other roads' bands) is known
+    ROADS.conformal.buildWalls(tune.endWalls, tune.cf, ground, function(wall) roads.polygon(ROADS.wing.material, ROADS.conformal.wallUV(wall, ROADS.deck.repeatU)) end, pause)
+  end
+  if tune.cf and ROADS.conformal.TUNE.walls and ROADS.conformal.TUNE.stack and not distant then
+    ROADS.conformal.stackWalls(tune.cf, function(wall) roads.polygon(ROADS.wing.material, ROADS.conformal.wallUV(wall, ROADS.deck.repeatU)) end, tune.cfDecks, pause)
   end
   if SW and tune.shoulder > 0 and not tune.section then
     ROADS.sweep.verges(SW, tune.shoulder, tune.vergeSink, function(quad, S, s)
@@ -12461,12 +12551,32 @@ local function build(cells, i, j, options)
       east0, east1 = b, c
       local gkey = ((cx + 32768) * 65536 + cy + 32768) * 2
       local tx, ty = (x0+x1+x1)/3, (y0+y0+y1)/3
-      roads.polygon(surfaceKind(tx, ty, claims[gkey] or backgroundKind(tx, ty)), {a, b, c}, true)
-      tx, ty = (x0+x1+x0)/3, (y0+y1+y1)/3
-      roads.polygon(surfaceKind(tx, ty, claims[gkey + 1] or backgroundKind(tx, ty)), {a, c, d}, true)
+      local cf = tune.cf
+      if cf and cf:cell(cx, cy) then
+        -- conformal ground: the pieces of the two triangles outside the fast roads' footprints, on the lattice plane
+        local kind1 = surfaceKind(tx, ty, claims[gkey] or backgroundKind(tx, ty))
+        local kind2 = surfaceKind((x0+x1+x0)/3, (y0+y1+y1)/3, claims[gkey + 1] or backgroundKind((x0+x1+x0)/3, (y0+y1+y1)/3))
+        for half = 1, 2 do
+          local p, q, r = a, half == 1 and b or c, half == 1 and c or d
+          for _, piece in ipairs(cf:cut({{p[1], p[2]}, {q[1], q[2]}, {r[1], r[2]}}, cx, cy)) do
+            local out = {}
+            for n, v in ipairs(piece) do
+              local z = ROADS.conformal.planeZ(p, q, r, v[1], v[2])
+              out[n] = {v[1], v[2], z}
+              out[n][6], out[n][7], out[n][8] = groundNormal(v[1], v[2])
+            end
+            roads.polygon(half == 1 and kind1 or kind2, out, true)
+          end
+        end
+      else
+        roads.polygon(surfaceKind(tx, ty, claims[gkey] or backgroundKind(tx, ty)), {a, b, c}, true)
+        tx, ty = (x0+x1+x0)/3, (y0+y1+y1)/3
+        roads.polygon(surfaceKind(tx, ty, claims[gkey + 1] or backgroundKind(tx, ty)), {a, c, d}, true)
+      end
     end
     pause()
   end
+  if tune.cf then tune.cf.ready = true end
   local function manifest(collector, layer)
     local mats, total = {}, 0
     for material in pairs(collector.used) do mats[#mats + 1] = material end
@@ -14478,6 +14588,8 @@ M.build = build
 M.SWEPT = ROADS.swept
 M.EXTRAS = ROADS.extras
 M.applyExtras = ROADS.applyExtras
+M.CONFORMAL = ROADS.conformal
+M.WING = ROADS.wing      -- (a test can set WING.steep = 90 before the landing to draw no wing walls)
 -- The new height pipeline (native.lua heightPipeline, world.lua heightPipeline): auto = from the region's
 -- manifest; false keeps the runtime height passes and the generic ground pull for every pack.
 M.HEIGHTS = {auto = true}

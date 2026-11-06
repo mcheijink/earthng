@@ -731,7 +731,7 @@ function M.plan(data, opts)
   local rect = opts.rect
   local classes = opts.classes or M.CLASSES.fast
   local plan = {strokes = {}, segments = {}, covered = {}, plated = {}, stats = {chunks = 0, owned = 0, plates = 0},
-    rect = rect, opts = opts, lift = opts.lift or T.lift}
+    rect = rect, opts = opts, lift = opts.lift or T.lift, conformal = opts.conformal}
   local tick = pacer(plan)
   -- strokes
   for sid, byIndex in pairs(data.byStroke) do
@@ -1364,7 +1364,9 @@ function M.point(plan, S, row, u)
   -- where the row lies in the host's plane (w = 0: a fork's or merge's lower-ranked branch, a stroke ending on another) it
   -- sits TUNE.planeSep under it, fading out with the blend: two coplanar surfaces over one stretch z-fought (in testing,
   -- 15.3, 37.5, 50.6; the cut leaves the rows near a nose over the host's lanes), now the host's is always the upper
-  return {x, y, hz + (own - hz) * row.w - M.TUNE.planeSep * (1 - row.w)}
+  -- (conformal ground: none, the host's surface is not drawn twice there, see M.forkPieces)
+  local sep = plan.conformal and plan.conformal[S.base] and 0 or M.TUNE.planeSep
+  return {x, y, hz + (own - hz) * row.w - sep * (1 - row.w)}
 end
 
 -- the surface z of a row at u, from its vertices (piecewise linear R-M-L, extended past the edges)
@@ -1394,10 +1396,10 @@ end
 -- Footprint index: is (x, y) on a drawn surface (and at what height)?
 -- ---------------------------------------------------------------------------------------------------
 
-local function addQuad(plan, poly, S, s)
+local function addQuad(plan, poly, S, s, c)
   local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
   for _, p in ipairs(poly) do x0, y0, x1, y1 = min(x0, p[1]), min(y0, p[2]), max(x1, p[1]), max(y1, p[2]) end
-  local entry = {poly = poly, S = S, s = s, box = {x0, y0, x1, y1}}
+  local entry = {poly = poly, S = S, s = s, box = {x0, y0, x1, y1}, c = c}
   for bx = floor(x0 / BIN), floor(x1 / BIN) do
     for by = floor(y0 / BIN), floor(y1 / BIN) do
       local k = binKey(bx, by)
@@ -1412,8 +1414,8 @@ function M.index(plan, S, c)
   for _, list in ipairs(c.rows) do
     for k = 1, #list - 1 do
       local a, b = list[k], list[k + 1]
-      if a.eR + a.uM > 1e-4 or b.eR + b.uM > 1e-4 then addQuad(plan, {a.R, b.R, b.M, a.M}, S, a.s) end
-      if a.eL - a.uM > 1e-4 or b.eL - b.uM > 1e-4 then addQuad(plan, {a.M, b.M, b.L, a.L}, S, a.s) end
+      if a.eR + a.uM > 1e-4 or b.eR + b.uM > 1e-4 then addQuad(plan, {a.R, b.R, b.M, a.M}, S, a.s, c) end
+      if a.eL - a.uM > 1e-4 or b.eL - b.uM > 1e-4 then addQuad(plan, {a.M, b.M, b.L, a.L}, S, a.s, c) end
     end
   end
 end
@@ -2150,7 +2152,118 @@ function M.reversedAt(S, s)
   return false
 end
 
-function M.surfaceMesh(plan, S, c, meshOf, o, lift, uv)
+-- Conformal ground, forks and merges: a slip road's rows in its host's plane lay over the host's own rows (the host's
+-- surface drawn twice, apart by TUNE.planeSep to keep them from z-fighting). With plan.conformal the branch's quad
+-- keeps only the pieces outside the host's drawn quads, and a piece corner on the host's edge takes the host's height
+-- there: the gore between the two is one surface bounded by shared edges, no road lies on a road.
+-- (The same for a stroke that ends on another or runs over it, TUNE.endJoin and overlapEase: its rows in the other's
+-- plane are cut by the other's quads.)
+-- H: the stroke whose plane the quad's rows are in (hostOf); poly: the quad's four corners ({x, y, z}, lifted, in the
+-- order the mesh fans them from the first); -> {pieces: lists of corners {x, y, z}} (the quad itself when no host
+-- row covers it)
+local Conf
+do
+  local ok, mod = pcall(require, 'ge/extensions/e2r/conformal')
+  Conf = ok and type(mod) == 'table' and mod or nil
+end
+-- the stroke the rows a, b of S lie in the plane of (they blend to it: w < 1), when S cuts the ground
+local function hostOf(plan, S, a, b)
+  if not (plan.conformal and plan.conformal[S.base]) then return nil end
+  if a.w < 1 then return a.endHost or S.host end
+  if b.w < 1 then return b.endHost or S.host end
+end
+function M.forkPieces(plan, S, H, poly)
+  if not (Conf and H and plan.conformal and plan.conformal[S.base]) then return {poly} end
+  local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
+  for _, p in ipairs(poly) do x0, y0, x1, y1 = min(x0, p[1]), min(y0, p[2]), max(x1, p[1]), max(y1, p[2]) end
+  ensureAt(plan, (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0 + y1 - y0) / 2 + 1)
+  local hosts, seen = {}, {}
+  for bx = floor(x0 / BIN), floor(x1 / BIN) do
+    for by = floor(y0 / BIN), floor(y1 / BIN) do
+      for _, e in ipairs(plan.bins[binKey(bx, by)] or NONE) do
+        local b = e.box
+        -- (only a host that is drawn here: its chunk is this tile's own or inside its ground margin)
+        if e.S == H and e.c and (e.c.owned or e.c.ground) and not seen[e] and b[1] <= x1 and b[3] >= x0 and b[2] <= y1 and b[4] >= y0 then
+          seen[e] = true
+          hosts[#hosts + 1] = e
+        end
+      end
+    end
+  end
+  if #hosts == 0 then return {poly} end
+  local ring = Conf.ring(poly)
+  if not ring then return NONE end
+  local pieces = {ring}
+  for _, e in ipairs(hosts) do
+    local out = {}
+    for _, cutter in ipairs(Conf.parts(e.poly)) do
+      for _, piece in ipairs(pieces) do
+        local after = {}
+        Conf.subtract(piece, cutter, after)
+        for _, r in ipairs(after) do out[#out + 1] = r end
+      end
+      pieces, out = out, {}
+      if #pieces == 0 then return NONE end
+    end
+  end
+  -- the corners: the quad's own keep their height, a corner cut on a host quad takes that quad's, else the branch's
+  local function branchZ(x, y)
+    local z = triZ(poly[1], poly[2], poly[3], x, y, 1e-6)
+    if not z and poly[4] then z = triZ(poly[1], poly[3], poly[4], x, y, 1e-6) end
+    return z
+  end
+  local lift = plan.lift
+  local function hostZ(x, y)
+    for _, e in ipairs(hosts) do
+      local p = e.poly
+      local z = triZ(p[1], p[2], p[3], x, y, 1e-6)
+      if not z and #p == 4 then z = triZ(p[1], p[3], p[4], x, y, 1e-6) end
+      if z then return z + lift end
+    end
+  end
+  for _, piece in ipairs(pieces) do
+    for k, p in ipairs(piece) do
+      if not p[3] then
+        local z = hostZ(p[1], p[2]) or branchZ(p[1], p[2])
+        piece[k] = {p[1], p[2], z or poly[1][3]}
+      end
+    end
+  end
+  return pieces
+end
+
+local function drawPieces(mesh, o, pieces, uv)
+  for _, piece in ipairs(pieces) do
+    for k = 2, #piece - 1 do tri(mesh, o, piece[1], piece[k], piece[k + 1], uv, UP) end
+  end
+end
+
+-- a convex polygon ({x, y, z, ...}) clipped to rect, z interpolated: the same intersections whichever tile clips it
+local function clipRect(poly, rect)
+  for side = 1, 4 do
+    local axis, bound, greater = (side == 1 or side == 3) and 1 or 2, rect[side], side < 3
+    local out, n = {}, #poly
+    for k = 1, n do
+      local p, q = poly[k], poly[k % n + 1]
+      local ip = greater and p[axis] >= bound or not greater and p[axis] <= bound
+      local iq = greater and q[axis] >= bound or not greater and q[axis] <= bound
+      if ip then out[#out + 1] = p end
+      if ip ~= iq then
+        local t = (bound - p[axis]) / (q[axis] - p[axis])
+        local r = {p[1] + (q[1] - p[1]) * t, p[2] + (q[2] - p[2]) * t, p[3] + (q[3] - p[3]) * t}
+        r[axis] = bound
+        out[#out + 1] = r
+      end
+    end
+    poly = out
+    if #poly < 3 then return NONE end
+  end
+  return poly
+end
+
+-- clip: the tile's rect when the stroke cuts the ground (conformal): every tile draws the carriageway inside its own rect,
+-- so its ground never depends on the neighbour that holds the chunk's middle
+function M.surfaceMesh(plan, S, c, meshOf, o, lift, uv, clip)
   local tick = pacer(plan)
   for _, list in ipairs(c.rows) do
     for k = 1, #list - 1 do
@@ -2158,8 +2271,29 @@ function M.surfaceMesh(plan, S, c, meshOf, o, lift, uv)
       tick()
       local mesh = meshOf(M.partTags(S, (a.s + b.s) / 2))
       local Ra, Ma, La, Rb, Mb, Lb = lifted(a.R, lift), lifted(a.M, lift), lifted(a.L, lift), lifted(b.R, lift), lifted(b.M, lift), lifted(b.L, lift)
-      tri(mesh, o, Ra, Rb, Mb, uv, UP); tri(mesh, o, Ra, Mb, Ma, uv, UP)
-      tri(mesh, o, Ma, Mb, Lb, uv, UP); tri(mesh, o, Ma, Lb, La, uv, UP)
+      local H = hostOf(plan, S, a, b)
+      if clip then
+        local x0, x1 = min(a.x, b.x) - max(a.eL, a.eR, b.eL, b.eR), max(a.x, b.x) + max(a.eL, a.eR, b.eL, b.eR)
+        local y0, y1 = min(a.y, b.y) - max(a.eL, a.eR, b.eL, b.eR), max(a.y, b.y) + max(a.eL, a.eR, b.eL, b.eR)
+        if x1 >= clip[1] and x0 <= clip[3] and y1 >= clip[2] and y0 <= clip[4] then
+          for _, quad in ipairs({{Ra, Rb, Mb, Ma}, {Ma, Mb, Lb, La}}) do
+            for _, piece in ipairs(H and M.forkPieces(plan, S, H, quad) or {quad}) do
+              local inside = true
+              for _, p in ipairs(piece) do
+                if p[1] < clip[1] or p[1] > clip[3] or p[2] < clip[2] or p[2] > clip[4] then inside = false; break end
+              end
+              drawPieces(mesh, o, {inside and piece or clipRect(piece, clip)}, uv)
+            end
+          end
+        end
+      elseif H then
+        -- rows in another stroke's plane: the quads without what that stroke's surface already is
+        if a.eR + a.uM > 1e-4 or b.eR + b.uM > 1e-4 then drawPieces(mesh, o, M.forkPieces(plan, S, H, {Ra, Rb, Mb, Ma}), uv) end
+        if a.eL - a.uM > 1e-4 or b.eL - b.uM > 1e-4 then drawPieces(mesh, o, M.forkPieces(plan, S, H, {Ma, Mb, Lb, La}), uv) end
+      else
+        tri(mesh, o, Ra, Rb, Mb, uv, UP); tri(mesh, o, Ra, Mb, Ma, uv, UP)
+        tri(mesh, o, Ma, Mb, Lb, uv, UP); tri(mesh, o, Ma, Lb, La, uv, UP)
+      end
     end
   end
 end
@@ -3087,7 +3221,22 @@ function M.items(plan, opts)
   local n = 0
   for _, S in pairs(plan.strokes) do
     if S.swept then
+      local cuts = plan.conformal and plan.conformal[S.base] and rect
       for _, c in ipairs(S.list) do
+        -- a stroke that cuts the ground: a chunk near the tile that another tile holds is drawn here too, inside the rect
+        -- (its rows can lie past the box of its stations: surfaceMesh leaves out the quads off the rect)
+        if cuts and not c.owned and c.ground and #c.rows > 0 then
+          n = n + 1
+          local byMat, list = {}, {}
+          M.surfaceMesh(plan, S, c, function(tags)
+            local mat = 'e2rf_' .. (opts.material and opts.material(tags) or 'road_major')
+            if not byMat[mat] then byMat[mat] = newMesh(mat); list[#list + 1] = byMat[mat] end
+            return byMat[mat]
+          end, o, lift, uv, cuts)
+          table.sort(list, function(p, q) return p.material < q.material end)
+          stats.tris = stats.tris + item(list, n .. 's', nil, S.id)
+          pause()
+        end
         if c.owned and #c.rows > 0 then
           n = n + 1
           local byMat, list = {}, {}
@@ -3095,7 +3244,7 @@ function M.items(plan, opts)
             local mat = 'e2rf_' .. (opts.material and opts.material(tags) or 'road_major')
             if not byMat[mat] then byMat[mat] = newMesh(mat); list[#list + 1] = byMat[mat] end
             return byMat[mat]
-          end, o, lift, uv)
+          end, o, lift, uv, cuts)
           table.sort(list, function(p, q) return p.material < q.material end)
           stats.tris = stats.tris + item(list, n .. 's', nil, S.id)
           pause()
@@ -3529,10 +3678,12 @@ function M.footprints(plan, fn)
             local sm = (a.s + b.s) / 2
             local bridge, tunnel = structureAt(S, sm, 'bridge') ~= nil, structureAt(S, sm, 'tunnel') ~= nil
             if a.eR + a.uM > 1e-4 or b.eR + b.uM > 1e-4 then
-              fn({lifted(a.R, lift), lifted(b.R, lift), lifted(b.M, lift), lifted(a.M, lift)}, S, a.s, bridge, tunnel, c)
+              local quad = {lifted(a.R, lift), lifted(b.R, lift), lifted(b.M, lift), lifted(a.M, lift)}
+              for _, piece in ipairs(M.forkPieces(plan, S, hostOf(plan, S, a, b), quad)) do fn(piece, S, a.s, bridge, tunnel, c) end
             end
             if a.eL - a.uM > 1e-4 or b.eL - b.uM > 1e-4 then
-              fn({lifted(a.M, lift), lifted(b.M, lift), lifted(b.L, lift), lifted(a.L, lift)}, S, a.s, bridge, tunnel, c)
+              local quad = {lifted(a.M, lift), lifted(b.M, lift), lifted(b.L, lift), lifted(a.L, lift)}
+              for _, piece in ipairs(M.forkPieces(plan, S, hostOf(plan, S, a, b), quad)) do fn(piece, S, a.s, bridge, tunnel, c) end
             end
           end
         end
@@ -3544,15 +3695,16 @@ function M.footprints(plan, fn)
   end
 end
 
--- press(x, y, z): the generator's lattice press; samples every TUNE.press m and across each row
+-- press(x, y, z): the generator's lattice press; samples every TUNE.press m and across each row. skip(S): strokes
+-- that cut the ground instead (conformal.lua) are not pressed
 local ACROSS = {0, .25, .5, .75, 1}
-function M.press(plan, press, margin)
+function M.press(plan, press, margin, skip)
   margin = margin or M.TUNE.margin
   local lift = plan.lift
   local tick = pacer(plan)
   local ax, ay, az, bx, by, bz = {}, {}, {}, {}, {}, {}
   for _, S in pairs(plan.strokes) do
-    if S.swept then
+    if S.swept and not (skip and skip(S)) then
       for _, c in ipairs(S.list) do
         for _, list in ipairs(c.ground and c.rows or NONE) do
           for k = 1, #list - 1 do
@@ -3632,6 +3784,18 @@ function M.verges(plan, shoulder, sink, fn)
             tick()
             local sm = (a.s + b.s) / 2
             if not structureAt(S, sm, 'bridge') and not structureAt(S, sm, 'tunnel') then
+              -- conformal ground: a band next to a bridge or a tunnel has an open end there (endA, endB), closed by a wall
+              local endA, endB
+              if plan.conformal and plan.conformal[S.base] then
+                if k > 1 then
+                  local s0 = (list[k - 1].s + a.s) / 2
+                  endA = structureAt(S, s0, 'bridge') ~= nil or structureAt(S, s0, 'tunnel') ~= nil
+                end
+                if k < #list - 1 then
+                  local s1 = (b.s + list[k + 2].s) / 2
+                  endB = structureAt(S, s1, 'bridge') ~= nil or structureAt(S, s1, 'tunnel') ~= nil
+                end
+              end
               for _, side in ipairs({1, -1}) do
                 local ea, eb = side > 0 and a.eL or -a.eR, side > 0 and b.eL or -b.eR
                 local pa, pb = side > 0 and a.L or a.R, side > 0 and b.L or b.R
@@ -3640,6 +3804,7 @@ function M.verges(plan, shoulder, sink, fn)
                   {a.x + a.nx * oa, a.y + a.ny * oa, pa[3]}, {b.x + b.nx * ob, b.y + b.ny * ob, pb[3]},
                   {pb[1], pb[2], pb[3] + lift - sink}}
                 quad[2][9], quad[3][9] = 1, 1
+                quad.endA, quad.endB = endA, endB
                 fn(quad, S, sm)
               end
             end

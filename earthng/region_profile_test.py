@@ -16,7 +16,7 @@ import fast_sources as sources
 import region_profile
 import test_country as fixture
 
-SWITCHES = ('signals', 'lots', 'roadProfiles', 'lampRows', 'openSea')
+SWITCHES = ('signals', 'lots', 'roadProfiles', 'lampRows', 'openSea', 'conformal')
 OFF_SWITCHES = ('shops', 'landmarks', 'railsOffDecks')       # upstream's behaviour the fork switches off (art its planet does not ship, rails kept off decks): default on, off in the profile
 
 
@@ -37,7 +37,7 @@ class ProfileTests(unittest.TestCase):
         with without_profile(), patch.dict(os.environ, {'EARTHNG_PROFILE': 'other'}):
             self.assertIsNone(region_profile.extras())
 
-    def test_fork_profile_names_the_five_switches_and_defaults_the_exporter_switches(self):
+    def test_fork_profile_names_the_switches_and_defaults_the_exporter_switches(self):
         with without_profile(), patch.dict(os.environ, {'EARTHNG_PROFILE': ' Fork ', 'EARTHNG_NOISE': '0'}):
             got = region_profile.extras()
             self.assertEqual(sorted(got), sorted(SWITCHES + OFF_SWITCHES))

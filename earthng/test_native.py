@@ -119,6 +119,9 @@ class NativeTests(unittest.TestCase):
               end
             """)
         if real_generator:
+            # the generator finds conformal.lua with require (the game's file system); give it the same here
+            lua.globals().conformalSource = (ROOT / 'mod/lua/ge/extensions/e2r/conformal.lua').read_text(encoding='utf8')
+            lua.execute("package.preload['ge/extensions/e2r/conformal'] = function() return assert(load(conformalSource, '@conformal.lua'))() end")
             lua.globals().stubGenerator = lua.execute((ROOT / 'mod/lua/ge/extensions/e2r/generator.lua').read_text(encoding='utf8'))
         lua.globals().countries = lua.execute((ROOT / 'mod/lua/ge/extensions/e2r/countries.lua').read_text(encoding='utf8'))
         coordinate_path = ROOT / 'mod/lua/ge/extensions/e2r/coordinates.lua'
@@ -199,6 +202,21 @@ class NativeTests(unittest.TestCase):
         mod.unload()
         mod.land(cv(dict(seq=2, lat=lat, lon=lon)))
         self.assertEqual((gen.EXTRAS.shops, gen.EXTRAS.landmarks), (True, True))
+
+    def test_pack_extras_conformal_reaches_the_conformal_switch_and_a_pack_without_it_restores_it(self):
+        files = fixture()
+        files['/earthng/countries/demo/regions/sample.json']['extras'] = dict(conformal=True)
+        lua, mod, cv = self.make(files, real_generator=True)
+        gen = lua.globals().stubGenerator
+        self.assertEqual((gen.EXTRAS.conformal, gen.CONFORMAL.on), (False, False))          # upstream's behaviour by default
+        lat, lon = geographic(1750, 1750)
+        mod.land(cv(dict(seq=1, lat=lat, lon=lon)))
+        self.assertEqual((gen.EXTRAS.conformal, gen.CONFORMAL.on), (True, True))
+        lua.globals().files['/earthng/countries/demo/regions/sample.json'].extras = None
+        mod.refresh()
+        mod.unload()
+        mod.land(cv(dict(seq=2, lat=lat, lon=lon)))
+        self.assertEqual((gen.EXTRAS.conformal, gen.CONFORMAL.on), (False, False))
 
     def test_a_pack_without_extras_leaves_hand_set_switches_alone(self):
         defaults = dict(signals=False, lots=False, roadProfiles=False, lampRows=False, openSea=False)
