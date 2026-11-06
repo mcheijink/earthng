@@ -39,6 +39,12 @@ end
 -- edge (generator PULL), so roads are kept 120 m out (half of an 80 m road + 70 m + slack);
 -- everything else only matters inside the tile (parked cars reach 3 m past it).
 M.ROAD_MARGIN, M.MARGIN = 120, 5
+-- Motorway and trunk ways (and their links) are kept within FAST_MARGIN of the tile: the generator
+-- solves a short deck's hump over the deck and 350 m of each approach (ROADS.alignHumps), and every
+-- tile drawing a point of that must see all three ways. A 500 m tile's cells (its 1 km cell, the
+-- neighbours within its 40 m pad, roads stored with a 100 m halo) hold every road within 600 m.
+M.FAST_MARGIN = 600
+M.FAST = {motorway = true, motorway_link = true, trunk = true, trunk_link = true}
 -- road details at a way node (fast_style.ROAD_DETAILS): a zebra or a turning circle reaches
 -- into the tile from up to this far outside it
 M.DETAIL_MARGIN = 30
@@ -149,7 +155,7 @@ function M.cell(data, first, last, ox, oy, rect, pause, keep)
         for n = 1, u() do nodes[n] = ref() end
         f.nodes = nodes
         local n = read(2)
-        keepIt = wanted(M.ROAD_MARGIN)
+        keepIt = wanted(M.FAST[f.tags.highway or ''] and M.FAST_MARGIN or M.ROAD_MARGIN)
         if keepIt then f.points = points(0, n) end
       elseif kind == 'junctions' then
         f.height = s() / 100
