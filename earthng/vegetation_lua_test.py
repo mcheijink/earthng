@@ -8,7 +8,7 @@ import re
 import sys
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))).replace(os.sep, '/')   # forward slashes: a Windows path in a Lua string needs no escapes
 try:
     import lupa.luajit21 as lupa
 except ImportError:      # pragma: no cover

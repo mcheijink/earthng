@@ -20,7 +20,9 @@ import shapely
 from shapely.geometry import LineString, MultiPoint, Point, shape
 from shapely.ops import transform
 
-VERSION = 'fast-20'         # source index cache; 14: full clearance and abutments; 15: widths, shoulders, rails, raceways; 16: both, clearance matches a 1.5 m deck; 17: deck and road share the clearance (no runaway hills); 18: only crossing centre lines are overpasses; 19: profile by class (fast_profile), plan-view curves (fast_curves, its SIGNATURE in the identity); 20: decks over navigable water (fast_roads.bridge_floors), pack v3 roads behind EARTHNG_PACK=3, the index-stage code in the identity (INDEX_CODE)
+import fast_profile
+
+VERSION = 'fast-21'         # source index cache; 14: full clearance and abutments; 15: widths, shoulders, rails, raceways; 16: both, clearance matches a 1.5 m deck; 17: deck and road share the clearance (no runaway hills); 18: only crossing centre lines are overpasses; 19 (upstream): a bridge split over water keeps its deck; 19 (fork): profile by class (fast_profile), plan-view curves (fast_curves, its SIGNATURE in the identity); 20 (fork): decks over navigable water (fast_roads.bridge_floors), pack v3 roads behind EARTHNG_PACK=3, the index-stage code in the identity (INDEX_CODE); 21: both lines merged
 GEOMETRY = 'fast-33'         # mesh/material semantics; bump to reject tiles built by older code
 TILE = 500.0
 ROAD_LIFT = 0.12            # road surface over its profile (the ground mesh sits 0.25 under the DEM)
@@ -56,9 +58,22 @@ DRIVEWAY = 3.0                                        # service=driveway / alley
 # Paved shoulder (m) outside the edge line, (left, right) of the direction, where a way has no
 # width tag. The generator's ROADS.shoulder holds the same rule and paints the edge lines
 # inside it.
-# motorway: 0.25 m on the median side, 3.3 m on the right (ALKIS against a motorway aerial: the paved edge lies
-# 3.05-3.45 m past the right edge line and 0-0.35 m past the left one)
-SHOULDER = {'motorway': (.25, 3.3), 'trunk': (1., 1.), 'primary': (.5, .5), 'secondary': (.25, .25)}
+# motorway: 0.75 m on the median side, 2.5 m on the right; with the fork's road rules (set_road_rules, the
+# EARTHNG_ROAD_RULES switch) 0.25 m and 3.3 m, as measured against a motorway aerial (ALKIS: the paved edge lies 3.05-3.45 m past the right edge line and
+# 0-0.35 m past the left one)
+SHOULDER = {'motorway': (.75, 2.5), 'trunk': (1., 1.), 'primary': (.5, .5), 'secondary': (.25, .25)}
+SHOULDER_MOTORWAY = {False: (.75, 2.5), True: (.25, 3.3)}
+
+
+def set_road_rules(on):
+    """The fork's road rules (fast_profile.set_road_rules) and the motorway shoulders that go with them."""
+    SHOULDER['motorway'] = SHOULDER_MOTORWAY[bool(fast_profile.set_road_rules(on))]
+    return bool(on)
+
+
+set_road_rules(fast_profile.ROAD_RULES)
+
+
 SHOULDER_ONEWAY = {'trunk': (.5, 1.5), 'primary': (.25, .75)}
 SHOULDER_LINK = (.25, 1.)                             # motorway and trunk ramps
 
@@ -742,7 +757,7 @@ def _prepare(source, output, dem, emit=print, point=None, cancelled=None, box=No
             else:
                 emit('dtm: no national DTM tiles under this window: the coarse DEM with the rules')
         # decks over navigable water: water level + clearance + structure as a lower bound (ROAD-OBJECTS.md 4.7)
-        floors, floor_report = fast_roads.bridge_floors(segments, extras, floor_sample, emit=emit)
+        floors, floor_report = fast_roads.bridge_floors(segments, extras, floor_sample, emit=emit) if fast_roads.FLOORS else ([], [])
         profiles, node_h = fast_profile.solve(segments, sample, emit=emit, floors=floors, cover=cover,
                                               rules=rules, reference=reference)
         for seg, (ps, ph) in zip(segments, profiles):
@@ -796,6 +811,40 @@ def _prepare(source, output, dem, emit=print, point=None, cancelled=None, box=No
     os.replace(tmp,final)
     emit(f'index ready: {meta["seconds"]:.1f}s, {len(segments)} segments')
     return target, meta
+
+
+# what a building:part takes from the building round it, when it has none of its own
+PART_TAGS = ('building', 'building:material', 'building:colour')
+
+
+def link_parts(found):
+    """Tie each building:part to the building that holds it: it takes that building's tags and
+    id (e2r_of: one wall material for all its parts). A building mostly covered by its parts gets
+    e2r_outline: the parts draw it, its own box would hide them."""
+    parts = [(ident, tags, geometry) for ident, (kind, tags, geometry) in found.items() if kind == 'building' and tags.get('e2r_part')]
+    if not parts:
+        return
+    outlines = [(ident, tags, geometry) for ident, (kind, tags, geometry) in found.items() if kind == 'building' and not tags.get('e2r_part')]
+    tree = shapely.STRtree([entry[2] for entry in outlines]) if outlines else None
+    covered = {}
+    for _, tags, geometry in parts:
+        inside = geometry.representative_point()
+        holder = None
+        for n in (tree.query(inside) if tree else ()):
+            if outlines[int(n)][2].covers(inside) and (holder is None or outlines[int(n)][2].area < holder[2].area):
+                holder = outlines[int(n)]
+        if holder:
+            covered[holder[0]] = covered.get(holder[0], 0.) + geometry.area
+            tags['e2r_of'] = str(holder[0])
+            for key in PART_TAGS:
+                if key in holder[1] and key not in tags:
+                    tags[key] = holder[1][key]
+            if holder[1].get('amenity') == 'place_of_worship':
+                tags['amenity'] = 'place_of_worship'
+        tags.setdefault('building', 'yes')
+    for ident, tags, geometry in outlines:
+        if covered.get(ident, 0.) >= .5 * geometry.area:
+            tags['e2r_outline'] = '1'
 
 
 class Store:
@@ -867,32 +916,44 @@ class Store:
             raise ValueError(f'no_osm scenery coverage: {bbox}')
         key,entry=hit
         if key not in self.scenes:
-            found={}; lines={}; factory=osmium.geom.GeoJSONFactory()
+            found={}; lines={}; retail_areas={}; factory=osmium.geom.GeoJSONFactory()
             import fast_style
             import fast_signals
-            tracker=fast_signals.Tracker()
+            import retail
+            import venues
+            tracker=fast_signals.Tracker() if fast_style.CAMERAS else None     # headings and relation cameras: EARTHNG_CAMERAS
             class Reader(osmium.SimpleHandler):
                 def area(self,a):
+                    tags = retail.enriched(a.tags)
+                    point_kind = retail.kind(tags)
                     kind='building' if a.tags.get('building') not in (None,'no') else (
                         'water' if a.tags.get('natural')=='water' or a.tags.get('waterway')=='riverbank' else None)
+                    if kind is None and a.tags.get('building:part') not in (None,'no'):
+                        kind='building'; tags['e2r_part']='1'
                     if kind is None:
                         kind=fast_style.ground_kind(a.tags)
-                    if kind and a.id not in found:
+                    if (kind and a.id not in found) or point_kind:
                         try:
-                            geometry=factory.create_multipolygon(a)
+                            geometry=shape(json.loads(factory.create_multipolygon(a)))
                         except RuntimeError:
                             return      # broken OSM ring (e.g. one area): skip that area alone
-                        found[a.id]=(kind,dict(a.tags),shape(json.loads(geometry)))
+                        if kind:
+                            found[a.id]=(kind,tags,geometry)
+                        # A mapped site/building is still useful as a point even if it has no
+                        # recognized ground kind. A representative point stays inside the area.
+                        if point_kind and not geometry.is_empty:
+                            retail_areas[-(2*10**12+a.id)]=(point_kind,tags,geometry)
+                            found[-(3*10**12+a.id)]=(point_kind + '_site',tags,geometry)
                 def node(self,n):
                     # bus stops and traffic signals where OSM has them (way nodes keep their tags
                     # in the source tiles); keyed apart from areas and ways
                     kind=fast_style.point_kind(n.tags)
                     if kind and n.location.valid():
-                        lines[-(10**12+n.id)]=(kind,dict(n.tags),Point(n.location.lon,n.location.lat))
-                        tracker.node(n.id,n.tags,kind)
+                        lines[-(10**12+n.id)]=(kind,retail.enriched(n.tags),Point(n.location.lon,n.location.lat))
+                        if tracker: tracker.node(n.id,n.tags,kind)
                 def way(self,w):
                     # a signal's or camera's forward/backward is its way's direction (fast_signals)
-                    if tracker.pending:
+                    if tracker and tracker.pending:
                         tracker.way(w.tags,[(n.ref,(n.lon,n.lat) if n.location.valid() else None) for n in w.nodes])
                     # footpaths, fences, tree rows: lines, not areas (an area id is 2 x way id,
                     # so a line keys as -way id to stay apart)
@@ -905,12 +966,29 @@ class Store:
                         if len(coords)>=2:
                             lines[-w.id]=(kind,dict(w.tags),LineString(coords))
                 def relation(self,r):
-                    tracker.relation(r.tags,[(m.type,m.ref,m.role) for m in r.members])
+                    if tracker: tracker.relation(r.tags,[(m.type,m.ref,m.role) for m in r.members])
             # Only nodes that can be points reach Python (Kyiv tile: 21 k of 218 k, 0.57 -> 0.25 s);
             # the location index still sees every node, so ways and areas keep their geometry.
             Reader().apply_file(str(Path(self.meta['source'])/entry['file']),locations=True,
-                                filters=[osmium.filter.KeyFilter(*fast_style.POINT_KEYS).enable_for(osmium.osm.NODE)])
-            fast_signals.finish(tracker,lines,str(Path(self.meta['source'])/entry['file']))
+                                filters=[osmium.filter.KeyFilter(*fast_style.point_keys()).enable_for(osmium.osm.NODE)])
+            if tracker: fast_signals.finish(tracker,lines,str(Path(self.meta['source'])/entry['file']))
+            # OSM often maps a business both as a node and a containing site/building.
+            # Keep the surveyed node when category and known brand match; unknown names
+            # or neighbouring businesses are never guessed to be duplicates.
+            nodes = [(kind, tags.get('e2r_brand'), geom, tags.get('e2r_post_type')) for kind, tags, geom in lines.values()
+                     if kind in ('fuel', 'grocery', 'fast_food', 'post', 'service') and tags.get('e2r_brand')]
+            tree = shapely.STRtree([entry[2] for entry in nodes]) if nodes else None
+            for ident, (kind, tags, geometry) in retail_areas.items():
+                brand = tags.get('e2r_brand')
+                duplicate = bool(brand and tree and any(
+                    nodes[int(i)][0] == kind and nodes[int(i)][1] == brand and
+                    nodes[int(i)][3] == tags.get('e2r_post_type') and geometry.covers(nodes[int(i)][2]) for i in tree.query(geometry)))
+                if not duplicate:
+                    lines[ident] = (kind, tags, geometry.representative_point())
+            link_parts(found)
+            # places from a register (venues.py): every scene holds them, a query takes those it covers
+            for n,(venue,record) in enumerate(venues.located()):
+                lines[-(4*10**12+n)]=('venue',venues.point_tags(venue,record),Point(record['lon'],record['lat']))
             found.update(lines)
             ordered=sorted(found.items())
             geoms=shapely.make_valid(shapely.transform([v[1][2] for v in ordered],self.frame.local,interleaved=False))
