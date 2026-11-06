@@ -163,7 +163,7 @@ def build(out, lang='en'):
         for name, data in level_files(lang).items():
             z.writestr(name, data)
         z.writestr('earthng/planet/manifest.json', json.dumps({
-            'schemaVersion': 1, 'kind': 'earthng-planet', 'version': '0.6.4', 'natureVersion': 1,
+            'schemaVersion': 1, 'kind': 'earthng-planet', 'version': '0.7.0', 'natureVersion': 1,
             'countrySchemaVersion': 1, 'runtime': 'lua',
         }))
         import fast_art
@@ -173,6 +173,9 @@ def build(out, lang='en'):
         for src in sorted(art.rglob('*')):
             if src.is_file() and src.suffix in ('.dds', '.json'):
                 z.write(src, f'e2r_stream/fast-art/{fast_art.VERSION}/' + src.relative_to(art).as_posix())
+        credits = fast_art.logo_credits()
+        if credits:
+            z.writestr('earthng/planet/LOGOS.md', credits)
         # the climate of every place (Köppen-Geiger, Beck et al. 2023, CC BY 4.0): biome.lua
         import build_climate
         climate = build_climate.build()

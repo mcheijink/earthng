@@ -23,6 +23,7 @@ SHEET_PX = 2048         # the whole II-68 loggia photo, 33 m
 LOGGIA_M = 33.0
 PANEL_LAYERS = 6        # atlas: five windowed panels, then a blank one
 WINDOW_LAYERS = (0, 1, 3, 4)   # layer 2 has a window grille: not in a repeat
+PHOTO_WINDOWS = True           # brick and plaster: photo windows (photo_windows), not drawn ones
 PANEL_GAIN = 1.32
 PANEL_N = 4              # a panel repeat is 4 x 4 cells (12 m): lit windows at night do not form a checker
 
@@ -57,10 +58,28 @@ PHOTO_WALLS = {
     'shop_green': ('shop',    (.12, .36, .24), 6.0),
     'shop_blue':  ('shop',    (.12, .24, .45), 6.0),
 }
+# Drawn at art build (fast_facade.STYLES): a block's own materials, windows and weather over a
+# 12 m repeat. Their colours stand for them in the flat packs' lists.
+DRAWN = {
+    'brk_d_sil': (.86, .84, .78), 'brk_d_red': (.55, .32, .26), 'brk_d_old': (.56, .32, .24), 'brk_d_new': (.46, .24, .18),
+    'brk_d_stock': (.72, .56, .36), 'brk_d_vic': (.50, .30, .26), 'brk_d_dark': (.32, .24, .22),
+    'pls_d_dash': (.69, .67, .61), 'pls_d_stalin': (.87, .78, .63), 'pls_d_stalin_red': (.72, .44, .33), 'pls_d_aged': (.78, .70, .36),
+    'pls_d_flake': (.66, .66, .64), 'pls_d_new': (.84, .80, .72), 'pls_d_euro': (.89, .87, .83), 'pls_d_euro_warm': (.85, .77, .63),
+    'pls_d_ashlar': (.81, .77, .69), 'pls_d_shutter': (.84, .63, .38), 'pls_d_white': (.93, .93, .89), 'pls_d_sand': (.80, .71, .57),
+    'pls_d_adobe': (.75, .60, .44), 'pls_d_tile': (.89, .88, .85), 'pls_d_stain': (.73, .71, .65), 'pls_d_blue': (.38, .63, .67),
+    'pls_d_pink': (.85, .53, .50),
+}
+for _n, _c in DRAWN.items():
+    PHOTO_WALLS[_n] = ('facade', _c, 12.0)
+# Soviet panels with some flats insulated (fast_facade.patched)
+for _n, _key in (('pnl_patch_grey', 'pnl_grey'), ('pnl_patch_beige', 'pnl_beige'), ('pnl_patch_white', 'pnl_white')):
+    PHOTO_WALLS[_n] = ('patched', PHOTO_WALLS[_key][1], 3.0 * PANEL_N)
 # blank end walls of elongated panel and brick blocks (no windows across the short side)
 for _n, (_f, _c, _m) in list(PHOTO_WALLS.items()):
-    if _f in ('panel', 'loggia', 'brick'):
+    if _f in ('panel', 'loggia', 'brick', 'patched'):
         PHOTO_WALLS[_n + '_end'] = ('end_brick' if _f == 'brick' else 'end_panel', _c, 6.0)
+    elif _f == 'facade' and _n.startswith('brk_'):
+        PHOTO_WALLS[_n + '_end'] = ('end_facade', _c, 6.0)
 
 END_WALL_MAX_M = 16.0   # deeper walls are a wing's long side (Soviet blocks are 11-14 m deep)
 
@@ -86,7 +105,8 @@ def tiled(path, metres, size=TILE_PX, span=6.0):
     for i in range(nx):
         for j in range(ny):
             out.paste(cell, (i * cell.width, j * cell.height))
-    return out.resize((size, size))
+    # size // n leaves a few black pixels on the seam when n does not divide size
+    return out.crop((0, 0, cell.width * nx, cell.height * ny)).resize((size, size), Image.LANCZOS)
 
 
 def windows(image, glass=(52, 62, 70)):
@@ -106,6 +126,56 @@ def windows(image, glass=(52, 62, 70)):
             mid = (box[0] + box[2]) / 2
             d.rectangle((mid - .014 * CELL, inner[1], mid + .014 * CELL, inner[3]), fill=frame)
             d.rectangle((box[0] - .03 * CELL, box[3], box[2] + .03 * CELL, box[3] + .035 * CELL), fill=(176, 176, 170))
+    return image
+
+
+# Photo windows for brick and plaster walls: the frame box of fast_packs.LAYER_GLASS cut from
+# a Panelka panel (wooden, painted and PVC frames, curtains, flowers), laid into the drawn
+# window's box, which the night glow (fast_packs.windows_of) lights. A reveal shadows its top
+# and left; a rain stain runs down from the sill.
+PHOTO_GLASS = {0: (.245, .165, .75, .69), 1: (.225, .17, .76, .71), 3: (.245, .13, .76, .665), 4: (.245, .145, .76, .695)}
+WINDOW_BOX = (.24, .20, .76, .68)       # of a 3 m cell, row 0 at its top (the drawn frame)
+
+
+def photo_windows(image, key, layers, normal=None):
+    """Photo windows over a plain wall on the 3 m grid (image and its normal map in place)."""
+    a = np.asarray(image, dtype=np.float32).copy()
+    own = (1, 3, 4)[int(unit('wown', key) * 3)]          # the grey frame (0) only as an odd one
+    nrm = None if normal is None else np.asarray(normal, dtype=np.uint8).copy()
+    for bx in range(2):
+        for sy in range(2):
+            swap = WINDOW_LAYERS[int(unit('wflat', key, bx, sy) * len(WINDOW_LAYERS))]
+            layer = swap if unit('wswap', key, bx, sy) < .25 else own
+            g = PHOTO_GLASS[layer]
+            crop = layers[layer].crop(tuple(round(v * CELL) for v in g))
+            x0, y0 = bx * CELL + round(WINDOW_BOX[0] * CELL), sy * CELL + round(WINDOW_BOX[1] * CELL)
+            x1, y1 = bx * CELL + round(WINDOW_BOX[2] * CELL), sy * CELL + round(WINDOW_BOX[3] * CELL)
+            w = np.asarray(crop.resize((x1 - x0, y1 - y0), Image.LANCZOS), dtype=np.float32)
+            a[y0:y1, x0:x1] = w
+            # the reveal: the wall's thickness shades the top and the left of the opening
+            r = max(2, round(.03 * CELL))
+            for k in range(r):
+                shade = .55 + .45 * k / r
+                a[y0 + k, x0:x1] *= shade
+                a[y0:y1, x0 + k] *= shade
+            # a concrete sill, then a rain stain under it fading down the wall
+            sill = (176, 176, 170)
+            sx0, sx1 = x0 - round(.03 * CELL), x1 + round(.03 * CELL)
+            sh = max(2, round(.035 * CELL))
+            a[y1:y1 + sh, sx0:sx1] = sill
+            a[y1 + sh:y1 + sh + max(1, sh // 2), sx0:sx1] *= .7
+            run = round(unit('stain', key, bx, sy) * .22 * CELL + .08 * CELL)
+            for k in range(run):
+                yy = y1 + sh + k
+                if yy >= a.shape[0]:
+                    break
+                fade = 1 - .16 * (1 - k / run)
+                a[yy, x0 + r:x1 - r] *= fade
+            if nrm is not None:
+                nrm[y0:y1 + sh, sx0:sx1] = (128, 128, 255)
+    image.paste(Image.fromarray(np.clip(a, 0, 255).astype('uint8')))
+    if normal is not None:
+        normal.paste(Image.fromarray(nrm))
     return image
 
 
@@ -130,17 +200,21 @@ def wall_image(name, layers=None):
     """(colour image, normal image or None) of one repeat; row 0 at the top of the wall."""
     family, colour, _ = PHOTO_WALLS[name]
     layers = layers or panel_atlas()
+    if family in ('facade', 'patched', 'end_facade'):
+        import fast_facade
+        if family == 'facade':
+            return fast_facade.draw(name, layers)
+        if family == 'patched':
+            return fast_facade.patched(name, layers), None
+        return fast_facade.end_wall(name[:-4])
     if family == 'panel':
         return panel(colour, name, layers), None
     if family == 'loggia':
         a = Image.open(TEXTURES / 'panelka_loggias/albedo.jpg').convert('RGB')
         return tint(a.resize((SHEET_PX, SHEET_PX), Image.LANCZOS), colour, .3, 1.12), None
     if family == 'end_panel':
-        out = Image.new('RGB', (TILE_PX, TILE_PX))
-        for bx in range(2):
-            for sy in range(2):
-                out.paste(layers[PANEL_LAYERS - 1], (bx * CELL, sy * CELL))
-        return tint(out, colour, gain=PANEL_GAIN), None
+        import fast_facade
+        return fast_facade.blank_panel(colour), None
     if family in ('curtain', 'ribbon', 'shop'):
         return drawn(family, colour, name), None
     white = colour[0] > .8
@@ -150,12 +224,15 @@ def wall_image(name, layers=None):
         if not white:      # the pack's red brick photographs pink: toward fired clay
             im = tint(im, (.60, .38, .31), .6, .8)
         nm = tiled(src / 'normal.jpg', (2.0, 1.8)) if (src / 'normal.jpg').exists() else None
-        return (windows(im) if family == 'brick' else im), nm
+        if family == 'brick':
+            im = photo_windows(im, name, layers, nm) if PHOTO_WINDOWS else windows(im)
+        return im, nm
     # plaster: the photo tinted strongly toward the paint colour
     im = tint(tiled(TEXTURES / 'panelka_plaster/albedo.jpg', (4.0, 4.0)), colour, .8)
     # the photo's cracks repeat every 4 m: mostly the paint, a little of the photo
     flat = Image.new('RGB', im.size, tuple(round(c * 238) for c in colour))
-    return windows(Image.blend(flat, im, .4)), None
+    im = Image.blend(flat, im, .4)
+    return (photo_windows(im, name, layers) if PHOTO_WINDOWS else windows(im)), None
 
 
 def drawn(family, colour, key):
@@ -237,6 +314,8 @@ GROUND = {
     'snow':      (('snow_wind', 4.0), ('snow_fresh', 4.0, .25), ('rock_debris', 3.0, .03), (1.0, 1.0, 1.0), 1.0),
     'snow_edge': (('snow_wind', 4.0), ('snow_melt', 3.0, .38), ('lichen_stones', 3.0, .3), (1.0, 1.0, 1.0), .8),
     'glacier':   (('snow_wind', 4.0), ('snow_fresh', 4.0, .5), ('snow_dirty', 3.0, .06), (.95, .98, 1.02), .9),
+    # ploughed black earth with last year's straw on it and paler dry stretches
+    'farmland':  (('mat_soil', 2.0), ('mat_stubble', 2.0, .42), ('photo_worn', 3.0, .1), (.98, .94, .86), .9),
 }
 # Mean brightness (0..1, after tone and saturation) a sheet is brought to: Snow005 photographs
 # grey, the dune sand dark; a kind not named keeps its photos' own.

@@ -14,10 +14,12 @@ import os
 from pathlib import Path
 import zipfile
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
+import fast_facade
 import fast_packs
 import fast_pixel
+import fast_storefront
 import fast_photo as photo
 import fast_style as style
 
@@ -86,6 +88,13 @@ FLAT = {   # kind: (toon colour, model colour)
     'roof_mtile_brown': ((120, 86, 72), (200, 200, 200)), 'roof_mtile_green': ((72, 120, 92), (206, 206, 206)),
     'door_garage': ((128, 134, 140), (222, 222, 222)), 'door_rust': ((140, 98, 74), (218, 218, 218)),
     'clad_metal': ((196, 204, 212), (232, 232, 232)), 'clad_tin': ((156, 128, 108), (220, 220, 220)),
+    'pipe': ((150, 152, 156), (220, 220, 220)), 'ac_unit': ((222, 222, 216), (236, 236, 236)),
+    'dish': ((228, 228, 224), (238, 238, 238)),
+    'manhole': ((110, 108, 104), (200, 200, 200)), 'drain': ((80, 78, 74), (190, 190, 190)),
+    'plate': ((28, 54, 120), (200, 200, 200)), 'glyphs': ((240, 240, 236), (240, 240, 236)),
+    'paint_red': ((184, 30, 24), (220, 220, 220)), 'fascia': ((30, 32, 35), (200, 200, 200)),
+    'patch': ((52, 52, 54), (180, 180, 180)),
+    'wire': ((40, 40, 42), (190, 190, 190)), 'roof_gold': ((212, 170, 60), (230, 230, 230)),
     'plinth': ((132, 126, 118), (214, 214, 214)),
     'gable': ((150, 128, 104), (216, 216, 216)),
     'hw_white': ((240, 236, 226), (238, 238, 238)), 'hw_yellow': ((236, 206, 128), (232, 232, 232)),
@@ -98,6 +107,7 @@ FLAT = {   # kind: (toon colour, model colour)
     'win_pvc': ((70, 96, 120), (180, 190, 200)), 'win_wood': ((96, 74, 56), (176, 176, 176)),
     'door_house': ((110, 76, 54), (190, 190, 190)), 'plinth_brown': ((120, 74, 60), (206, 206, 206)),
 }
+FLAT.update({k: (tuple(round(c * 255) for c in style.KINDS[k][1][:3]), (222, 222, 222)) for k in style.SHEET_KINDS})
 BASE_PACKS = ('real', 'toon', 'model', 'synth')
 PACKS = BASE_PACKS + ('pixel',) + fast_packs.PACKS
 LABELS = {'real': 'Реальний', 'toon': 'Мультяшний', 'model': 'Макет', 'synth': 'Синтвейв', 'pixel': 'Ретро-місто', **fast_packs.LABELS}
@@ -373,7 +383,8 @@ def pack_fields(pack, base):
         f = {k: '' for k in MAP_FIELDS}
         f['emissiveFactor'] = '0 0 0'
         if kind.startswith('wall_'):
-            w = kind[5:]
+            # a flat pack draws a new wall with the art of the older one it resembles
+            w = kind[5:] if pack == 'real' else fast_facade.like(kind[5:])
             f['baseColorMap'] = f'{base}/{pack}/{w}.color.png'
             if pack == 'real':
                 f.update(style.real_stage(kind))
@@ -405,6 +416,9 @@ def pack_fields(pack, base):
                 f['baseColorFactor'] = colour(SYNTH.get(kind, (30, 20, 50)))
         else:
             f['baseColorFactor'] = colour(FLAT.get(kind, ((200, 200, 200), (230, 230, 230)))[0 if pack == 'toon' else 1])
+        if kind in ('brand_sign', 'brand_photo', 'storefront'):
+            f['baseColorMap'] = f'{base}/real/{kind}.color.png'
+            f['baseColorFactor'] = '1 1 1 1'
         if pack != 'real':
             stylised_decal(kind, f)
         # a field is set from a string (detailScale '15.0 15.0')
@@ -437,15 +451,17 @@ def environment(pack):
         'sun': {'azimuth': 250, 'distance': 3200, 'size': 1500, 'height': 420, 'material': 'e2rf_synth_sun'}}
 
 
-def warm_defs(pack, fields):
+def warm_defs(pack, fields, seen):
     """One material per pack and texture, loaded at the landing on a hidden triangle: a texture
     the engine first meets through a runtime map swap streams into a slot sized for the old one
-    and breaks (\"dds mip chain (11) does not match texture (9)\", fast-game-packs-02)."""
+    and breaks (\"dds mip chain (11) does not match texture (9)\", fast-game-packs-02). `seen`
+    holds the maps warmed already: a material with nothing new adds only an object to the landing."""
     out = {}
     for mat, f in fields.items():
         stage = {k: v for k, v in f.items() if k in MAP_FIELDS and v}
-        if not stage:
+        if not stage or seen.issuperset(stage.values()):
             continue
+        seen.update(stage.values())
         name = f'e2rf_pk_{pack}_{mat.removeprefix("e2rf_")}'
         out[name] = {'name': name, 'mapTo': name, 'class': 'Material', 'version': 1.5,
                      'Stages': [stage, {}, {}, {}]}
@@ -460,7 +476,7 @@ SMOOTH_GROUND = ('snow', 'snow_edge', 'glacier', 'dune')
 
 def ground_sheet(kind):
     im, nm = photo.ground_sheet(kind)
-    if kind in style.BIOME_GROUND or kind == 'glacier':
+    if kind in style.BIOME_GROUND or kind in ('glacier', 'farmland'):
         nm = nm.resize((1024, 1024), Image.LANCZOS)
         if kind in SMOOTH_GROUND:
             im = im.resize((1024, 1024), Image.LANCZOS)
@@ -512,6 +528,18 @@ def prebuild(distributable=False):
         if not (shared / 'real' / 'railing_o.data.dds').exists():
             yard_art(shared / 'real')
             to_dds(shared / 'real')
+        stamp = shared / 'real' / 'brand_sign.version'
+        if not (shared / 'real' / 'brand_photo.glow.dds').exists() or not stamp.exists() or stamp.read_text() != BRAND_ART_VERSION:
+            brand_art(shared / 'real')
+            to_dds(shared / 'real')
+        # and the address plates' letters
+        if not (shared / 'real' / 'glyphs_o.data.dds').exists() and glyph_art(shared / 'real'):
+            to_dds(shared / 'real')
+        # and the drawn facades and plain sheets
+        stamp = shared / 'real' / 'facade.version'
+        if not stamp.exists() or stamp.read_text() != FACADE_ART_VERSION:
+            facade_art(shared)
+            to_dds(shared)
         write_manifest(shared)  # environment/fields are code, not a texture cache
     return shared
 
@@ -528,6 +556,8 @@ def build(r, game_assets=True):
             if pack == 'synth':
                 synth_glow(name).save(r / pack / f'{name}.glow.png')
         for name in photo.PHOTO_WALLS:
+            if fast_facade.like(name) != name:
+                continue                        # facade_art
             if pack == 'real':
                 if not LAYERS:
                     LAYERS.append(photo.panel_atlas())
@@ -555,6 +585,8 @@ def build(r, game_assets=True):
         d.rectangle([32 * k, 0, 32 * k + 31, 31], fill=rgb)
     cars.save(r / 'real' / 'cars.color.png')
     yard_art(r / 'real')
+    brand_art(r / 'real')
+    glyph_art(r / 'real')
     # the PO-2 concrete fence: one 2.5 m x 2 m slab... laid over a 2.5 m repeat, the slab in the
     # lower 0.8 of it (fences are 2 m tall), upside down like the facades
     slab = Image.open(photo.TEXTURES / 'panelka_fence/albedo.jpg').convert('RGB')
@@ -580,19 +612,371 @@ def build(r, game_assets=True):
     road_sheets(r)
     fast_packs.build(r, base)
     fast_pixel.build(r)
+    facade_art(r)
     to_dds(r)
     write_manifest(r)
     return r
 
 
+FACADE_ART_VERSION = '4'  # change whenever a drawn facade or sheet changes
+
+
+def facade_art(r):
+    """The drawn facades, their end walls and their night glow, and the plain sheets (fast_facade)."""
+    real = r / 'real'
+    if not LAYERS:
+        LAYERS.append(photo.panel_atlas())
+    for name, (family, _, _) in photo.PHOTO_WALLS.items():
+        if fast_facade.like(name) == name and family != 'end_panel':
+            continue
+        im, nm = photo_real(name)
+        im.save(real / f'{name}.color.png')
+        if nm is not None:
+            nm.resize((fast_facade.NORMAL_PX, fast_facade.NORMAL_PX), Image.LANCZOS).save(real / f'{name}.normal.png')
+    for name in fast_facade.SHEETS:
+        im, nm = fast_facade.sheet(name)
+        im.save(real / f'{name}.color.png')
+        nm.save(real / f'{name}.normal.png')
+    boards, gaps = fast_facade.fence_boards()
+    boards.save(real / 'fence_boards.color.png')
+    gaps.save(real / 'fence_boards_o.data.png')
+    fast_packs.layout_glows(r)
+    (real / 'facade.version').write_text(FACADE_ART_VERSION)
+
+
 # alphaRef per opacity map whose mips keep its coverage (fast_dds.keep_coverage)
 MIP_REFS = {'chainlink_o.data.png': style.CHAINLINK_MIP_REF, 'line_o.data.png': style.EXTRA['mark']['alphaRef'],
-            'railing_o.data.png': style.RAILING_MIP_REF}
+            'railing_o.data.png': style.RAILING_MIP_REF, 'fence_boards_o.data.png': style.FENCE_BOARDS_MIP_REF}
 # The yard atlas (generator.lua YARD.cell keeps the same order): playground paint, wood, metal,
 # sand, container screens and the yellow of the hemisphere bollards.
 YARD_COLOURS = [(196, 52, 40), (236, 188, 40), (46, 108, 186), (62, 148, 70), (228, 118, 40), (146, 104, 62),
                 (126, 128, 130), (44, 44, 46), (204, 180, 132), (52, 98, 150), (226, 226, 220), (128, 62, 50),
                 (162, 160, 152), (214, 184, 58), (122, 178, 92), (92, 62, 40)]
+
+
+# The shop and fuel station atlas (generator.lua BLD.SHOP): 4 x 32 cells of 512 x 128 px, the
+# shape of a lightbox 4 m x 1 m. Cells 0..31 are the networks of retail.ALIASES in the order of
+# generator.lua SOLID.BRANDS, 32 and 33 the plain 'АЗС' and 'ПРОДУКТИ' of an unknown network.
+# Cells 34-35, 36-37 and 38-39 hold each network's sign, facade and accent colours as stripes of
+# 32 px (16 a cell): the cladding, fascia and stripes of its shops, canopies and pumps. The price
+# board is a block of one column by four rows; beside it 12 square signs of 256 px (SHOP_SQUARE);
+# the last two rows are flat colours and McDonald's word mark (SHOP_WORDMARKS). Photographs of
+# real stores (brand_logos.PHOTOS) go into brand_photo.color.png (SHOP_PHOTOS). A lightbox is the
+# network's real logo where
+# earthng/brand_logos.py fetched one into data/brands/<key>.png (Wikimedia Commons): on a white
+# panel when the logo is see-through, else on its own background; otherwise its name in type.
+BRAND_ART_VERSION = '12'  # change whenever an existing atlas cell changes
+# (label, sign colour, key in generator.lua SOLID.BRANDS[, letters when not white])
+BRAND_SIGNS = [
+    ('OKKO', (0,90,50), 'okko', (255,205,0)), ('WOG', (0,150,60), 'wog'), ('УКРНАФТА', (0,72,150), 'ukrnafta'),
+    ('АВІАС', (0,90,170), 'avias'), ('БРСМ', (213,26,37), 'brsm'), ('SHELL', (251,206,7), 'shell', (221,29,33)),
+    ('SOCAR', (0,100,163), 'socar'), ('UPG', (24,24,26), 'upg', (0,170,80)), ('KLO', (255,205,0), 'k_lo', (30,30,30)),
+    ('MOTTO', (213,35,39), 'motto'), ('АТБ', (19,69,151), 'atb'), ('СІЛЬПО', (240,120,30), 'silpo'),
+    ('ФОРА', (100,190,50), 'fora'), ('NOVUS', (0,160,70), 'novus'), ('AUCHAN', (220,30,52), 'auchan'),
+    ('ВЕЛМАРТ', (240,200,0), 'velmart', (220,30,40)), ('КОЛО', (235,92,37), 'kolo'), ('РУКАВИЧКА', (110,35,60), 'rukavychka'),
+    ('СІМ23', (231,52,54), 'sim23'), ('СІМІ', (233,85,31), 'simi'), ('ФАЙНО', (0,140,70), 'faino'),
+    ('THRASH!', (30,30,30), 'thrash'), ('VARUS', (245,120,30), 'varus'), ('FOZZY', (230,30,40), 'fozzy'),
+    ('ЕКО МАРКЕТ', (200,16,46), 'eco'), ('БЛИЗЕНЬКО', (40,113,171), 'blyzenko'),
+    ('AMIC', (0,150,70), 'amic'), ('PARALLEL', (0,140,70), 'parallel'), ('VST', (230,75,32), 'vst'), ('БВС', (16,106,164), 'bvs'),
+    ("McDonald's", (200,16,46), 'mcdonalds', (255,199,44)), ('НОВА ПОШТА', (218,41,28), 'nova_poshta'),
+]
+# How a network dresses a building (generator.lua BLD.SHOP.style mirrors clad, square and
+# accent): facade, the colour of its fascia (and of every wall when clad); accent, a stripe under
+# the fascia; square, its slot of SHOP_SQUARE (a square sign: a square logo, or the name stacked).
+# From photographs of the stores on Wikimedia Commons where there are some (ATB, Fora, OKKO, WOG,
+# Nova Poshta, EKO, AMIC), the networks' own colours otherwise; Velmart's red and yellow as the
+# user knows its stores.
+BRAND_STYLE = {
+    'okko': {'facade': (0, 90, 50), 'accent': (255, 205, 0), 'square': 0},
+    'wog': {'facade': (0, 150, 60)},
+    'ukrnafta': {'facade': (0, 72, 150), 'accent': (255, 210, 0)},
+    'avias': {'facade': (0, 90, 170), 'square': 1},
+    'brsm': {'facade': (213, 26, 37)},
+    'shell': {'facade': (251, 206, 7), 'accent': (221, 29, 33)},
+    'socar': {'facade': (0, 100, 163)},
+    'upg': {'facade': (24, 24, 26), 'accent': (0, 170, 80), 'square': 2},
+    'k_lo': {'facade': (255, 205, 0), 'accent': (30, 30, 30), 'square': 3},
+    'motto': {'facade': (213, 35, 39)},
+    'atb': {'facade': (19, 69, 151), 'clad': True, 'square': 4},
+    'silpo': {'facade': (240, 120, 30)},
+    'fora': {'facade': (100, 190, 50), 'accent': (220, 40, 40), 'clad': True},
+    'novus': {'facade': (0, 160, 70)},
+    'auchan': {'facade': (220, 30, 52)},
+    'velmart': {'facade': (214, 32, 38), 'accent': (250, 205, 0), 'clad': True},
+    'kolo': {'facade': (235, 92, 37)},
+    'rukavychka': {'facade': (110, 35, 60)},
+    'sim23': {'facade': (231, 52, 54), 'square': 5},
+    'simi': {'facade': (233, 85, 31)},
+    'faino': {'facade': (0, 140, 70), 'square': 6},
+    'thrash': {'facade': (30, 30, 30), 'accent': (255, 220, 0)},
+    'varus': {'facade': (245, 120, 30)},
+    'fozzy': {'facade': (230, 30, 40)},
+    'eco': {'facade': (200, 16, 46), 'accent': (0, 50, 140), 'square': 7},
+    'blyzenko': {'facade': (40, 113, 171)},
+    'amic': {'facade': (0, 150, 70), 'accent': (230, 50, 40)},
+    'parallel': {'facade': (0, 140, 70), 'accent': (240, 120, 30)},
+    'vst': {'facade': (230, 75, 32)},
+    'bvs': {'facade': (16, 106, 164)},
+    # as its new restaurants (a photograph from Kyiv's left bank): charcoal, a wooden band, the
+    # entrance tower and dining room glazing from that photograph, its word mark on every side
+    'mcdonalds': {'facade': (38, 38, 40), 'accent': (150, 100, 60), 'clad': True, 'square': 8},
+    'nova_poshta': {'facade': (218, 41, 28)},
+}
+# The atlas's second half (2048 x 2048 below the first, generator.lua BLD.SHOP.more): cell 64 on.
+# The plain signs of the service classes, then the networks. A network with a logo takes its
+# colour from the logo (brand_logos, measured), one without keeps its class's colour and its name
+# in type: a colour nobody has checked is not invented.
+SERVICE_CLASS = {'car': (42, 44, 50), 'wash': (20, 110, 180), 'charge': (20, 130, 80), 'pharmacy': (0, 128, 92),
+                 'bank': (30, 50, 100), 'food': (122, 66, 36)}
+SERVICE_SIGNS = [
+    ('СТО', SERVICE_CLASS['car'], 'plain_car_repair'), ('ШИНОМОНТАЖ', SERVICE_CLASS['car'], 'plain_tyres'),
+    ('АВТОМИЙКА', SERVICE_CLASS['wash'], 'plain_car_wash'), ('ЗАРЯДКА', SERVICE_CLASS['charge'], 'plain_charging'),
+    ('АПТЕКА', SERVICE_CLASS['pharmacy'], 'plain_pharmacy'), ('БАНК', SERVICE_CLASS['bank'], 'plain_bank'),
+    ('КАФЕ', SERVICE_CLASS['food'], 'plain_food'),
+    ('ОЩАДБАНК', (8, 72, 72), 'oschadbank'), ('ПРИВАТБАНК', (88, 184, 72), 'privatbank'),
+    ('РАЙФФАЙЗЕН', (250, 240, 10), 'raiffeisen', (30, 30, 30)), ('УКРСИББАНК', (0, 140, 110), 'ukrsibbank'),
+    ('SENSE BANK', (40, 40, 248), 'sense'), ('ПУМБ', (232, 8, 40), 'pumb'), ('УКРГАЗБАНК', (40, 88, 168), 'ukrgasbank'),
+    ('А-БАНК', (8, 200, 88), 'a_bank'), ('CRÉDIT AGRICOLE', (0, 110, 80), 'credit_agricole'), ('OTP BANK', (8, 104, 72), 'otp'),
+    ('ПОДОРОЖНИК', (8, 104, 72), 'podorozhnyk'), ('АНЦ', (8, 152, 216), 'anc'), ('АПТЕКА 911', (168, 40, 40), 'apteka_911'),
+    ('АПТЕКА ОПТОВИХ ЦІН', SERVICE_CLASS['pharmacy'], 'apteka_opt'), ("БАЖАЄМО ЗДОРОВ'Я", SERVICE_CLASS['pharmacy'], 'bazhaemo'),
+    ('ДОБРОГО ДНЯ', SERVICE_CLASS['pharmacy'], 'dobroho_dnya'), ('ЗДОРОВА РОДИНА', SERVICE_CLASS['pharmacy'], 'zdorova_rodyna'),
+    ('LVIV CROISSANTS', (30, 30, 30), 'lviv_croissants'), ('KFC', (228, 8, 40), 'kfc'), ("DOMINO'S", (8, 152, 232), 'dominos'),
+    ('AROMA KAVA', SERVICE_CLASS['food'], 'aroma_kava'), ('КУЛИНИЧІ', SERVICE_CLASS['food'], 'kulynychi'),
+    ('ПУЗАТА ХАТА', SERVICE_CLASS['food'], 'puzata_hata'), ('PIZZA DAY', SERVICE_CLASS['food'], 'pizza_day'),
+    ('IONITY', (72, 8, 120), 'ionity'), ('TOKA', SERVICE_CLASS['charge'], 'toka'), ('EVA CHARGERS', SERVICE_CLASS['charge'], 'autoenterprise'),
+    ('VIANOR', SERVICE_CLASS['car'], 'vianor'),
+]
+SERVICE_CELL, SERVICE_SWATCH = 64, (112, 115, 118)                         # generator.lua BLD.SHOP.more, more_swatch
+SHOP_COLS, SHOP_ROWS, SHOP_CELL = 4, 32, (512, 128)
+SHOP_GENERIC = [('АЗС', (46,72,104)), ('ПРОДУКТИ', (38,92,62))]          # cells 32, 33
+SHOP_PRICE = (0, 10, 1, 4)                                                # column, row, columns, rows
+SHOP_SWATCH = (34, 36, 38)                                                # sign, facade, accent: 16 colours a cell
+SHOP_SQUARE = (512, 1280, 256, 6)                                         # x, y, size, per row: 12 slots
+# logos drawn on the network's colour rather than a white panel
+LOGO_ON_COLOUR = {'mcdonalds'}
+# cell: (word, panel, letters): McDonald's name on its fascias and under its pylon's arches
+SHOP_WORDMARKS = {61: ("McDonald's", (30, 30, 32), (255, 255, 255)), 62: ("McDonald's", (200, 16, 46), (255, 255, 255))}
+# brand_photo.color.png (2048 x 1024): key -> (x, y) of its rectified photograph
+SHOP_PHOTOS = {'mcdonalds_bay': (0, 0), 'mcdonalds_glass': (512, 0)}
+# cell: (colour, lit at night): a white panel, the lit underside of a canopy, a dark body,
+# brushed metal, the concrete of a pump island, McDonald's gold (its pole sign's arches)
+SHOP_FLATS = {56: ((232, 233, 230), False), 57: ((238, 238, 232), True), 58: ((44, 46, 50), False),
+              59: ((168, 172, 176), False), 60: ((150, 148, 142), False), 63: ((255, 199, 44), True)}
+
+
+def _shop_font(size):
+    # the Windows Arial installation and Pillow's DejaVu both include Ukrainian glyphs
+    for name in ('arialbd.ttf', 'C:/Windows/Fonts/arialbd.ttf', 'DejaVuSans-Bold.ttf'):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    raise RuntimeError('A Unicode font (Arial Bold or DejaVu Sans Bold) is required for brand signs')
+
+
+def _logo_panel(logo, colour=None):
+    """(logo trimmed to what it draws, panel colour): a see-through logo stands on white (or
+    `colour`), an opaque one on the colour of its own border."""
+    logo = logo.convert('RGBA')
+    alpha = logo.getchannel('A')
+    clear = alpha.point(lambda a: 255 if a < 128 else 0).histogram()[255] / (logo.width * logo.height)
+    box = alpha.point(lambda a: 255 if a > 24 else 0).getbbox()
+    logo = logo.crop(box) if box else logo
+    # see-through beyond an antialiased rim (an SVG's opaque card keeps a soft edge)
+    if clear > .03:
+        return logo, colour or (246, 246, 244)
+    rgb = logo.convert('RGB')
+    edge = [rgb.getpixel((x, y)) for x in (0, rgb.width - 1) for y in (0, rgb.height // 2, rgb.height - 1)]
+    panel = tuple(sorted(c[n] for c in edge)[len(edge) // 2] for n in range(3))
+    # trimmed to what differs from that background, a little of it kept round the mark
+    away = ImageChops.difference(rgb, Image.new('RGB', rgb.size, panel)).convert('L').point(lambda d: 255 if d > 40 else 0)
+    box = away.getbbox()
+    if box:
+        m = round(.04 * max(box[2] - box[0], box[3] - box[1]))
+        logo = logo.crop((max(0, box[0] - m), max(0, box[1] - m), min(rgb.width, box[2] + m), min(rgb.height, box[3] + m)))
+    return logo, panel
+
+
+def _type(label, letters, lines=1):
+    """The name in bold type on a clear layer, one or (stacked by words) more lines."""
+    font = _shop_font(96)
+    words = label.split()
+    rows = [label] if lines == 1 or len(words) == 1 else [' '.join(words[:len(words) // 2]), ' '.join(words[len(words) // 2:])]
+    probe = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
+    boxes = [probe.textbbox((0, 0), r, font=font) for r in rows]
+    w = max(b[2] - b[0] for b in boxes) + 4
+    step = max(b[3] - b[1] for b in boxes) + 16
+    mark = Image.new('RGBA', (w, step * len(rows)))
+    d = ImageDraw.Draw(mark)
+    for n, (r, b) in enumerate(zip(rows, boxes)):
+        d.text(((w - (b[2] - b[0])) // 2 - b[0], n * step + 2 - b[1]), r, font=font, fill=(*letters, 255))
+    return mark
+
+
+def _face(size, colour, mark, fill):
+    """A lightbox face of `size`: a darker rim, a little lighter at the top, `mark` fitted into
+    `fill` of it with its proportions kept."""
+    w, h = size
+    top = tuple(min(255, round(c * 1.08 + 6)) for c in colour)
+    face = Image.new('RGB', (w, h), colour)
+    d = ImageDraw.Draw(face)
+    for row in range(h):
+        t = row / (h - 1)
+        d.line([(0, row), (w, row)], fill=tuple(round(a + (b - a) * t) for a, b in zip(top, colour)))
+    d.rectangle((0, 0, w - 1, h - 1), outline=tuple(round(c * .62) for c in colour), width=max(3, w // 100))
+    k = min(w * fill[0] / mark.width, h * fill[1] / mark.height)
+    mark = mark.resize((max(1, round(mark.width * k)), max(1, round(mark.height * k))), Image.Resampling.LANCZOS)
+    face.paste(mark, ((w - mark.width) // 2, (h - mark.height) // 2), mark)
+    return face
+
+
+def _lightbox(colour, label, letters, logo=None, on_colour=False, size=SHOP_CELL):
+    """A lightbox (4:1, or a square `size`): a logo fitted into 88 % by 76 % of it, or the name
+    into 80 % by 62 % (stacked by words in a square)."""
+    if logo is not None:
+        logo, colour = _logo_panel(logo, colour if on_colour else None)
+        return _face(size, colour, logo, (.88, .76) if size[0] > size[1] else (.84, .84))
+    square = size[0] == size[1]
+    return _face(size, colour, _type(label, letters, 2 if square else 1), (.82, .7) if square else (.8, .62))
+
+
+def _atb_roundel(size):
+    """ATB's square sign as on its stores: a white panel, a blue ring, 'АТБ' in red."""
+    w = size[0]
+    face = Image.new('RGB', size, (250, 250, 248))
+    d = ImageDraw.Draw(face)
+    d.rectangle((0, 0, w - 1, w - 1), outline=(19, 69, 151), width=w // 32)
+    m = w * .12
+    d.ellipse((m, m, w - m, w - m), outline=(19, 69, 151), width=round(w * .07))
+    mark = _type('АТБ', (220, 30, 40))
+    k = w * .52 / mark.width
+    mark = mark.resize((round(mark.width * k), round(mark.height * k)), Image.Resampling.LANCZOS)
+    face.paste(mark, ((w - mark.width) // 2, (w - mark.height) // 2), mark)
+    return face
+
+
+def _price_board(lit):
+    """A pylon's board: the grades on the left, amber digits on the right showing no price."""
+    w, h = SHOP_CELL[0] * SHOP_PRICE[2], SHOP_CELL[1] * SHOP_PRICE[3]
+    board = Image.new('RGB', (w, h), (0, 0, 0) if lit else (30, 32, 35))
+    d = ImageDraw.Draw(board)
+    if not lit:
+        d.rectangle((0, 0, w - 1, h - 1), outline=(170, 174, 178), width=10)
+    font = _shop_font(64)
+    for n, grade in enumerate(('А-95+', 'А-95', 'ДП', 'ГАЗ')):
+        y = 34 + n * 116
+        d.text((36, y), grade, font=font, fill=(236, 236, 230))
+        d.rounded_rectangle((300, y - 4, 476, y + 74), 8, fill=(0, 0, 0) if lit else (12, 12, 12))
+        d.text((312, y), '--.--', font=font, fill=(255, 150, 20) if lit else (120, 70, 12))
+    return board
+
+
+def brand_art(r, logos=None):
+    """brand_sign.color.png and its night emissive map, brand_sign.glow.png; the logos from
+    `logos` (data/brands)."""
+    import paths
+    w, h = SHOP_CELL
+    atlas = Image.new('RGB', (w * SHOP_COLS, h * SHOP_ROWS), (45, 45, 45))
+    glow = Image.new('RGB', atlas.size, (0, 0, 0))
+    own = Path(logos) if logos else paths.PROJECT / 'data' / 'brands'
+
+    def paste(image, at, lit):
+        atlas.paste(image, at)
+        if lit:
+            glow.paste(image.point(lambda v: round(v * .85)), at)
+
+    def put(index, image, lit):
+        paste(image, (index % SHOP_COLS * w, index // SHOP_COLS * h), lit)
+
+    sx, sy, side, per = SHOP_SQUARE
+    for index, (label, colour, key, *letters) in enumerate(BRAND_SIGNS):
+        path = own / f'{key}.png'
+        logo = Image.open(path) if path.is_file() else None
+        letters = letters[0] if letters else (255, 255, 255)
+        put(index, _lightbox(colour, label, letters, logo, key in LOGO_ON_COLOUR), True)
+        style = BRAND_STYLE[key]
+        for cell, rgb in zip(SHOP_SWATCH, (colour, style['facade'], style.get('accent', style['facade']))):
+            stripe, cell = w // 16, cell + index // 16
+            x, y = cell % SHOP_COLS * w + index % 16 * stripe, cell // SHOP_COLS * h
+            atlas.paste(rgb, (x, y, x + stripe, y + h))
+        if 'square' in style:
+            slot = style['square']
+            face = _atb_roundel((side, side)) if key == 'atb' else _lightbox(
+                colour, label, letters, logo, key in LOGO_ON_COLOUR, (side, side))
+            paste(face, (sx + slot % per * side, sy + slot // per * side), True)
+    for n, (label, colour) in enumerate(SHOP_GENERIC):
+        put(32 + n, _lightbox(colour, label, (255, 255, 255)), True)
+    for index, (label, colour, key, *letters) in enumerate(SERVICE_SIGNS):
+        path = own / f'{key}.png'
+        logo = Image.open(path) if path.is_file() else None
+        put(SERVICE_CELL + index, _lightbox(colour, label, letters[0] if letters else (255, 255, 255), logo), True)
+        for base in SERVICE_SWATCH:
+            stripe, cell = w // 16, base + index // 16
+            x, y = cell % SHOP_COLS * w + index % 16 * stripe, cell // SHOP_COLS * h
+            atlas.paste(colour, (x, y, x + stripe, y + h))
+    at = (SHOP_PRICE[0] * w, SHOP_PRICE[1] * h)
+    atlas.paste(_price_board(False), at)
+    glow.paste(_price_board(True), at)
+    for index, (colour, lit) in SHOP_FLATS.items():
+        put(index, Image.new('RGB', SHOP_CELL, colour), lit)
+    for index, (word, panel, letters) in SHOP_WORDMARKS.items():
+        put(index, _lightbox(panel, word, letters), True)
+    atlas.save(r / 'brand_sign.color.png')
+    glow.save(r / 'brand_sign.glow.png')
+    # the photographs, charcoal where one is missing; by night a little of their own light
+    photo = Image.new('RGB', (2048, 1024), (38, 38, 40))
+    for key, at in SHOP_PHOTOS.items():
+        path = own / f'{key}.png'
+        if path.is_file():
+            photo.paste(Image.open(path).convert('RGB'), at)
+    photo.save(r / 'brand_photo.color.png')
+    photo.point(lambda v: round(v * .7)).save(r / 'brand_photo.glow.png')
+    fast_storefront.art(r, _shop_font)
+    (r / 'brand_sign.version').write_text(BRAND_ART_VERSION)
+
+
+def logo_credits(logos=None):
+    """Markdown crediting each logo the atlas draws (data/brands/SOURCES.json), or ''."""
+    import paths
+    own = Path(logos) if logos else paths.PROJECT / 'data' / 'brands'
+    sources = own / 'SOURCES.json'
+    if not sources.is_file():
+        return ''
+    rows = [f"- {key}: [{s['file']}]({s['page']}), {s['licence']}" + (f", {s['author']}" if s.get('author') else '')
+            for key, s in sorted(json.loads(sources.read_text(encoding='utf8')).items()) if (own / f'{key}.png').is_file()]
+    if not rows:
+        return ''
+    return ('# Network logos and store photographs on shop and fuel station signs\n\n'
+            'From Wikimedia Commons (earthng/brand_logos.py), fitted into e2r_stream/fast-art/*/real/brand_sign.* '
+            '(logos) and brand_photo.* (photographs squared up into facades): each is shared under CC BY-SA 4.0 '
+            'where it holds a CC BY-SA file. The logos are trademarks of their owners; their use here endorses '
+            'nothing.\n\n' + '\n'.join(rows) + '\n')
+
+
+GLYPH_FONT = 'ui/common/Noto_Sans_Mono/static/NotoSansMono-Bold.ttf'   # in the game: OFL
+GLYPH_CELL = 64
+
+
+def glyph_art(r):
+    """The address plates' letters (fast_style.GLYPHS): white over a 1024 px atlas, their shapes
+    as opacity; flipped like the facades so v grows upward. A missing font leaves no file."""
+    from PIL import ImageFont
+    path = Path(game_dir()) / GLYPH_FONT if game_dir() else None
+    if not path or not path.exists():
+        return False
+    n = style.GLYPHS_PER_ROW
+    size = n * GLYPH_CELL
+    font = ImageFont.truetype(str(path), round(GLYPH_CELL * .78))
+    alpha = Image.new('L', (size, size), 0)
+    d = ImageDraw.Draw(alpha)
+    top = font.getbbox('Hg')[1]
+    for k, ch in enumerate(style.GLYPHS):
+        x, y = (k % n) * GLYPH_CELL, (k // n) * GLYPH_CELL
+        width = font.getlength(ch)
+        d.text((x + (GLYPH_CELL - width) / 2, y + GLYPH_CELL * .06 - top), ch, fill=255, font=font)
+    Image.new('RGB', (size, size), (255, 255, 255)).save(r / 'glyphs.color.png')
+    alpha.convert('RGB').transpose(Image.FLIP_TOP_BOTTOM).save(r / 'glyphs_o.data.png')
+    return True
 
 
 def yard_art(r):
@@ -640,7 +1024,8 @@ def manifest_text():
                               'doubleSided': True,
                               'Stages': [{'baseColorMap': f'{base}/synth/sun.color.png', 'emissiveMap': f'{base}/synth/sun.color.png',
                                           'emissiveFactor': [1, 1, 1]}, {}, {}, {}]}}
-    return json.dumps(style.dds({'order': list(PACKS), 'labels': LABELS, 'fields': fields, 'warm': {p: warm_defs(p, fields[p]) for p in PACKS},
+    seen = set()
+    return json.dumps(style.dds({'order': list(PACKS), 'labels': LABELS, 'fields': fields, 'warm': {p: warm_defs(p, fields[p], seen) for p in PACKS},
                                  'environment': {p: environment(p) for p in PACKS}, 'extra': sun}))
 
 

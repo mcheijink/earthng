@@ -2,10 +2,27 @@
 surface kind, and a facade per building. No textures are shipped; all paths are BeamNG's
 /assets (resolved to their .dds). Kinds are the Mesh face groups; material = 'e2rf_' + kind."""
 import math
+import os
 import zlib
+import region_profile
 import nature
 import power as _power
 import fast_signals
+import retail
+
+# Scenery the fork added to the exporter; each is off unless its switch is set, so a pack comes out as
+# the upstream exporter makes it (the Lua side draws only what a pack holds):
+#   EARTHNG_POWER=1   overhead lines of the main grid, their towers and wind turbines (power.py)
+#   EARTHNG_NOISE=1   noise barriers as their own kind (a wall of its tagged height beside the carriageway);
+#                     off, a noise barrier is a fence or a wall as before
+#   EARTHNG_CAMERAS=1 speed cameras (signal nodes are kept either way)
+# EARTHNG_PROFILE=fork defaults all of them to on (region_profile.py); a variable set by hand wins.
+region_profile.apply_env()
+def _switch(name):
+    return os.environ.get(name, '0').strip().lower() not in ('', '0', 'off', 'no', 'false')
+
+
+POWER, NOISE, CAMERAS = _switch('EARTHNG_POWER'), _switch('EARTHNG_NOISE'), _switch('EARTHNG_CAMERAS')
 
 TEXTURES = {
     'asphalt': {
@@ -292,6 +309,37 @@ KINDS['chimney'] = ('hw_brick', [.42, .24, .20, 1], 'ROCK', 1.6, 'wall')
 # flat colours in a game without the maps: every house kind keeps its look's colour
 BUILDING_FALLBACK.update({k: None for k in (*HOUSE_WALLS, 'win_pvc', 'win_wood', 'door_house', 'chimney')})
 BUILDING_FALLBACK['plinth_brown'] = 'concrete'
+# Facade details (generator.lua BLD.details, options.experimentalDetail): galvanised downpipes
+# as a flat grey, air-conditioner boxes on the game's metal cladding
+KINDS['pipe'] = (None, [.50, .51, .52, 1], 'METAL', 1.0, 'wall')
+# Address plates (generator.lua BLD.addressPlate, options.experimentalDetail): a dark blue plate
+# and white letters cut from a glyph atlas (fast_art.glyph_art: Noto Sans Mono Bold, OFL, from the
+# game's own UI fonts), GLYPHS_PER_ROW to a row, row 0 at the top before the flip. The generator
+# keeps the same string (BLD.GLYPHS).
+GLYPHS = "0123456789/-.,'’№ ()АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯабвгґдеєжзиіїйклмнопрстуфхцчшщьюяЁЭЪЫёэъыABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+GLYPHS_PER_ROW = 16
+TEXTURES['glyphs'] = {'baseColorMap': f'{ART}/real/glyphs.color.png', 'opacityMap': f'{ART}/real/glyphs_o.data.png'}
+KINDS['glyphs'] = ('glyphs', [.96, .96, .94, 1], 'METAL', 1.0, 'wall')
+KINDS['plate'] = (None, [.08, .18, .40, 1], 'METAL', 1.0, 'wall')
+# a lift gate's red stripes (generator.lua BLD.liftGate); the white ones are the dish metal
+KINDS['paint_red'] = (None, [.72, .10, .08, 1], 'METAL', 1.0, 'wall')
+# a shop's sign board under its real name (generator.lua BLD.storeFront)
+KINDS['fascia'] = (None, [.11, .12, .13, 1], 'METAL', 1.0, 'wall')
+EXTRA['glyphs'] = {'alphaTest': True, 'alphaRef': 110, 'castShadows': False}
+# covers in the asphalt (generator.lua ROADS.covers): the Italy manhole sheet and the grid
+# drain, cut by their opacity like the lines; drawn only where the game has these maps
+TEXTURES['manhole'] = _maps('/assets/materials/baked_props/italy_ground_parts', 't_manhole_01_decal', 'b', 'nm', 'r', 'ao', 'o')
+TEXTURES['drain'] = _maps(f'{_DR}/detail/m_metal_grid_drain', 't_metal_grid_drain', 'b', 'nm', 'r', 'ao', 'o')
+KINDS['manhole'] = ('manhole', [.42, .41, .40, 1], 'METAL', 1.0, 'strip')
+KINDS['drain'] = ('drain', [.30, .29, .28, 1], 'METAL', 1.0, 'strip')
+TEXTURES['patch'] = _maps(f'{_DR}/asphalt/road_patches1', 't_asphalt_patchstrip', 'b', 'o')
+KINDS['patch'] = ('patch', [.17, .17, .18, 1], 'ASPHALT', 1.0, 'strip')
+for _k in ('manhole', 'drain', 'patch'):
+    EXTRA[_k] = {'alphaTest': True, 'alphaRef': 77, 'castShadows': False}
+    BUILDING_FALLBACK[_k] = None
+KINDS['ac_unit'] = ('cladding', [.84, .84, .82, 1], 'METAL', 1.0, 'wall')
+KINDS['dish'] = ('cladding', [.86, .86, .85, 1], 'METAL', 1.0, 'wall')
+BUILDING_FALLBACK['ac_unit'] = BUILDING_FALLBACK['dish'] = None
 FALLBACK.update(BUILDING_FALLBACK)
 # footpaths and fences (decoration, no collision)
 KINDS['footway'] = ('paving', [.50, .48, .46, 1], 'ASPHALT', 2.0, 'plan')
@@ -312,6 +360,19 @@ KINDS['turbine'] = (None, [.86, .87, .86, 1], 'METAL', 4.0, 'wall')
 # a tint over a white map (an sRGB factor: the colour itself over 255).
 TEXTURES['yard'] = {'baseColorMap': f'{ART}/real/yard.color.png'}
 KINDS['yard'] = ('yard', [.6, .6, .6, 1], 'METAL', 1.0, 'wall')
+TEXTURES['brand_sign'] = {'baseColorMap': f'{ART}/real/brand_sign.color.png'}
+KINDS['brand_sign'] = ('brand_sign', [1, 1, 1, 1], 'METAL', 1.0, 'wall')
+# photographs of real stores squared up into facades (fast_art.SHOP_PHOTOS)
+TEXTURES['brand_photo'] = {'baseColorMap': f'{ART}/real/brand_photo.color.png'}
+KINDS['brand_photo'] = ('brand_photo', [1, 1, 1, 1], 'ROCK', 1.0, 'wall')
+# shop fronts drawn at art build time (fast_storefront.py), by night their rooms glow
+TEXTURES['storefront'] = {'baseColorMap': f'{ART}/real/storefront.color.png'}
+KINDS['storefront'] = ('storefront', [1, 1, 1, 1], 'METAL', 1.0, 'wall')
+# a low-voltage line's wires (generator.lua BLD.powerLines): thin upright ribbons, seen from both sides
+KINDS['wire'] = (None, [.05, .05, .05, 1], 'METAL', 1.0, 'wall')
+EXTRA['wire'] = {'doubleSided': True, 'castShadows': False}
+# gilded domes (generator.lua BLD.dome)
+KINDS['roof_gold'] = (None, [.83, .66, .22, 1], 'METAL', 2.0, 'roof')
 TEXTURES['railing'] = {'baseColorMap': f'{ART}/real/railing.color.png', 'opacityMap': f'{ART}/real/railing_o.data.png'}
 RAILINGS = {'railing_blue': (52, 98, 150), 'railing_green': (46, 104, 70), 'railing_dark': (52, 54, 56)}
 for _k, _rgb in RAILINGS.items():
@@ -355,6 +416,7 @@ def _factor(srgb, mean):
 TINT.update({'roof_sheet': _factor((158, 158, 150), .677), 'roof_mtile_red': _factor((112, 38, 32), .355),
              'roof_mtile_brown': _factor((74, 52, 46), .355), 'roof_mtile_green': _factor((32, 72, 54), .355),
              'clad_metal': _factor((176, 182, 188), .677), 'plinth': _factor((130, 127, 120), .862),
+             'ac_unit': _factor((214, 214, 208), .677), 'dish': _factor((222, 222, 218), .677),
              'gable': _factor((150, 140, 125), .641)})
 # House walls: lime-washed white, ochre, the blue and green of village houses, a pink; aged
 # plaster as it is; red brick as it is; silicate brick off-white; beige siding; old dark wood as
@@ -380,7 +442,7 @@ for _name, _path in {
 # Macrocolour comes from mapped land use; fine grain uses existing tileable PBR.
 for _kind, _tex, _tint, _ground, _scale in (
     ('meadow', 'grass', [.72, .83, .48, 1], 'GRASS', 24),
-    ('farmland', 'dirt', [.68, .60, .36, 1], 'DIRT', 12),
+    ('farmland', 'dirt', [.68, .60, .36, 1], 'DIRT', 24),
     ('orchard', 'grass', [.59, .72, .38, 1], 'GRASS', 24),
     ('vineyard', 'dirt', [.70, .65, .46, 1], 'DIRT', 12),
     ('scrub', 'grass', [.57, .64, .37, 1], 'GRASS', 24),
@@ -421,6 +483,11 @@ PARKS = {'park', 'garden', 'recreation_ground', 'cemetery', 'village_green'}
 
 
 ISLANDS = {'area:highway': 'traffic_island', 'traffic_calming': 'island'}
+# Zones that keep their ground free (GENERATION_GAPS G03): each takes the cover that plants like
+# it. A sports ground is open, a school or hospital site a yard, allotments an orchard.
+FIELDS = {'pitch', 'track'}
+HARD_FIELDS = {'asphalt', 'concrete', 'tartan', 'rubber', 'acrylic', 'paving_stones', 'paved', 'clay', 'sand', 'dirt', 'gravel'}
+SITES = {'school', 'kindergarten', 'college', 'university', 'hospital', 'clinic'}
 
 
 def ground_kind(tags):
@@ -430,6 +497,12 @@ def ground_kind(tags):
         return 'island'
     if tags.get('leisure') == 'playground':
         return 'playground'           # a yard's sandpit and swings (generator.lua YARD.playground)
+    if tags.get('leisure') in FIELDS:
+        return 'paved' if tags.get('surface') in HARD_FIELDS else 'meadow'     # generator.lua VEG.fields
+    if tags.get('amenity') in SITES or tags.get('leisure') in ('sports_centre', 'stadium'):
+        return 'residential'
+    if tags.get('landuse') == 'allotments':
+        return 'orchard'
     if (tags.get('landuse') in PAVED or tags.get('amenity') == 'parking' or tags.get('place') == 'square'
             or tags.get('highway') == 'pedestrian' and tags.get('area') == 'yes'):
         return 'paved'                # a pedestrian area is a square to the generator
@@ -463,7 +536,7 @@ def line_kind(tags):
     if tags.get('natural') == 'tree_row':
         return 'tree_row'
     # a noise barrier is drawn beside the carriageway at its own height (generator: noise.lua)
-    if tags.get('barrier') == 'noise_barrier' or tags.get('wall') == 'noise_barrier':
+    if NOISE and (tags.get('barrier') == 'noise_barrier' or tags.get('wall') == 'noise_barrier'):
         return 'noise_barrier'
     # retaining and city walls are walls too (drawn by nothing before: generator fence() takes them as concrete)
     if tags.get('barrier') in ('fence', 'wall', 'retaining_wall', 'city_wall'):
@@ -472,8 +545,11 @@ def line_kind(tags):
         return 'guard_rail'
     if tags.get('barrier') == 'hedge':
         return 'hedge'
-    if _power.is_line(tags):
-        return 'power_line'           # overhead lines (power.py; power=minor_line stays out)
+    if POWER and _power.is_line(tags):
+        return 'power_line'           # overhead lines (power.py; power=minor_line below is upstream's street wire)
+    # a street's own wires. The main grid (power=line, its towers, substations) stays off the map
+    if tags.get('power') == 'minor_line':
+        return 'power'
     return None
 
 
@@ -484,16 +560,22 @@ UNMARKED = ('no', 'none', 'unmarked')
 
 
 # Every key point_kind reads: the exporter hands Python only nodes with one of them.
-POINT_KEYS = ('highway', 'natural', 'public_transport', 'entrance', 'leisure', 'power')
+POINT_KEYS = ('highway', 'traffic_sign', 'natural', 'public_transport', 'entrance', 'leisure', 'power', 'amenity', 'barrier', 'shop', 'man_made', 'vending', 'brand', 'operator', 'name',
+              'brand:uk', 'brand:en', 'name:uk', 'name:en', 'name:ru', 'operator:uk',
+              'operator:en', 'operator:ru', 'brand:wikidata', 'operator:wikidata')
 
 
 def point_kind(tags):
-    """'stop', 'signal', 'speed_camera' or one of ROAD_DETAILS for an OSM node, else None."""
+    """'stop', 'signal', 'speed_camera', 'traffic_sign' or one of ROAD_DETAILS for an OSM node, else None."""
+    retail_kind = retail.kind(tags)
+    # a pack with the storefront experiment keeps its shops as POIs with their real names
+    if retail_kind and not (POIS and retail_kind == 'service' and poi(tags)):
+        return retail_kind
     highway = tags.get('highway')
     # a line's towers (their facts ride on the line, power.py) and wind turbines
-    if _power.is_tower(tags):
+    if POWER and _power.is_tower(tags):
         return 'power_tower'
-    if _power.is_turbine(tags):
+    if POWER and _power.is_turbine(tags):
         return 'wind_turbine'
     if tags.get('natural') == 'tree':
         return 'tree'
@@ -513,8 +595,13 @@ def point_kind(tags):
     # traffic signals and speed cameras: the runtime stands them on stock poles (signals.lua); the
     # bare trafficlight_city1.dae head lay at the curb (vis-13-signals)
     signal = fast_signals.point_kind(tags)
+    if signal == fast_signals.CAMERA and not CAMERAS:
+        signal = None
     if signal:
         return signal
+    # Retain the surveyed fact even when an older runtime does not draw it.
+    if tags.get('traffic_sign'):
+        return 'traffic_sign'
     if tags.get('highway') == 'bus_stop' or (tags.get('public_transport') == 'platform' and
                                               any(tags.get(k) == 'yes' for k in ('bus', 'trolleybus', 'tram'))):
         return 'stop'
@@ -524,10 +611,51 @@ def point_kind(tags):
         return 'entrance'
     if tags.get('leisure') == 'playground':
         return 'playground'
+    # street furniture where it stands (generator.lua: the points' loop, BLD.openGates)
+    if tags.get('amenity') == 'bench':
+        return 'bench'
+    if tags.get('amenity') == 'waste_basket':
+        return 'waste_basket'
+    if tags.get('barrier') == 'lift_gate':
+        return 'lift_gate'
+    if tags.get('barrier') in ('gate', 'swing_gate', 'sliding_gate', 'wicket_gate'):
+        return 'gate'
+    if POIS and poi(tags):
+        return 'poi'
+    if POIS and tags.get('entrance') in DOORS:
+        return 'door'
     return None
 
 
 ENTRANCES = ('staircase', 'main', 'home')
+
+# Commercial OSM nodes kept as facts (kind 'poi') for the storefront experiment: a shop, office
+# or craft, or an amenity from this list (amenity alone is a bench or a school as often as a
+# shop). Off unless EARTHNG_POIS=1 at build time: packs built without it are unchanged, and a
+# runtime that does not know the kind skips it. All the node's tags travel with it.
+POIS = os.environ.get('EARTHNG_POIS') == '1'
+POI_KEYS = ('shop', 'office', 'craft', 'amenity', 'entrance', 'barrier')
+POI_AMENITY = frozenset(('cafe', 'restaurant', 'fast_food', 'bar', 'pub', 'ice_cream', 'bank',
+                         'bureau_de_change', 'money_transfer', 'payment_centre', 'pharmacy',
+                         'post_office', 'dentist', 'doctors', 'clinic', 'veterinary', 'internet_cafe'))
+POI_NOT = ('no', 'vacant', 'closed', 'disused', 'abandoned')
+# Other mapped doors on a building's outline, with POIS: the evidence of which wall a shop opens
+# on (a staircase, main or home door is an 'entrance' already)
+DOORS = ('yes', 'shop', 'service', 'secondary')
+
+
+def poi(tags):
+    """True for a commercial node as defined above."""
+    for key in ('shop', 'office', 'craft'):
+        value = tags.get(key)
+        if value and value not in POI_NOT:
+            return True
+    return tags.get('amenity') in POI_AMENITY
+
+
+def point_keys():
+    """Keys whose nodes the exporter hands to point_kind."""
+    return POINT_KEYS + (POI_KEYS if POIS else ())
 
 
 BUS_STOP = '/art/shapes/objects/s_busstop_jri.dae'
@@ -584,7 +712,7 @@ for _k, _ground in BIOME_GROUND.items():
                                               'snow': (232, 236, 242), 'snow_edge': (206, 212, 204)}[_k]), 1],
                  _ground, _photo.GROUND_M, 'plan')
 KINDS['glacier'] = KINDS['glacier'][:3] + (_photo.GROUND_M,) + KINDS['glacier'][4:]
-PHOTO_GROUND = ('ground', 'park', 'forest', *BIOME_GROUND, 'glacier')
+PHOTO_GROUND = ('ground', 'park', 'forest', *BIOME_GROUND, 'glacier', 'farmland')
 
 # Lawns, parks and meadows are soil with a fine relief, not the flat lawn photo. The mesh UV
 # repeats every COVER_SCALE metre (generator.lua, 24). The detail maps tile every 2 m, the same
@@ -626,7 +754,7 @@ def real_stage(kind):
         if _photo.PHOTO_WALLS[w][0] == 'curtain':
             # glass that mirrors the sky: smooth and part metal (BeamNG PBR)
             stage.update(roughnessFactor=.12, metallicFactor=.55)
-        if _photo.PHOTO_WALLS[w][0] in ('brick', 'end_brick'):
+        if _photo.PHOTO_WALLS[w][0] in ('brick', 'end_brick', 'facade', 'end_facade'):
             stage['normalMap'] = f'{ART}/real/{w}.normal.png'
         return stage
     if kind.startswith('wall_'):
@@ -657,6 +785,74 @@ def material(kind):
                               'groundType': ground, 'doubleSided': EXTRA.get(kind, {}).get('doubleSided', False),
                               'Stages': [dict(TEXTURES[old]) if old else {'diffuseColor': colour}, {}, {}, {}]}
     return out
+
+
+# Plain sheets of CC0 photos (fast_facade.SHEETS), made at art build and shipped with the planet:
+# a roughness for the whole sheet, no map, to keep them small. The walls of houses go with the
+# game's own (HOUSE_WALLS; generator.lua BLD.regions, BLD.wallScale), the roofs with ROOFS
+# (BLD.regions, BLD.repeats).
+import fast_facade as _facade
+_ROUGH = {'sh_tin_rust': (.72, .4), 'sh_tin_zinc': (.55, .6), 'sh_profile': (.5, .55), 'sh_roof_tin': (.72, .4),
+          'sh_roof_zinc': (.55, .6), 'sh_roof_profile': (.5, .55), 'sh_roof_slate': (.6, 0), 'sh_setts': (.8, 0)}
+for _s in _facade.SHEETS:
+    _rough, _metal = _ROUGH.get(_s, (.92, 0))
+    TEXTURES[_s] = {'baseColorMap': f'{ART}/real/{_s}.color.png', 'normalMap': f'{ART}/real/{_s}.normal.png',
+                    'roughnessFactor': _rough, 'metallicFactor': _metal}
+_G = _facade.GREY_MEAN
+SHEET_WALLS = {   # kind: (sheet, colour of the wall, metres a repeat, linear mean of the sheet when tinted)
+    'hw_dash': ('sh_dash', (176, 170, 156), 1.5, .31), 'hw_dash_cream': ('sh_dash', (204, 188, 150), 1.5, .31),
+    'hw_flaking': ('sh_flaking', (168, 166, 154), 2.5, None), 'hw_flaking_yellow': ('sh_flaking_yellow', (190, 166, 96), 2.5, None),
+    'hw_render_white': ('sh_render', (232, 228, 218), 2.5, .67), 'hw_render_ochre': ('sh_render', (208, 158, 100), 2.5, .67),
+    'hw_render_terracotta': ('sh_render', (184, 112, 84), 2.5, .67), 'hw_render_sand': ('sh_render', (214, 192, 150), 2.5, .67),
+    'hw_render_teal': ('sh_render', (106, 164, 164), 2.5, .67), 'hw_render_pink': ('sh_render', (214, 148, 136), 2.5, .67),
+    'hw_adobe': ('sh_adobe', (150, 110, 74), 2.0, None), 'hw_block': ('sh_block', (150, 142, 128), 3.0, None),
+    'hw_ashlar': ('sh_ashlar', (190, 180, 160), 2.0, None), 'hw_sandstone': ('sh_sandstone', (186, 164, 130), 3.0, None),
+    'hw_fieldstone': ('sh_fieldstone', (130, 120, 100), 3.0, None),
+    'hw_clapboard_white': ('sh_clapboard', (232, 230, 222), 1.2, _G), 'hw_clapboard_blue': ('sh_clapboard', (150, 176, 194), 1.2, _G),
+    'hw_clapboard_yellow': ('sh_clapboard', (222, 200, 140), 1.2, _G),
+    'hw_vinyl_white': ('sh_vinyl', (226, 226, 216), 2.0, _G), 'hw_vinyl_grey': ('sh_vinyl', (168, 172, 170), 2.0, _G),
+    'hw_vinyl_cream': ('sh_vinyl', (218, 204, 170), 2.0, _G),
+    'hw_falu': ('sh_boards_red', (130, 50, 40), 2.0, None), 'hw_stock': ('sh_stock', (176, 136, 90), 2.0, None),
+    'hw_brick_dark': ('sh_brick_dark', (84, 66, 58), 1.9, None), 'hw_clinker': ('sh_clinker', (120, 66, 48), 2.0, None),
+    'hw_tin': ('sh_tin_rust', (120, 60, 36), 2.0, None), 'hw_zinc': ('sh_tin_zinc', (120, 118, 114), 1.8, None),
+}
+for _k, (_tex, _rgb, _m, _mean) in SHEET_WALLS.items():
+    KINDS[_k] = (_tex, [_c / 255 for _c in _rgb] + [1], 'ROCK', _m, 'wall')
+    if _mean:
+        TINT[_k] = _factor(_rgb, _mean)
+SHEET_ROOFS = {   # kind: (sheet, colour, metres a repeat, linear mean of the sheet when tinted)
+    'roof_clay': ('sh_roof_clay', (150, 80, 56), 2.0, None), 'roof_pantile': ('sh_roof_pantile', (168, 96, 70), 2.0, None),
+    'roof_concrete': ('sh_roof_concrete', (58, 58, 64), 2.0, None), 'roof_slate': ('sh_roof_slate', (92, 96, 100), 3.0, None),
+    'roof_shingle': ('sh_roof_shingle', (96, 96, 96), 8.0, None), 'roof_thatch': ('sh_roof_thatch', (120, 100, 76), 2.0, None),
+    'roof_tin': ('sh_roof_tin', (120, 60, 36), 2.0, None), 'roof_zinc': ('sh_roof_zinc', (124, 122, 118), 1.8, None),
+    'roof_prof_red': ('sh_roof_profile', (112, 38, 32), 2.0, _G), 'roof_prof_green': ('sh_roof_profile', (40, 84, 62), 2.0, _G),
+    'roof_prof_brown': ('sh_roof_profile', (74, 52, 46), 2.0, _G), 'roof_prof_grey': ('sh_roof_profile', (120, 124, 124), 2.0, _G),
+}
+for _k, (_tex, _rgb, _m, _mean) in SHEET_ROOFS.items():
+    KINDS[_k] = (_tex, [_c / 255 for _c in _rgb] + [1], 'METAL' if _tex in ('sh_roof_tin', 'sh_roof_zinc', 'sh_roof_profile') else 'ROCK', _m, 'roof')
+    if _mean:
+        TINT[_k] = _factor(_rgb, _mean)
+    EXTRA[_k] = {'doubleSided': True}
+ROOFS += tuple(SHEET_ROOFS)
+# Fences (generator.lua BLD.fenceKind): profiled sheet in its three usual paints, brick and rubble
+# walls, a fence of upright boards with its gaps cut by opacity
+TEXTURES['fence_boards'] = {'baseColorMap': f'{ART}/real/fence_boards.color.png', 'opacityMap': f'{ART}/real/fence_boards_o.data.png',
+                            'roughnessFactor': .92}
+FENCE_BOARDS_MIP_REF = 80
+for _k, _rgb in (('fence_prof_green', (46, 96, 70)), ('fence_prof_brown', (92, 62, 50)), ('fence_prof_grey', (140, 144, 144))):
+    KINDS[_k] = ('sh_profile', [_c / 255 for _c in _rgb] + [1], 'METAL', 2.0, 'wall')
+    TINT[_k] = _factor(_rgb, _G)
+    EXTRA[_k] = {'doubleSided': True}
+KINDS['fence_brick'] = ('sh_brick_red', [.5, .3, .25, 1], 'ROCK', 2.0, 'wall')
+KINDS['fence_stone'] = ('sh_fieldstone', [.5, .46, .4, 1], 'ROCK', 3.0, 'wall')
+KINDS['fence_boards'] = ('fence_boards', [.42, .34, .26, 1], 'WOOD', 2.0, 'wall')
+EXTRA['fence_boards'] = {'alphaTest': True, 'alphaRef': 60, 'doubleSided': True}
+for _k in ('fence_brick', 'fence_stone'):
+    EXTRA[_k] = {'doubleSided': True}
+# a street of granite setts: what the tyres feel stays asphalt, as the worn road it replaces
+KINDS['road_sett'] = ('sh_setts', [.45, .44, .42, 1], 'ASPHALT', 3.0, 'plan')
+SHEET_KINDS = (*SHEET_WALLS, *SHEET_ROOFS, 'fence_prof_green', 'fence_prof_brown', 'fence_prof_grey', 'fence_brick', 'fence_stone',
+               'fence_boards', 'road_sett')
 
 
 def dds(obj):
